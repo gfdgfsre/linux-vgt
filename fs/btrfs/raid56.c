@@ -858,17 +858,10 @@ static void __free_raid_bio(struct btrfs_raid_bio *rbio)
 	kfree(rbio);
 }
 
-static void rbio_endio_bio_list(struct bio *cur, blk_status_t err)
+static void free_raid_bio(struct btrfs_raid_bio *rbio)
 {
-	struct bio *next;
-
-	while (cur) {
-		next = cur->bi_next;
-		cur->bi_next = NULL;
-		cur->bi_status = err;
-		bio_endio(cur);
-		cur = next;
-	}
+	unlock_stripe(rbio);
+	__free_raid_bio(rbio);
 }
 
 /*
@@ -878,26 +871,20 @@ static void rbio_endio_bio_list(struct bio *cur, blk_status_t err)
 static void rbio_orig_end_io(struct btrfs_raid_bio *rbio, blk_status_t err)
 {
 	struct bio *cur = bio_list_get(&rbio->bio_list);
-	struct bio *extra;
+	struct bio *next;
 
 	if (rbio->generic_bio_cnt)
 		btrfs_bio_counter_sub(rbio->fs_info, rbio->generic_bio_cnt);
 
-	/*
-	 * At this moment, rbio->bio_list is empty, however since rbio does not
-	 * always have RBIO_RMW_LOCKED_BIT set and rbio is still linked on the
-	 * hash list, rbio may be merged with others so that rbio->bio_list
-	 * becomes non-empty.
-	 * Once unlock_stripe() is done, rbio->bio_list will not be updated any
-	 * more and we can call bio_endio() on all queued bios.
-	 */
-	unlock_stripe(rbio);
-	extra = bio_list_get(&rbio->bio_list);
-	__free_raid_bio(rbio);
+	free_raid_bio(rbio);
 
-	rbio_endio_bio_list(cur, err);
-	if (extra)
-		rbio_endio_bio_list(extra, err);
+	while (cur) {
+		next = cur->bi_next;
+		cur->bi_next = NULL;
+		cur->bi_status = err;
+		bio_endio(cur);
+		cur = next;
+	}
 }
 
 /*
@@ -1361,7 +1348,6 @@ static int find_bio_stripe(struct btrfs_raid_bio *rbio,
 		stripe_start = stripe->physical;
 		if (physical >= stripe_start &&
 		    physical < stripe_start + rbio->stripe_len &&
-		    stripe->dev->bdev &&
 		    bio->bi_disk == stripe->dev->bdev->bd_disk &&
 		    bio->bi_partno == stripe->dev->bdev->bd_partno) {
 			return i;
@@ -1446,13 +1432,14 @@ static int fail_bio_stripe(struct btrfs_raid_bio *rbio,
  */
 static void set_bio_pages_uptodate(struct bio *bio)
 {
-	struct bio_vec *bvec;
-	int i;
+	struct bio_vec bvec;
+	struct bvec_iter iter;
 
-	ASSERT(!bio_flagged(bio, BIO_CLONED));
+	if (bio_flagged(bio, BIO_CLONED))
+		bio->bi_iter = btrfs_io_bio(bio)->iter;
 
-	bio_for_each_segment_all(bvec, bio, i)
-		SetPageUptodate(bvec->bv_page);
+	bio_for_each_segment(bvec, bio, iter)
+		SetPageUptodate(bvec.bv_page);
 }
 
 /*
@@ -2172,21 +2159,11 @@ int raid56_parity_recover(struct btrfs_fs_info *fs_info, struct bio *bio,
 	}
 
 	/*
-	 * Loop retry:
-	 * for 'mirror == 2', reconstruct from all other stripes.
-	 * for 'mirror_num > 2', select a stripe to fail on every retry.
+	 * reconstruct from the q stripe if they are
+	 * asking for mirror 3
 	 */
-	if (mirror_num > 2) {
-		/*
-		 * 'mirror == 3' is to fail the p stripe and
-		 * reconstruct from the q stripe.  'mirror > 3' is to
-		 * fail a data stripe and reconstruct from p+q stripe.
-		 */
-		rbio->failb = rbio->real_stripes - (mirror_num - 1);
-		ASSERT(rbio->failb > 0);
-		if (rbio->failb <= rbio->faila)
-			rbio->failb--;
-	}
+	if (mirror_num == 3)
+		rbio->failb = rbio->real_stripes - 2;
 
 	ret = lock_stripe_add(rbio);
 
@@ -2414,9 +2391,8 @@ static noinline void finish_parity_scrub(struct btrfs_raid_bio *rbio,
 			bitmap_clear(rbio->dbitmap, pagenr, 1);
 		kunmap(p);
 
-		for (stripe = 0; stripe < nr_data; stripe++)
+		for (stripe = 0; stripe < rbio->real_stripes; stripe++)
 			kunmap(page_in_rbio(rbio, stripe, pagenr, 0));
-		kunmap(p_page);
 	}
 
 	__free_page(p_page);

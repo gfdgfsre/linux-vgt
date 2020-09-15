@@ -777,16 +777,13 @@ static ssize_t tap_put_user(struct tap_queue *q,
 	int total;
 
 	if (q->flags & IFF_VNET_HDR) {
-		int vlan_hlen = skb_vlan_tag_present(skb) ? VLAN_HLEN : 0;
 		struct virtio_net_hdr vnet_hdr;
-
 		vnet_hdr_len = READ_ONCE(q->vnet_hdr_sz);
 		if (iov_iter_count(iter) < vnet_hdr_len)
 			return -EINVAL;
 
 		if (virtio_net_hdr_from_skb(skb, &vnet_hdr,
-					    tap_is_little_endian(q), true,
-					    vlan_hlen))
+					    tap_is_little_endian(q), true))
 			BUG();
 
 		if (copy_to_iter(&vnet_hdr, sizeof(vnet_hdr), iter) !=
@@ -832,11 +829,8 @@ static ssize_t tap_do_read(struct tap_queue *q,
 	DEFINE_WAIT(wait);
 	ssize_t ret = 0;
 
-	if (!iov_iter_count(to)) {
-		if (skb)
-			kfree_skb(skb);
+	if (!iov_iter_count(to))
 		return 0;
-	}
 
 	if (skb)
 		goto put;
@@ -1083,7 +1077,7 @@ static long tap_ioctl(struct file *file, unsigned int cmd,
 	case TUNSETOFFLOAD:
 		/* let the user check for future flags */
 		if (arg & ~(TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6 |
-			    TUN_F_TSO_ECN | TUN_F_UFO))
+			    TUN_F_TSO_ECN))
 			return -EINVAL;
 
 		rtnl_lock();
@@ -1160,14 +1154,11 @@ static int tap_recvmsg(struct socket *sock, struct msghdr *m,
 		       size_t total_len, int flags)
 {
 	struct tap_queue *q = container_of(sock, struct tap_queue, sock);
-	struct sk_buff *skb = m->msg_control;
 	int ret;
-	if (flags & ~(MSG_DONTWAIT|MSG_TRUNC)) {
-		if (skb)
-			kfree_skb(skb);
+	if (flags & ~(MSG_DONTWAIT|MSG_TRUNC))
 		return -EINVAL;
-	}
-	ret = tap_do_read(q, &m->msg_iter, flags & MSG_DONTWAIT, skb);
+	ret = tap_do_read(q, &m->msg_iter, flags & MSG_DONTWAIT,
+			  m->msg_control);
 	if (ret > total_len) {
 		m->msg_flags |= MSG_TRUNC;
 		ret = flags & MSG_TRUNC ? ret : total_len;

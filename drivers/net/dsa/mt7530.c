@@ -549,7 +549,7 @@ mt7530_mib_reset(struct dsa_switch *ds)
 static void
 mt7530_port_set_status(struct mt7530_priv *priv, int port, int enable)
 {
-	u32 mask = PMCR_TX_EN | PMCR_RX_EN | PMCR_FORCE_LNK;
+	u32 mask = PMCR_TX_EN | PMCR_RX_EN;
 
 	if (enable)
 		mt7530_set(priv, MT7530_PMCR_P(port), mask);
@@ -1122,7 +1122,6 @@ static const struct of_device_id mt7530_of_match[] = {
 	{ .compatible = "mediatek,mt7530" },
 	{ /* sentinel */ },
 };
-MODULE_DEVICE_TABLE(of, mt7530_of_match);
 
 static struct mdio_driver mt7530_mdio_driver = {
 	.probe  = mt7530_probe,

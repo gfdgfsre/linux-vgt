@@ -348,7 +348,7 @@
 
 #define DTE_GCR3_VAL_A(x)	(((x) >> 12) & 0x00007ULL)
 #define DTE_GCR3_VAL_B(x)	(((x) >> 15) & 0x0ffffULL)
-#define DTE_GCR3_VAL_C(x)	(((x) >> 31) & 0x1fffffULL)
+#define DTE_GCR3_VAL_C(x)	(((x) >> 31) & 0xfffffULL)
 
 #define DTE_GCR3_INDEX_A	0
 #define DTE_GCR3_INDEX_B	1
@@ -368,8 +368,6 @@
 #define IOMMU_PROT_MASK 0x03
 #define IOMMU_PROT_IR 0x01
 #define IOMMU_PROT_IW 0x02
-
-#define IOMMU_UNITY_MAP_FLAG_EXCL_RANGE	(1 << 2)
 
 /* IOMMU capabilities */
 #define IOMMU_CAP_IOTLB   24
@@ -408,7 +406,7 @@ extern bool amd_iommu_iotlb_sup;
 #define IRQ_TABLE_ALIGNMENT	128
 
 struct irq_remap_table {
-	raw_spinlock_t lock;
+	spinlock_t lock;
 	unsigned min_index;
 	u32 *table;
 };
@@ -490,7 +488,7 @@ struct amd_iommu {
 	int index;
 
 	/* locks the accesses to the hardware */
-	raw_spinlock_t lock;
+	spinlock_t lock;
 
 	/* Pointer to PCI device of this IOMMU */
 	struct pci_dev *dev;
@@ -627,7 +625,7 @@ struct devid_map {
  */
 struct iommu_dev_data {
 	struct list_head list;		  /* For domain->dev_list */
-	struct llist_node dev_data_list;  /* For global dev_data_list */
+	struct list_head dev_data_list;	  /* For global dev_data_list */
 	struct protection_domain *domain; /* Domain the device is bound to */
 	u16 devid;			  /* PCI Device ID */
 	u16 alias;			  /* Alias Device ID */

@@ -694,8 +694,10 @@ static void intel_fbdev_initial_config(void *data, async_cookie_t cookie)
 
 	/* Due to peculiar init order wrt to hpd handling this is separate. */
 	if (drm_fb_helper_initial_config(&ifbdev->helper,
-					 ifbdev->preferred_bpp))
+					 ifbdev->preferred_bpp)) {
 		intel_fbdev_unregister(to_i915(ifbdev->helper.dev));
+		intel_fbdev_fini(to_i915(ifbdev->helper.dev));
+	}
 }
 
 void intel_fbdev_initial_config_async(struct drm_device *dev)
@@ -795,11 +797,7 @@ void intel_fbdev_output_poll_changed(struct drm_device *dev)
 {
 	struct intel_fbdev *ifbdev = to_i915(dev)->fbdev;
 
-	if (!ifbdev)
-		return;
-
-	intel_fbdev_sync(ifbdev);
-	if (ifbdev->vma)
+	if (ifbdev)
 		drm_fb_helper_hotplug_event(&ifbdev->helper);
 }
 

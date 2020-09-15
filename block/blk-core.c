@@ -116,9 +116,6 @@ void blk_rq_init(struct request_queue *q, struct request *rq)
 
 	INIT_LIST_HEAD(&rq->queuelist);
 	INIT_LIST_HEAD(&rq->timeout_list);
-#ifdef CONFIG_PREEMPT_RT_FULL
-	INIT_WORK(&rq->work, __blk_mq_complete_request_remote_work);
-#endif
 	rq->cpu = -1;
 	rq->q = q;
 	rq->__sector = (sector_t) -1;
@@ -283,7 +280,7 @@ EXPORT_SYMBOL(blk_start_queue_async);
 void blk_start_queue(struct request_queue *q)
 {
 	lockdep_assert_held(q->queue_lock);
-	WARN_ON_NONRT(!in_interrupt() && !irqs_disabled());
+	WARN_ON(!in_interrupt() && !irqs_disabled());
 	WARN_ON_ONCE(q->mq_ops);
 
 	queue_flag_clear(QUEUE_FLAG_STOPPED, q);
@@ -336,7 +333,6 @@ EXPORT_SYMBOL(blk_stop_queue);
 void blk_sync_queue(struct request_queue *q)
 {
 	del_timer_sync(&q->timeout);
-	cancel_work_sync(&q->timeout_work);
 
 	if (q->mq_ops) {
 		struct blk_mq_hw_ctx *hctx;
@@ -533,13 +529,6 @@ static void __blk_drain_queue(struct request_queue *q, bool drain_all)
 	}
 }
 
-void blk_drain_queue(struct request_queue *q)
-{
-	spin_lock_irq(q->queue_lock);
-	__blk_drain_queue(q, true);
-	spin_unlock_irq(q->queue_lock);
-}
-
 /**
  * blk_queue_bypass_start - enter queue bypass mode
  * @q: queue of interest
@@ -615,8 +604,8 @@ void blk_set_queue_dying(struct request_queue *q)
 		spin_lock_irq(q->queue_lock);
 		blk_queue_for_each_rl(rl, q) {
 			if (rl->rq_pool) {
-				wake_up_all(&rl->wait[BLK_RW_SYNC]);
-				wake_up_all(&rl->wait[BLK_RW_ASYNC]);
+				wake_up(&rl->wait[BLK_RW_SYNC]);
+				wake_up(&rl->wait[BLK_RW_ASYNC]);
 			}
 		}
 		spin_unlock_irq(q->queue_lock);
@@ -664,20 +653,10 @@ void blk_cleanup_queue(struct request_queue *q)
 	 */
 	blk_freeze_queue(q);
 	spin_lock_irq(lock);
+	if (!q->mq_ops)
+		__blk_drain_queue(q, true);
 	queue_flag_set(QUEUE_FLAG_DEAD, q);
 	spin_unlock_irq(lock);
-
-	/*
-	 * make sure all in-progress dispatch are completed because
-	 * blk_freeze_queue() can only complete all requests, and
-	 * dispatch may still be in-progress since we dispatch requests
-	 * from more than one contexts.
-	 *
-	 * We rely on driver to deal with the race in case that queue
-	 * initialization isn't done.
-	 */
-	if (q->mq_ops && blk_queue_init_done(q))
-		blk_mq_quiesce_queue(q);
 
 	/* for synchronous bio-based driver finish in-flight integrity i/o */
 	blk_flush_integrity();
@@ -784,6 +763,7 @@ EXPORT_SYMBOL(blk_alloc_queue);
 int blk_queue_enter(struct request_queue *q, bool nowait)
 {
 	while (true) {
+		int ret;
 
 		if (percpu_ref_tryget_live(&q->q_usage_counter))
 			return 0;
@@ -800,11 +780,13 @@ int blk_queue_enter(struct request_queue *q, bool nowait)
 		 */
 		smp_rmb();
 
-		wait_event(q->mq_freeze_wq,
-			   !atomic_read(&q->mq_freeze_depth) ||
-			   blk_queue_dying(q));
+		ret = wait_event_interruptible(q->mq_freeze_wq,
+				!atomic_read(&q->mq_freeze_depth) ||
+				blk_queue_dying(q));
 		if (blk_queue_dying(q))
 			return -ENODEV;
+		if (ret)
+			return ret;
 	}
 }
 
@@ -813,21 +795,12 @@ void blk_queue_exit(struct request_queue *q)
 	percpu_ref_put(&q->q_usage_counter);
 }
 
-static void blk_queue_usage_counter_release_swork(struct swork_event *sev)
-{
-	struct request_queue *q =
-		container_of(sev, struct request_queue, mq_pcpu_wake);
-
-	wake_up_all(&q->mq_freeze_wq);
-}
-
 static void blk_queue_usage_counter_release(struct percpu_ref *ref)
 {
 	struct request_queue *q =
 		container_of(ref, struct request_queue, q_usage_counter);
 
-	if (wq_has_sleeper(&q->mq_freeze_wq))
-		swork_queue(&q->mq_pcpu_wake);
+	wake_up_all(&q->mq_freeze_wq);
 }
 
 static void blk_rq_timed_out_timer(unsigned long data)
@@ -871,7 +844,6 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 	setup_timer(&q->backing_dev_info->laptop_mode_wb_timer,
 		    laptop_mode_timer_fn, (unsigned long) q);
 	setup_timer(&q->timeout, blk_rq_timed_out_timer, (unsigned long) q);
-	INIT_WORK(&q->timeout_work, NULL);
 	INIT_LIST_HEAD(&q->queue_head);
 	INIT_LIST_HEAD(&q->timeout_list);
 	INIT_LIST_HEAD(&q->icq_list);
@@ -904,7 +876,6 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 	__set_bit(QUEUE_FLAG_BYPASS, &q->queue_flags);
 
 	init_waitqueue_head(&q->mq_freeze_wq);
-	INIT_SWORK(&q->mq_pcpu_wake, blk_queue_usage_counter_release_swork);
 
 	/*
 	 * Init percpu_ref in atomic mode so that it's faster to shutdown.
@@ -1040,7 +1011,6 @@ out_exit_flush_rq:
 		q->exit_rq_fn(q, q->fq->flush_rq);
 out_free_flush_queue:
 	blk_free_flush_queue(q->fq);
-	q->fq = NULL;
 	return -ENOMEM;
 }
 EXPORT_SYMBOL(blk_init_allocated_queue);
@@ -2290,7 +2260,7 @@ blk_qc_t submit_bio(struct bio *bio)
 		unsigned int count;
 
 		if (unlikely(bio_op(bio) == REQ_OP_WRITE_SAME))
-			count = queue_logical_block_size(bio->bi_disk->queue) >> 9;
+			count = queue_logical_block_size(bio->bi_disk->queue);
 		else
 			count = bio_sectors(bio);
 
@@ -3078,8 +3048,6 @@ void blk_rq_bio_prep(struct request_queue *q, struct request *rq,
 {
 	if (bio_has_data(bio))
 		rq->nr_phys_segments = bio_phys_segments(q, bio);
-	else if (bio_op(bio) == REQ_OP_DISCARD)
-		rq->nr_phys_segments = 1;
 
 	rq->__data_len = bio->bi_iter.bi_size;
 	rq->bio = rq->biotail = bio;
@@ -3163,10 +3131,6 @@ static void __blk_rq_prep_clone(struct request *dst, struct request *src)
 	dst->cpu = src->cpu;
 	dst->__sector = blk_rq_pos(src);
 	dst->__data_len = blk_rq_bytes(src);
-	if (src->rq_flags & RQF_SPECIAL_PAYLOAD) {
-		dst->rq_flags |= RQF_SPECIAL_PAYLOAD;
-		dst->special_vec = src->special_vec;
-	}
 	dst->nr_phys_segments = src->nr_phys_segments;
 	dst->ioprio = src->ioprio;
 	dst->extra_len = src->extra_len;
@@ -3324,7 +3288,7 @@ static void queue_unplugged(struct request_queue *q, unsigned int depth,
 		blk_run_queue_async(q);
 	else
 		__blk_run_queue(q);
-	spin_unlock_irq(q->queue_lock);
+	spin_unlock(q->queue_lock);
 }
 
 static void flush_plug_callbacks(struct blk_plug *plug, bool from_schedule)
@@ -3372,6 +3336,7 @@ EXPORT_SYMBOL(blk_check_plugged);
 void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 {
 	struct request_queue *q;
+	unsigned long flags;
 	struct request *rq;
 	LIST_HEAD(list);
 	unsigned int depth;
@@ -3391,6 +3356,11 @@ void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 	q = NULL;
 	depth = 0;
 
+	/*
+	 * Save and disable interrupts here, to avoid doing it for every
+	 * queue lock we have to take.
+	 */
+	local_irq_save(flags);
 	while (!list_empty(&list)) {
 		rq = list_entry_rq(list.next);
 		list_del_init(&rq->queuelist);
@@ -3403,7 +3373,7 @@ void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 				queue_unplugged(q, depth, from_schedule);
 			q = rq->q;
 			depth = 0;
-			spin_lock_irq(q->queue_lock);
+			spin_lock(q->queue_lock);
 		}
 
 		/*
@@ -3430,6 +3400,8 @@ void blk_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 	 */
 	if (q)
 		queue_unplugged(q, depth, from_schedule);
+
+	local_irq_restore(flags);
 }
 
 void blk_finish_plug(struct blk_plug *plug)
@@ -3466,11 +3438,9 @@ EXPORT_SYMBOL(blk_finish_plug);
  */
 void blk_pm_runtime_init(struct request_queue *q, struct device *dev)
 {
-	/* Don't enable runtime PM for blk-mq until it is ready */
-	if (q->mq_ops) {
-		pm_runtime_disable(dev);
+	/* not support for RQF_PM and ->rpm_status in blk-mq yet */
+	if (q->mq_ops)
 		return;
-	}
 
 	q->dev = dev;
 	q->rpm_status = RPM_ACTIVE;
@@ -3640,8 +3610,6 @@ int __init blk_dev_init(void)
 					    WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
 	if (!kblockd_workqueue)
 		panic("Failed to create kblockd\n");
-
-	BUG_ON(swork_get());
 
 	request_cachep = kmem_cache_create("blkdev_requests",
 			sizeof(struct request), 0, SLAB_PANIC, NULL);

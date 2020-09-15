@@ -677,11 +677,8 @@ static int mwifiex_pcie_init_evt_ring(struct mwifiex_adapter *adapter)
 		skb_put(skb, MAX_EVENT_SIZE);
 
 		if (mwifiex_map_pci_memory(adapter, skb, MAX_EVENT_SIZE,
-					   PCI_DMA_FROMDEVICE)) {
-			kfree_skb(skb);
-			kfree(card->evtbd_ring_vbase);
+					   PCI_DMA_FROMDEVICE))
 			return -1;
-		}
 
 		buf_pa = MWIFIEX_SKB_DMA_ADDR(skb);
 
@@ -1022,10 +1019,8 @@ static int mwifiex_pcie_alloc_cmdrsp_buf(struct mwifiex_adapter *adapter)
 	}
 	skb_put(skb, MWIFIEX_UPLD_SIZE);
 	if (mwifiex_map_pci_memory(adapter, skb, MWIFIEX_UPLD_SIZE,
-				   PCI_DMA_FROMDEVICE)) {
-		kfree_skb(skb);
+				   PCI_DMA_FROMDEVICE))
 		return -1;
-	}
 
 	card->cmdrsp_buf = skb;
 
@@ -2786,10 +2781,7 @@ static void mwifiex_pcie_card_reset_work(struct mwifiex_adapter *adapter)
 {
 	struct pcie_service_card *card = adapter->card;
 
-	/* We can't afford to wait here; remove() might be waiting on us. If we
-	 * can't grab the device lock, maybe we'll get another chance later.
-	 */
-	pci_try_reset_function(card->dev);
+	pci_reset_function(card->dev);
 }
 
 static void mwifiex_pcie_work(struct work_struct *work)

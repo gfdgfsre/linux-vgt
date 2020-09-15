@@ -1201,7 +1201,7 @@ static void amdgpu_vm_invalidate_level(struct amdgpu_vm_pt *parent)
 int amdgpu_vm_update_directories(struct amdgpu_device *adev,
 				 struct amdgpu_vm *vm)
 {
-	int r = 0;
+	int r;
 
 	r = amdgpu_vm_update_level(adev, vm, &vm->root, 0);
 	if (r)
@@ -2586,8 +2586,7 @@ void amdgpu_vm_fini(struct amdgpu_device *adev, struct amdgpu_vm *vm)
 {
 	struct amdgpu_bo_va_mapping *mapping, *tmp;
 	bool prt_fini_needed = !!adev->gart.gart_funcs->set_prt;
-	struct amdgpu_bo *root;
-	int i, r;
+	int i;
 
 	amd_sched_entity_fini(vm->entity.sched, &vm->entity);
 
@@ -2610,15 +2609,7 @@ void amdgpu_vm_fini(struct amdgpu_device *adev, struct amdgpu_vm *vm)
 		amdgpu_vm_free_mapping(adev, vm, mapping, NULL);
 	}
 
-	root = amdgpu_bo_ref(vm->root.bo);
-	r = amdgpu_bo_reserve(root, true);
-	if (r) {
-		dev_err(adev->dev, "Leaking page tables because BO reservation failed\n");
-	} else {
-		amdgpu_vm_free_levels(&vm->root);
-		amdgpu_bo_unreserve(root);
-	}
-	amdgpu_bo_unref(&root);
+	amdgpu_vm_free_levels(&vm->root);
 	dma_fence_put(vm->last_dir_update);
 	for (i = 0; i < AMDGPU_MAX_VMHUBS; i++)
 		amdgpu_vm_free_reserved_vmid(adev, vm, i);

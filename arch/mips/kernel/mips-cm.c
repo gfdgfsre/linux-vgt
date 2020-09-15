@@ -123,9 +123,9 @@ static char *cm2_causes[32] = {
 	"COH_RD_ERR", "MMIO_WR_ERR", "MMIO_RD_ERR", "0x07",
 	"0x08", "0x09", "0x0a", "0x0b",
 	"0x0c", "0x0d", "0x0e", "0x0f",
-	"0x10", "INTVN_WR_ERR", "INTVN_RD_ERR", "0x13",
-	"0x14", "0x15", "0x16", "0x17",
-	"0x18", "0x19", "0x1a", "0x1b",
+	"0x10", "0x11", "0x12", "0x13",
+	"0x14", "0x15", "0x16", "INTVN_WR_ERR",
+	"INTVN_RD_ERR", "0x19", "0x1a", "0x1b",
 	"0x1c", "0x1d", "0x1e", "0x1f"
 };
 
@@ -292,6 +292,7 @@ void mips_cm_lock_other(unsigned int cluster, unsigned int core,
 				  *this_cpu_ptr(&cm_core_lock_flags));
 	} else {
 		WARN_ON(cluster != 0);
+		WARN_ON(vp != 0);
 		WARN_ON(block != CM_GCR_Cx_OTHER_BLOCK_LOCAL);
 
 		/*
@@ -457,5 +458,5 @@ void mips_cm_error_report(void)
 	}
 
 	/* reprime cause register */
-	write_gcr_error_cause(cm_error);
+	write_gcr_error_cause(0);
 }

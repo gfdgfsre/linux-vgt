@@ -141,6 +141,10 @@
 	status = "okay";
 };
 
+&sata {
+	status = "okay";
+};
+
 &qspi {
 	bspi-sel = <0>;
 	flash: m25p80@0 {

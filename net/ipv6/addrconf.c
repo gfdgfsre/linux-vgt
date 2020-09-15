@@ -184,8 +184,7 @@ static struct rt6_info *addrconf_get_prefix_route(const struct in6_addr *pfx,
 
 static void addrconf_dad_start(struct inet6_ifaddr *ifp);
 static void addrconf_dad_work(struct work_struct *w);
-static void addrconf_dad_completed(struct inet6_ifaddr *ifp, bool bump_id,
-				   bool send_na);
+static void addrconf_dad_completed(struct inet6_ifaddr *ifp, bool bump_id);
 static void addrconf_dad_run(struct inet6_dev *idev);
 static void addrconf_rs_timer(unsigned long data);
 static void __ipv6_ifa_notify(int event, struct inet6_ifaddr *ifa);
@@ -232,7 +231,7 @@ static struct ipv6_devconf ipv6_devconf __read_mostly = {
 	.proxy_ndp		= 0,
 	.accept_source_route	= 0,	/* we do not accept RH0 by default. */
 	.disable_ipv6		= 0,
-	.accept_dad		= 0,
+	.accept_dad		= 1,
 	.suppress_frag_ndisc	= 1,
 	.accept_ra_mtu		= 1,
 	.stable_secret		= {
@@ -304,10 +303,10 @@ static struct ipv6_devconf ipv6_devconf_dflt __read_mostly = {
 	.disable_policy		= 0,
 };
 
-/* Check if link is ready: is it up and is a valid qdisc available */
-static inline bool addrconf_link_ready(const struct net_device *dev)
+/* Check if a valid qdisc is available */
+static inline bool addrconf_qdisc_ok(const struct net_device *dev)
 {
-	return netif_oper_up(dev) && !qdisc_tx_is_noop(dev);
+	return !qdisc_tx_is_noop(dev);
 }
 
 static void addrconf_del_rs_timer(struct inet6_dev *idev)
@@ -452,7 +451,7 @@ static struct inet6_dev *ipv6_add_dev(struct net_device *dev)
 
 	ndev->token = in6addr_any;
 
-	if (netif_running(dev) && addrconf_link_ready(dev))
+	if (netif_running(dev) && addrconf_qdisc_ok(dev))
 		ndev->if_flags |= IF_READY;
 
 	ipv6_mc_init_dev(ndev);
@@ -1124,8 +1123,7 @@ check_cleanup_prefix_route(struct inet6_ifaddr *ifp, unsigned long *expires)
 	list_for_each_entry(ifa, &idev->addr_list, if_list) {
 		if (ifa == ifp)
 			continue;
-		if (ifa->prefix_len != ifp->prefix_len ||
-		    !ipv6_prefix_equal(&ifa->addr, &ifp->addr,
+		if (!ipv6_prefix_equal(&ifa->addr, &ifp->addr,
 				       ifp->prefix_len))
 			continue;
 		if (ifa->flags & (IFA_F_PERMANENT | IFA_F_NOPREFIXROUTE))
@@ -3175,10 +3173,6 @@ static void addrconf_addr_gen(struct inet6_dev *idev, bool prefix_route)
 	if (netif_is_l3_master(idev->dev))
 		return;
 
-	/* no link local addresses on devices flagged as slaves */
-	if (idev->dev->flags & IFF_SLAVE)
-		return;
-
 	ipv6_addr_set(&addr, htonl(0xFE800000), 0, 0, 0);
 
 	switch (idev->cnf.addr_gen_mode) {
@@ -3227,10 +3221,6 @@ static void addrconf_dev_config(struct net_device *dev)
 	    (dev->type != ARPHRD_TUNNEL) &&
 	    (dev->type != ARPHRD_NONE)) {
 		/* Alas, we support only Ethernet autoconfiguration. */
-		idev = __in6_dev_get(dev);
-		if (!IS_ERR_OR_NULL(idev) && dev->flags & IFF_UP &&
-		    dev->flags & IFF_MULTICAST)
-			ipv6_mc_up(idev);
 		return;
 	}
 
@@ -3414,7 +3404,7 @@ static int addrconf_notify(struct notifier_block *this, unsigned long event,
 			/* restore routes for permanent addresses */
 			addrconf_permanent_addr(dev);
 
-			if (!addrconf_link_ready(dev)) {
+			if (!addrconf_qdisc_ok(dev)) {
 				/* device is not ready yet. */
 				pr_info("ADDRCONF(NETDEV_UP): %s: link is not ready\n",
 					dev->name);
@@ -3429,7 +3419,7 @@ static int addrconf_notify(struct notifier_block *this, unsigned long event,
 				run_pending = 1;
 			}
 		} else if (event == NETDEV_CHANGE) {
-			if (!addrconf_link_ready(dev)) {
+			if (!addrconf_qdisc_ok(dev)) {
 				/* device is still not ready. */
 				break;
 			}
@@ -3835,17 +3825,12 @@ static void addrconf_dad_begin(struct inet6_ifaddr *ifp)
 	     idev->cnf.accept_dad < 1) ||
 	    !(ifp->flags&IFA_F_TENTATIVE) ||
 	    ifp->flags & IFA_F_NODAD) {
-		bool send_na = false;
-
-		if (ifp->flags & IFA_F_TENTATIVE &&
-		    !(ifp->flags & IFA_F_OPTIMISTIC))
-			send_na = true;
 		bump_id = ifp->flags & IFA_F_TENTATIVE;
 		ifp->flags &= ~(IFA_F_TENTATIVE|IFA_F_OPTIMISTIC|IFA_F_DADFAILED);
 		spin_unlock(&ifp->lock);
 		read_unlock_bh(&idev->lock);
 
-		addrconf_dad_completed(ifp, bump_id, send_na);
+		addrconf_dad_completed(ifp, bump_id);
 		return;
 	}
 
@@ -3974,21 +3959,16 @@ static void addrconf_dad_work(struct work_struct *w)
 	}
 
 	if (ifp->dad_probes == 0) {
-		bool send_na = false;
-
 		/*
 		 * DAD was successful
 		 */
 
-		if (ifp->flags & IFA_F_TENTATIVE &&
-		    !(ifp->flags & IFA_F_OPTIMISTIC))
-			send_na = true;
 		bump_id = ifp->flags & IFA_F_TENTATIVE;
 		ifp->flags &= ~(IFA_F_TENTATIVE|IFA_F_OPTIMISTIC|IFA_F_DADFAILED);
 		spin_unlock(&ifp->lock);
 		write_unlock_bh(&idev->lock);
 
-		addrconf_dad_completed(ifp, bump_id, send_na);
+		addrconf_dad_completed(ifp, bump_id);
 
 		goto out;
 	}
@@ -4026,8 +4006,7 @@ static bool ipv6_lonely_lladdr(struct inet6_ifaddr *ifp)
 	return true;
 }
 
-static void addrconf_dad_completed(struct inet6_ifaddr *ifp, bool bump_id,
-				   bool send_na)
+static void addrconf_dad_completed(struct inet6_ifaddr *ifp, bool bump_id)
 {
 	struct net_device *dev = ifp->idev->dev;
 	struct in6_addr lladdr;
@@ -4058,16 +4037,6 @@ static void addrconf_dad_completed(struct inet6_ifaddr *ifp, bool bump_id,
 	 */
 	if (send_mld)
 		ipv6_mc_dad_complete(ifp->idev);
-
-	/* send unsolicited NA if enabled */
-	if (send_na &&
-	    (ifp->idev->cnf.ndisc_notify ||
-	     dev_net(dev)->ipv6.devconf_all->ndisc_notify)) {
-		ndisc_send_na(dev, &in6addr_linklocal_allnodes, &ifp->addr,
-			      /*router=*/ !!ifp->idev->cnf.forwarding,
-			      /*solicited=*/ false, /*override=*/ true,
-			      /*inc_opt=*/ true);
-	}
 
 	if (send_rs) {
 		/*
@@ -4145,6 +4114,7 @@ static struct inet6_ifaddr *if6_get_first(struct seq_file *seq, loff_t pos)
 				p++;
 				continue;
 			}
+			state->offset++;
 			return ifa;
 		}
 
@@ -4168,12 +4138,13 @@ static struct inet6_ifaddr *if6_get_next(struct seq_file *seq,
 		return ifa;
 	}
 
-	state->offset = 0;
 	while (++state->bucket < IN6_ADDR_HSIZE) {
+		state->offset = 0;
 		hlist_for_each_entry_rcu_bh(ifa,
 				     &inet6_addr_lst[state->bucket], addr_lst) {
 			if (!net_eq(dev_net(ifa->idev->dev), net))
 				continue;
+			state->offset++;
 			return ifa;
 		}
 	}
@@ -4802,8 +4773,8 @@ static int in6_dump_addrs(struct inet6_dev *idev, struct sk_buff *skb,
 
 		/* unicast address incl. temp addr */
 		list_for_each_entry(ifa, &idev->addr_list, if_list) {
-			if (ip_idx < s_ip_idx)
-				goto next;
+			if (++ip_idx < s_ip_idx)
+				continue;
 			err = inet6_fill_ifaddr(skb, ifa,
 						NETLINK_CB(cb->skb).portid,
 						cb->nlh->nlmsg_seq,
@@ -4812,8 +4783,6 @@ static int in6_dump_addrs(struct inet6_dev *idev, struct sk_buff *skb,
 			if (err < 0)
 				break;
 			nl_dump_check_consistent(cb, nlmsg_hdr(skb));
-next:
-			ip_idx++;
 		}
 		break;
 	}
@@ -5555,20 +5524,13 @@ static void __ipv6_ifa_notify(int event, struct inet6_ifaddr *ifp)
 	switch (event) {
 	case RTM_NEWADDR:
 		/*
-		 * If the address was optimistic we inserted the route at the
-		 * start of our DAD process, so we don't need to do it again.
-		 * If the device was taken down in the middle of the DAD
-		 * cycle there is a race where we could get here without a
-		 * host route, so nothing to insert. That will be fixed when
-		 * the device is brought up.
+		 * If the address was optimistic
+		 * we inserted the route at the start of
+		 * our DAD process, so we don't need
+		 * to do it again
 		 */
-		if (ifp->rt && !rcu_access_pointer(ifp->rt->rt6i_node)) {
+		if (!rcu_access_pointer(ifp->rt->rt6i_node))
 			ip6_ins_rt(ifp->rt);
-		} else if (!ifp->rt && (ifp->idev->dev->flags & IFF_UP)) {
-			pr_warn("BUG: Address %pI6c on device %s is missing its host route.\n",
-				&ifp->addr, ifp->idev->dev->name);
-		}
-
 		if (ifp->idev->cnf.forwarding)
 			addrconf_join_anycast(ifp);
 		if (!ipv6_addr_any(&ifp->peer_addr))

@@ -8,7 +8,6 @@
  * Copyright(c) 2012 - 2014 Intel Corporation. All rights reserved.
  * Copyright(c) 2013 - 2015 Intel Mobile Communications GmbH
  * Copyright(c) 2016 - 2017 Intel Deutschland GmbH
- * Copyright(c) 2018        Intel Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of version 2 of the GNU General Public License as
@@ -328,12 +327,8 @@ struct ieee80211_regdomain *iwl_mvm_get_regdomain(struct wiphy *wiphy,
 		goto out;
 	}
 
-	if (changed) {
-		u32 status = le32_to_cpu(resp->status);
-
-		*changed = (status == MCC_RESP_NEW_CHAN_PROFILE ||
-			    status == MCC_RESP_ILLEGAL);
-	}
+	if (changed)
+		*changed = (resp->status == MCC_RESP_NEW_CHAN_PROFILE);
 
 	regd = iwl_parse_nvm_mcc_info(mvm->trans->dev, mvm->cfg,
 				      __le32_to_cpu(resp->n_channels),
@@ -822,21 +817,6 @@ static void iwl_mvm_mac_tx(struct ieee80211_hw *hw,
 	    !ieee80211_is_bufferable_mmpdu(hdr->frame_control))
 		sta = NULL;
 
-	/* If there is no sta, and it's not offchannel - send through AP */
-	if (info->control.vif->type == NL80211_IFTYPE_STATION &&
-	    info->hw_queue != IWL_MVM_OFFCHANNEL_QUEUE && !sta) {
-		struct iwl_mvm_vif *mvmvif =
-			iwl_mvm_vif_from_mac80211(info->control.vif);
-		u8 ap_sta_id = READ_ONCE(mvmvif->ap_sta_id);
-
-		if (ap_sta_id < IWL_MVM_STATION_COUNT) {
-			/* mac80211 holds rcu read lock */
-			sta = rcu_dereference(mvm->fw_id_to_mac_id[ap_sta_id]);
-			if (IS_ERR_OR_NULL(sta))
-				goto drop;
-		}
-	}
-
 	if (sta) {
 		if (iwl_mvm_defer_tx(mvm, sta, skb))
 			return;
@@ -1244,15 +1224,12 @@ void __iwl_mvm_mac_stop(struct iwl_mvm *mvm)
 	iwl_mvm_del_aux_sta(mvm);
 
 	/*
-	 * Clear IN_HW_RESTART and HW_RESTART_REQUESTED flag when stopping the
-	 * hw (as restart_complete() won't be called in this case) and mac80211
-	 * won't execute the restart.
+	 * Clear IN_HW_RESTART flag when stopping the hw (as restart_complete()
+	 * won't be called in this case).
 	 * But make sure to cleanup interfaces that have gone down before/during
 	 * HW restart was requested.
 	 */
-	if (test_and_clear_bit(IWL_MVM_STATUS_IN_HW_RESTART, &mvm->status) ||
-	    test_and_clear_bit(IWL_MVM_STATUS_HW_RESTART_REQUESTED,
-			       &mvm->status))
+	if (test_and_clear_bit(IWL_MVM_STATUS_IN_HW_RESTART, &mvm->status))
 		ieee80211_iterate_interfaces(mvm->hw, 0,
 					     iwl_mvm_cleanup_iterator, mvm);
 
@@ -2150,40 +2127,15 @@ static int iwl_mvm_start_ap_ibss(struct ieee80211_hw *hw,
 	if (ret)
 		goto out_remove;
 
-	/*
-	 * This is not very nice, but the simplest:
-	 * For older FWs adding the mcast sta before the bcast station may
-	 * cause assert 0x2b00.
-	 * This is fixed in later FW so make the order of removal depend on
-	 * the TLV
-	 */
-	if (fw_has_api(&mvm->fw->ucode_capa, IWL_UCODE_TLV_API_STA_TYPE)) {
-		ret = iwl_mvm_add_mcast_sta(mvm, vif);
-		if (ret)
-			goto out_unbind;
-		/*
-		 * Send the bcast station. At this stage the TBTT and DTIM time
-		 * events are added and applied to the scheduler
-		 */
-		ret = iwl_mvm_send_add_bcast_sta(mvm, vif);
-		if (ret) {
-			iwl_mvm_rm_mcast_sta(mvm, vif);
-			goto out_unbind;
-		}
-	} else {
-		/*
-		 * Send the bcast station. At this stage the TBTT and DTIM time
-		 * events are added and applied to the scheduler
-		 */
-		ret = iwl_mvm_send_add_bcast_sta(mvm, vif);
-		if (ret)
-			goto out_unbind;
-		ret = iwl_mvm_add_mcast_sta(mvm, vif);
-		if (ret) {
-			iwl_mvm_send_rm_bcast_sta(mvm, vif);
-			goto out_unbind;
-		}
-	}
+	ret = iwl_mvm_add_mcast_sta(mvm, vif);
+	if (ret)
+		goto out_unbind;
+
+	/* Send the bcast station. At this stage the TBTT and DTIM time events
+	 * are added and applied to the scheduler */
+	ret = iwl_mvm_send_add_bcast_sta(mvm, vif);
+	if (ret)
+		goto out_rm_mcast;
 
 	/* must be set before quota calculations */
 	mvmvif->ap_ibss_active = true;
@@ -2213,6 +2165,7 @@ out_quota_failed:
 	iwl_mvm_power_update_mac(mvm);
 	mvmvif->ap_ibss_active = false;
 	iwl_mvm_send_rm_bcast_sta(mvm, vif);
+out_rm_mcast:
 	iwl_mvm_rm_mcast_sta(mvm, vif);
 out_unbind:
 	iwl_mvm_binding_remove_vif(mvm, vif);
@@ -2750,10 +2703,6 @@ static int iwl_mvm_mac_sta_state(struct ieee80211_hw *hw,
 
 		/* enable beacon filtering */
 		WARN_ON(iwl_mvm_enable_beacon_filter(mvm, vif, 0));
-
-		iwl_mvm_rs_rate_init(mvm, sta, mvmvif->phy_ctxt->channel->band,
-				     false);
-
 		ret = 0;
 	} else if (old_state == IEEE80211_STA_AUTHORIZED &&
 		   new_state == IEEE80211_STA_ASSOC) {
@@ -3519,7 +3468,6 @@ static int __iwl_mvm_assign_vif_chanctx(struct iwl_mvm *mvm,
 		ret = 0;
 		goto out;
 	case NL80211_IFTYPE_STATION:
-		mvmvif->csa_bcn_pending = false;
 		break;
 	case NL80211_IFTYPE_MONITOR:
 		/* always disable PS when a monitor interface is active */
@@ -3563,7 +3511,7 @@ static int __iwl_mvm_assign_vif_chanctx(struct iwl_mvm *mvm,
 	}
 
 	if (switching_chanctx && vif->type == NL80211_IFTYPE_STATION) {
-		u32 duration = 3 * vif->bss_conf.beacon_int;
+		u32 duration = 2 * vif->bss_conf.beacon_int;
 
 		/* iwl_mvm_protect_session() reads directly from the
 		 * device (the system time), so make sure it is
@@ -3576,7 +3524,6 @@ static int __iwl_mvm_assign_vif_chanctx(struct iwl_mvm *mvm,
 		/* Protect the session to make sure we hear the first
 		 * beacon on the new channel.
 		 */
-		mvmvif->csa_bcn_pending = true;
 		iwl_mvm_protect_session(mvm, vif, duration, duration,
 					vif->bss_conf.beacon_int / 2,
 					true);
@@ -4020,7 +3967,6 @@ static int iwl_mvm_post_channel_switch(struct ieee80211_hw *hw,
 	if (vif->type == NL80211_IFTYPE_STATION) {
 		struct iwl_mvm_sta *mvmsta;
 
-		mvmvif->csa_bcn_pending = false;
 		mvmsta = iwl_mvm_sta_from_staid_protected(mvm,
 							  mvmvif->ap_sta_id);
 
@@ -4207,6 +4153,10 @@ static void iwl_mvm_mac_sta_statistics(struct ieee80211_hw *hw,
 		sinfo->signal_avg = mvmsta->avg_energy;
 		sinfo->filled |= BIT(NL80211_STA_INFO_SIGNAL_AVG);
 	}
+
+	if (!fw_has_capa(&mvm->fw->ucode_capa,
+			 IWL_UCODE_TLV_CAPA_RADIO_BEACON_STATS))
+		return;
 
 	/* if beacon filtering isn't on mac80211 does it anyway */
 	if (!(vif->driver_flags & IEEE80211_VIF_BEACON_FILTER))

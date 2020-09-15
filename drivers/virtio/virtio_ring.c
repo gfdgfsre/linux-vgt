@@ -428,11 +428,13 @@ unmap_release:
 		i = virtio16_to_cpu(_vq->vdev, vq->vring.desc[i].next);
 	}
 
+	vq->vq.num_free += total_sg;
+
 	if (indirect)
 		kfree(desc);
 
 	END_USE(vq);
-	return -ENOMEM;
+	return -EIO;
 }
 
 /**
@@ -1087,8 +1089,6 @@ struct virtqueue *vring_create_virtqueue(
 					  GFP_KERNEL|__GFP_NOWARN|__GFP_ZERO);
 		if (queue)
 			break;
-		if (!may_reduce_num)
-			return NULL;
 	}
 
 	if (!num)

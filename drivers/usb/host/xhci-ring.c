@@ -667,7 +667,6 @@ static void xhci_unmap_td_bounce_buffer(struct xhci_hcd *xhci,
 	struct device *dev = xhci_to_hcd(xhci)->self.controller;
 	struct xhci_segment *seg = td->bounce_seg;
 	struct urb *urb = td->urb;
-	size_t len;
 
 	if (!ring || !seg || !urb)
 		return;
@@ -678,14 +677,11 @@ static void xhci_unmap_td_bounce_buffer(struct xhci_hcd *xhci,
 		return;
 	}
 
+	/* for in tranfers we need to copy the data from bounce to sg */
+	sg_pcopy_from_buffer(urb->sg, urb->num_mapped_sgs, seg->bounce_buf,
+			     seg->bounce_len, seg->bounce_offs);
 	dma_unmap_single(dev, seg->bounce_dma, ring->bounce_buf_len,
 			 DMA_FROM_DEVICE);
-	/* for in tranfers we need to copy the data from bounce to sg */
-	len = sg_pcopy_from_buffer(urb->sg, urb->num_sgs, seg->bounce_buf,
-			     seg->bounce_len, seg->bounce_offs);
-	if (len != seg->bounce_len)
-		xhci_warn(xhci, "WARN Wrong bounce buffer read length: %zu != %d\n",
-				len, seg->bounce_len);
 	seg->bounce_len = 0;
 	seg->bounce_offs = 0;
 }
@@ -1572,35 +1568,6 @@ static void handle_device_notification(struct xhci_hcd *xhci,
 		usb_wakeup_notification(udev->parent, udev->portnum);
 }
 
-/*
- * Quirk hanlder for errata seen on Cavium ThunderX2 processor XHCI
- * Controller.
- * As per ThunderX2errata-129 USB 2 device may come up as USB 1
- * If a connection to a USB 1 device is followed by another connection
- * to a USB 2 device.
- *
- * Reset the PHY after the USB device is disconnected if device speed
- * is less than HCD_USB3.
- * Retry the reset sequence max of 4 times checking the PLL lock status.
- *
- */
-static void xhci_cavium_reset_phy_quirk(struct xhci_hcd *xhci)
-{
-	struct usb_hcd *hcd = xhci_to_hcd(xhci);
-	u32 pll_lock_check;
-	u32 retry_count = 4;
-
-	do {
-		/* Assert PHY reset */
-		writel(0x6F, hcd->regs + 0x1048);
-		udelay(10);
-		/* De-assert the PHY reset */
-		writel(0x7F, hcd->regs + 0x1048);
-		udelay(200);
-		pll_lock_check = readl(hcd->regs + 0x1070);
-	} while (!(pll_lock_check & 0x1) && --retry_count);
-}
-
 static void handle_port_status(struct xhci_hcd *xhci,
 		union xhci_trb *event)
 {
@@ -1639,12 +1606,6 @@ static void handle_port_status(struct xhci_hcd *xhci,
 	hcd = xhci_to_hcd(xhci);
 	if ((major_revision == 0x03) != (hcd->speed >= HCD_USB3))
 		hcd = xhci->shared_hcd;
-
-	if (!hcd) {
-		xhci_dbg(xhci, "No hcd found for port %u event\n", port_id);
-		bogus_port_status = true;
-		goto cleanup;
-	}
 
 	if (major_revision == 0) {
 		xhci_warn(xhci, "Event for port %u not in "
@@ -1685,6 +1646,9 @@ static void handle_port_status(struct xhci_hcd *xhci,
 		usb_hcd_resume_root_hub(hcd);
 	}
 
+	if (hcd->speed >= HCD_USB3 && (portsc & PORT_PLS_MASK) == XDEV_INACTIVE)
+		bus_state->port_remote_wakeup &= ~(1 << faked_port_index);
+
 	if ((portsc & PORT_PLC) && (portsc & PORT_PLS_MASK) == XDEV_RESUME) {
 		xhci_dbg(xhci, "port resume event for port %d\n", port_id);
 
@@ -1703,7 +1667,6 @@ static void handle_port_status(struct xhci_hcd *xhci,
 			bus_state->port_remote_wakeup |= 1 << faked_port_index;
 			xhci_test_and_clear_bit(xhci, port_array,
 					faked_port_index, PORT_PLC);
-			usb_hcd_start_port_resume(&hcd->self, faked_port_index);
 			xhci_set_link_state(xhci, port_array, faked_port_index,
 						XDEV_U0);
 			/* Need to wait until the next link state change
@@ -1723,13 +1686,10 @@ static void handle_port_status(struct xhci_hcd *xhci,
 		}
 	}
 
-	if ((portsc & PORT_PLC) &&
-	    DEV_SUPERSPEED_ANY(portsc) &&
-	    ((portsc & PORT_PLS_MASK) == XDEV_U0 ||
-	     (portsc & PORT_PLS_MASK) == XDEV_U1 ||
-	     (portsc & PORT_PLS_MASK) == XDEV_U2)) {
+	if ((portsc & PORT_PLC) && (portsc & PORT_PLS_MASK) == XDEV_U0 &&
+			DEV_SUPERSPEED_ANY(portsc)) {
 		xhci_dbg(xhci, "resume SS port %d finished\n", port_id);
-		/* We've just brought the device into U0/1/2 through either the
+		/* We've just brought the device into U0 through either the
 		 * Resume state after a device remote wakeup, or through the
 		 * U3Exit state after a host-initiated resume.  If it's a device
 		 * initiated remote wake, don't pass up the link state change,
@@ -1741,6 +1701,8 @@ static void handle_port_status(struct xhci_hcd *xhci,
 		if (slot_id && xhci->devs[slot_id])
 			xhci_ring_device(xhci, slot_id);
 		if (bus_state->port_remote_wakeup & (1 << faked_port_index)) {
+			bus_state->port_remote_wakeup &=
+				~(1 << faked_port_index);
 			xhci_test_and_clear_bit(xhci, port_array,
 					faked_port_index, PORT_PLC);
 			usb_wakeup_notification(hcd->self.root_hub,
@@ -1755,7 +1717,7 @@ static void handle_port_status(struct xhci_hcd *xhci,
 	 * RExit to a disconnect state).  If so, let the the driver know it's
 	 * out of the RExit state.
 	 */
-	if (!DEV_SUPERSPEED_ANY(portsc) && hcd->speed < HCD_USB3 &&
+	if (!DEV_SUPERSPEED_ANY(portsc) &&
 			test_and_clear_bit(faked_port_index,
 				&bus_state->rexit_ports)) {
 		complete(&bus_state->rexit_done[faked_port_index]);
@@ -1763,13 +1725,9 @@ static void handle_port_status(struct xhci_hcd *xhci,
 		goto cleanup;
 	}
 
-	if (hcd->speed < HCD_USB3) {
+	if (hcd->speed < HCD_USB3)
 		xhci_test_and_clear_bit(xhci, port_array, faked_port_index,
 					PORT_PLC);
-		if ((xhci->quirks & XHCI_RESET_PLL_ON_DISCONNECT) &&
-		    (portsc & PORT_CSC) && !(portsc & PORT_CONNECT))
-			xhci_cavium_reset_phy_quirk(xhci);
-	}
 
 cleanup:
 	/* Update event ring dequeue pointer before dropping the lock */
@@ -2377,7 +2335,6 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 			goto cleanup;
 		case COMP_RING_UNDERRUN:
 		case COMP_RING_OVERRUN:
-		case COMP_STOPPED_LENGTH_INVALID:
 			goto cleanup;
 		default:
 			xhci_err(xhci, "ERROR Transfer event for unknown stream ring slot %u ep %u\n",
@@ -2400,8 +2357,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 	case COMP_SUCCESS:
 		if (EVENT_TRB_LEN(le32_to_cpu(event->transfer_len)) == 0)
 			break;
-		if (xhci->quirks & XHCI_TRUST_TX_LENGTH ||
-		    ep_ring->last_td_was_short)
+		if (xhci->quirks & XHCI_TRUST_TX_LENGTH)
 			trb_comp_code = COMP_SHORT_PACKET;
 		else
 			xhci_warn_ratelimited(xhci,
@@ -2530,16 +2486,12 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		 */
 		if (list_empty(&ep_ring->td_list)) {
 			/*
-			 * Don't print wanings if it's due to a stopped endpoint
-			 * generating an extra completion event if the device
-			 * was suspended. Or, a event for the last TRB of a
-			 * short TD we already got a short event for.
-			 * The short TD is already removed from the TD list.
+			 * A stopped endpoint may generate an extra completion
+			 * event if the device was suspended.  Don't print
+			 * warnings.
 			 */
-
 			if (!(trb_comp_code == COMP_STOPPED ||
-			      trb_comp_code == COMP_STOPPED_LENGTH_INVALID ||
-			      ep_ring->last_td_was_short)) {
+				trb_comp_code == COMP_STOPPED_LENGTH_INVALID)) {
 				xhci_warn(xhci, "WARN Event TRB for slot %d ep %d with no TDs queued?\n",
 						TRB_TO_SLOT_ID(le32_to_cpu(event->flags)),
 						ep_index);
@@ -2765,42 +2717,6 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 }
 
 /*
- * Update Event Ring Dequeue Pointer:
- * - When all events have finished
- * - To avoid "Event Ring Full Error" condition
- */
-static void xhci_update_erst_dequeue(struct xhci_hcd *xhci,
-		union xhci_trb *event_ring_deq)
-{
-	u64 temp_64;
-	dma_addr_t deq;
-
-	temp_64 = xhci_read_64(xhci, &xhci->ir_set->erst_dequeue);
-	/* If necessary, update the HW's version of the event ring deq ptr. */
-	if (event_ring_deq != xhci->event_ring->dequeue) {
-		deq = xhci_trb_virt_to_dma(xhci->event_ring->deq_seg,
-				xhci->event_ring->dequeue);
-		if (deq == 0)
-			xhci_warn(xhci, "WARN something wrong with SW event ring dequeue ptr\n");
-		/*
-		 * Per 4.9.4, Software writes to the ERDP register shall
-		 * always advance the Event Ring Dequeue Pointer value.
-		 */
-		if ((temp_64 & (u64) ~ERST_PTR_MASK) ==
-				((u64) deq & (u64) ~ERST_PTR_MASK))
-			return;
-
-		/* Update HC event ring dequeue pointer */
-		temp_64 &= ERST_PTR_MASK;
-		temp_64 |= ((u64) deq & (u64) ~ERST_PTR_MASK);
-	}
-
-	/* Clear the event handler busy flag (RW1C) */
-	temp_64 |= ERST_EHB;
-	xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
-}
-
-/*
  * xHCI spec says we can get an interrupt, and if the HC has an error condition,
  * we might get bad data out of the event ring.  Section 4.10.2.7 has a list of
  * indicators of an event TRB error, but we check the status *first* to be safe.
@@ -2811,9 +2727,9 @@ irqreturn_t xhci_irq(struct usb_hcd *hcd)
 	union xhci_trb *event_ring_deq;
 	irqreturn_t ret = IRQ_NONE;
 	unsigned long flags;
+	dma_addr_t deq;
 	u64 temp_64;
 	u32 status;
-	int event_loop = 0;
 
 	spin_lock_irqsave(&xhci->lock, flags);
 	/* Check if the xHC generated the interrupt, or the irq is shared */
@@ -2867,14 +2783,24 @@ irqreturn_t xhci_irq(struct usb_hcd *hcd)
 	/* FIXME this should be a delayed service routine
 	 * that clears the EHB.
 	 */
-	while (xhci_handle_event(xhci) > 0) {
-		if (event_loop++ < TRBS_PER_SEGMENT / 2)
-			continue;
-		xhci_update_erst_dequeue(xhci, event_ring_deq);
-		event_loop = 0;
+	while (xhci_handle_event(xhci) > 0) {}
+
+	temp_64 = xhci_read_64(xhci, &xhci->ir_set->erst_dequeue);
+	/* If necessary, update the HW's version of the event ring deq ptr. */
+	if (event_ring_deq != xhci->event_ring->dequeue) {
+		deq = xhci_trb_virt_to_dma(xhci->event_ring->deq_seg,
+				xhci->event_ring->dequeue);
+		if (deq == 0)
+			xhci_warn(xhci, "WARN something wrong with SW event "
+					"ring dequeue ptr.\n");
+		/* Update HC event ring dequeue pointer */
+		temp_64 &= ERST_PTR_MASK;
+		temp_64 |= ((u64) deq & (u64) ~ERST_PTR_MASK);
 	}
 
-	xhci_update_erst_dequeue(xhci, event_ring_deq);
+	/* Clear the event handler busy flag (RW1C); event ring is empty. */
+	temp_64 |= ERST_EHB;
+	xhci_write_64(xhci, temp_64, &xhci->ir_set->erst_dequeue);
 	ret = IRQ_HANDLED;
 
 out:
@@ -3191,7 +3117,7 @@ static u32 xhci_td_remainder(struct xhci_hcd *xhci, int transferred,
 {
 	u32 maxp, total_packet_count;
 
-	/* MTK xHCI 0.96 contains some features from 1.0 */
+	/* MTK xHCI is mostly 0.97 but contains some features from 1.0 */
 	if (xhci->hci_version < 0x100 && !(xhci->quirks & XHCI_MTK_HOST))
 		return ((td_total_len - transferred) >> 10);
 
@@ -3200,8 +3126,8 @@ static u32 xhci_td_remainder(struct xhci_hcd *xhci, int transferred,
 	    trb_buff_len == td_total_len)
 		return 0;
 
-	/* for MTK xHCI 0.96, TD size include this TRB, but not in 1.x */
-	if ((xhci->quirks & XHCI_MTK_HOST) && (xhci->hci_version < 0x100))
+	/* for MTK xHCI, TD size doesn't include this TRB */
+	if (xhci->quirks & XHCI_MTK_HOST)
 		trb_buff_len = 0;
 
 	maxp = usb_endpoint_maxp(&urb->ep->desc);
@@ -3219,7 +3145,6 @@ static int xhci_align_td(struct xhci_hcd *xhci, struct urb *urb, u32 enqd_len,
 	unsigned int unalign;
 	unsigned int max_pkt;
 	u32 new_buff_len;
-	size_t len;
 
 	max_pkt = usb_endpoint_maxp(&urb->ep->desc);
 	unalign = (enqd_len + *trb_buff_len) % max_pkt;
@@ -3250,12 +3175,8 @@ static int xhci_align_td(struct xhci_hcd *xhci, struct urb *urb, u32 enqd_len,
 
 	/* create a max max_pkt sized bounce buffer pointed to by last trb */
 	if (usb_urb_dir_out(urb)) {
-		len = sg_pcopy_to_buffer(urb->sg, urb->num_sgs,
+		sg_pcopy_to_buffer(urb->sg, urb->num_mapped_sgs,
 				   seg->bounce_buf, new_buff_len, enqd_len);
-		if (len != new_buff_len)
-			xhci_warn(xhci,
-				"WARN Wrong bounce buffer write length: %zu != %d\n",
-				len, new_buff_len);
 		seg->bounce_dma = dma_map_single(dev, seg->bounce_buf,
 						 max_pkt, DMA_TO_DEVICE);
 	} else {
@@ -3403,8 +3324,8 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			/* New sg entry */
 			--num_sgs;
 			sent_len -= block_len;
-			sg = sg_next(sg);
-			if (num_sgs != 0 && sg) {
+			if (num_sgs != 0) {
+				sg = sg_next(sg);
 				block_len = sg_dma_len(sg);
 				addr = (u64) sg_dma_address(sg);
 				addr += sent_len;

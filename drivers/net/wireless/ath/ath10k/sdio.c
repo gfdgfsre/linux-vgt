@@ -30,7 +30,6 @@
 #include "debug.h"
 #include "hif.h"
 #include "htc.h"
-#include "mac.h"
 #include "targaddrs.h"
 #include "trace.h"
 #include "sdio.h"
@@ -392,11 +391,15 @@ static int ath10k_sdio_mbox_rx_process_packet(struct ath10k *ar,
 	struct ath10k_htc_hdr *htc_hdr = (struct ath10k_htc_hdr *)skb->data;
 	bool trailer_present = htc_hdr->flags & ATH10K_HTC_FLAG_TRAILER_PRESENT;
 	enum ath10k_htc_ep_id eid;
+	u16 payload_len;
 	u8 *trailer;
 	int ret;
 
+	payload_len = le16_to_cpu(htc_hdr->len);
+
 	if (trailer_present) {
-		trailer = skb->data + skb->len - htc_hdr->trailer_len;
+		trailer = skb->data + sizeof(*htc_hdr) +
+			  payload_len - htc_hdr->trailer_len;
 
 		eid = pipe_id_to_eid(htc_hdr->eid);
 
@@ -431,14 +434,12 @@ static int ath10k_sdio_mbox_rx_process_packets(struct ath10k *ar,
 	enum ath10k_htc_ep_id id;
 	int ret, i, *n_lookahead_local;
 	u32 *lookaheads_local;
-	int lookahead_idx = 0;
 
 	for (i = 0; i < ar_sdio->n_rx_pkts; i++) {
 		lookaheads_local = lookaheads;
 		n_lookahead_local = n_lookahead;
 
-		id = ((struct ath10k_htc_hdr *)
-		      &lookaheads[lookahead_idx++])->eid;
+		id = ((struct ath10k_htc_hdr *)&lookaheads[i])->eid;
 
 		if (id >= ATH10K_HTC_EP_COUNT) {
 			ath10k_warn(ar, "invalid endpoint in look-ahead: %d\n",
@@ -461,7 +462,6 @@ static int ath10k_sdio_mbox_rx_process_packets(struct ath10k *ar,
 			/* Only read lookahead's from RX trailers
 			 * for the last packet in a bundle.
 			 */
-			lookahead_idx--;
 			lookaheads_local = NULL;
 			n_lookahead_local = NULL;
 		}
@@ -605,10 +605,6 @@ static int ath10k_sdio_mbox_rx_alloc(struct ath10k *ar,
 						    full_len,
 						    last_in_bundle,
 						    last_in_bundle);
-		if (ret) {
-			ath10k_warn(ar, "alloc_rx_pkt error %d\n", ret);
-			goto err;
-		}
 	}
 
 	ar_sdio->n_rx_pkts = i;
@@ -630,31 +626,13 @@ static int ath10k_sdio_mbox_rx_packet(struct ath10k *ar,
 {
 	struct ath10k_sdio *ar_sdio = ath10k_sdio_priv(ar);
 	struct sk_buff *skb = pkt->skb;
-	struct ath10k_htc_hdr *htc_hdr;
 	int ret;
 
 	ret = ath10k_sdio_readsb(ar, ar_sdio->mbox_info.htc_addr,
 				 skb->data, pkt->alloc_len);
-	if (ret)
-		goto out;
-
-	/* Update actual length. The original length may be incorrect,
-	 * as the FW will bundle multiple packets as long as their sizes
-	 * fit within the same aligned length (pkt->alloc_len).
-	 */
-	htc_hdr = (struct ath10k_htc_hdr *)skb->data;
-	pkt->act_len = le16_to_cpu(htc_hdr->len) + sizeof(*htc_hdr);
-	if (pkt->act_len > pkt->alloc_len) {
-		ath10k_warn(ar, "rx packet too large (%zu > %zu)\n",
-			    pkt->act_len, pkt->alloc_len);
-		ret = -EMSGSIZE;
-		goto out;
-	}
-
-	skb_put(skb, pkt->act_len);
-
-out:
 	pkt->status = ret;
+	if (!ret)
+		skb_put(skb, pkt->act_len);
 
 	return ret;
 }
@@ -1363,8 +1341,6 @@ static void ath10k_sdio_irq_handler(struct sdio_func *func)
 		if (ret)
 			break;
 	} while (time_before(jiffies, timeout) && !done);
-
-	ath10k_mac_tx_push_pending(ar);
 
 	sdio_claim_host(ar_sdio->func);
 
@@ -2089,9 +2065,6 @@ static void ath10k_sdio_remove(struct sdio_func *func)
 	cancel_work_sync(&ar_sdio->wr_async_work);
 	ath10k_core_unregister(ar);
 	ath10k_core_destroy(ar);
-
-	flush_workqueue(ar_sdio->workqueue);
-	destroy_workqueue(ar_sdio->workqueue);
 }
 
 static const struct sdio_device_id ath10k_sdio_devices[] = {

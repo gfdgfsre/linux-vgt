@@ -14,14 +14,10 @@
 #define __LINUX_RT_MUTEX_H
 
 #include <linux/linkage.h>
-#include <linux/spinlock_types_raw.h>
 #include <linux/rbtree.h>
+#include <linux/spinlock_types.h>
 
 extern int max_lock_depth; /* for sysctl */
-
-#ifdef CONFIG_DEBUG_MUTEXES
-#include <linux/debug_locks.h>
-#endif
 
 /**
  * The rt_mutex structure
@@ -35,8 +31,8 @@ struct rt_mutex {
 	raw_spinlock_t		wait_lock;
 	struct rb_root_cached   waiters;
 	struct task_struct	*owner;
-	int			save_state;
 #ifdef CONFIG_DEBUG_RT_MUTEXES
+	int			save_state;
 	const char		*name, *file;
 	int			line;
 	void			*magic;
@@ -86,22 +82,15 @@ do { \
 #define __DEP_MAP_RT_MUTEX_INITIALIZER(mutexname)
 #endif
 
-#define __RT_MUTEX_INITIALIZER_PLAIN(mutexname) \
-	.wait_lock = __RAW_SPIN_LOCK_UNLOCKED(mutexname.wait_lock) \
+#define __RT_MUTEX_INITIALIZER(mutexname) \
+	{ .wait_lock = __RAW_SPIN_LOCK_UNLOCKED(mutexname.wait_lock) \
 	, .waiters = RB_ROOT_CACHED \
 	, .owner = NULL \
 	__DEBUG_RT_MUTEX_INITIALIZER(mutexname) \
-	__DEP_MAP_RT_MUTEX_INITIALIZER(mutexname)
-
-#define __RT_MUTEX_INITIALIZER(mutexname) \
-	{ __RT_MUTEX_INITIALIZER_PLAIN(mutexname) }
+	__DEP_MAP_RT_MUTEX_INITIALIZER(mutexname)}
 
 #define DEFINE_RT_MUTEX(mutexname) \
 	struct rt_mutex mutexname = __RT_MUTEX_INITIALIZER(mutexname)
-
-#define __RT_MUTEX_INITIALIZER_SAVE_STATE(mutexname) \
-	{ __RT_MUTEX_INITIALIZER_PLAIN(mutexname)    \
-		, .save_state = 1 }
 
 /**
  * rt_mutex_is_locked - is the mutex locked
@@ -117,16 +106,8 @@ static inline int rt_mutex_is_locked(struct rt_mutex *lock)
 extern void __rt_mutex_init(struct rt_mutex *lock, const char *name, struct lock_class_key *key);
 extern void rt_mutex_destroy(struct rt_mutex *lock);
 
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
-extern void rt_mutex_lock_nested(struct rt_mutex *lock, unsigned int subclass);
-#define rt_mutex_lock(lock) rt_mutex_lock_nested(lock, 0)
-#else
 extern void rt_mutex_lock(struct rt_mutex *lock);
-#define rt_mutex_lock_nested(lock, subclass) rt_mutex_lock(lock)
-#endif
-
 extern int rt_mutex_lock_interruptible(struct rt_mutex *lock);
-extern int rt_mutex_lock_killable(struct rt_mutex *lock);
 extern int rt_mutex_timed_lock(struct rt_mutex *lock,
 			       struct hrtimer_sleeper *timeout);
 

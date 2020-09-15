@@ -1,0 +1,1 @@
+cmd_drivers/soc/sunxi-sysinfo/built-in.o :=  rm -f drivers/soc/sunxi-sysinfo/built-in.o; /aosp/buildroot/buildroot-2020.02.4/output/host/bin/aarch64-buildroot-linux-musl-ar rcSTPD drivers/soc/sunxi-sysinfo/built-in.o drivers/soc/sunxi-sysinfo/sysinfo.o 

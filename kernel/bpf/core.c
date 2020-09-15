@@ -51,7 +51,6 @@
 #define DST	regs[insn->dst_reg]
 #define SRC	regs[insn->src_reg]
 #define FP	regs[BPF_REG_FP]
-#define AX	regs[BPF_REG_AX]
 #define ARG1	regs[BPF_REG_ARG1]
 #define CTX	regs[BPF_REG_CTX]
 #define IMM	insn->imm
@@ -85,6 +84,8 @@ struct bpf_prog *bpf_prog_alloc(unsigned int size, gfp_t gfp_extra_flags)
 	fp = __vmalloc(size, gfp_flags, PAGE_KERNEL);
 	if (fp == NULL)
 		return NULL;
+
+	kmemcheck_annotate_bitfield(fp, meta);
 
 	aux = kzalloc(sizeof(*aux), GFP_KERNEL | gfp_extra_flags);
 	if (aux == NULL) {
@@ -126,6 +127,8 @@ struct bpf_prog *bpf_prog_realloc(struct bpf_prog *fp_old, unsigned int size,
 	if (fp == NULL) {
 		__bpf_prog_uncharge(fp_old->aux->user, delta);
 	} else {
+		kmemcheck_annotate_bitfield(fp, meta);
+
 		memcpy(fp, fp_old, fp_old->pages * PAGE_SIZE);
 		fp->pages = pages;
 		fp->aux->prog = fp;
@@ -290,12 +293,6 @@ struct bpf_prog *bpf_patch_insn_single(struct bpf_prog *prog, u32 off,
 }
 
 #ifdef CONFIG_BPF_JIT
-/* All BPF JIT sysctl knobs here. */
-int bpf_jit_enable   __read_mostly = IS_BUILTIN(CONFIG_BPF_JIT_ALWAYS_ON);
-int bpf_jit_harden   __read_mostly;
-int bpf_jit_kallsyms __read_mostly;
-long bpf_jit_limit   __read_mostly;
-
 static __always_inline void
 bpf_get_prog_addr_region(const struct bpf_prog *prog,
 			 unsigned long *symbol_start,
@@ -363,6 +360,8 @@ static const struct latch_tree_ops bpf_tree_ops = {
 static DEFINE_SPINLOCK(bpf_lock);
 static LIST_HEAD(bpf_kallsyms);
 static struct latch_tree_root bpf_tree __cacheline_aligned;
+
+int bpf_jit_kallsyms __read_mostly;
 
 static void bpf_prog_ksym_node_add(struct bpf_prog_aux *aux)
 {
@@ -490,75 +489,27 @@ int bpf_get_kallsym(unsigned int symnum, unsigned long *value, char *type,
 	return ret;
 }
 
-static atomic_long_t bpf_jit_current;
-
-/* Can be overridden by an arch's JIT compiler if it has a custom,
- * dedicated BPF backend memory area, or if neither of the two
- * below apply.
- */
-u64 __weak bpf_jit_alloc_exec_limit(void)
-{
-#if defined(MODULES_VADDR)
-	return MODULES_END - MODULES_VADDR;
-#else
-	return VMALLOC_END - VMALLOC_START;
-#endif
-}
-
-static int __init bpf_jit_charge_init(void)
-{
-	/* Only used as heuristic here to derive limit. */
-	bpf_jit_limit = min_t(u64, round_up(bpf_jit_alloc_exec_limit() >> 2,
-					    PAGE_SIZE), LONG_MAX);
-	return 0;
-}
-pure_initcall(bpf_jit_charge_init);
-
-static int bpf_jit_charge_modmem(u32 pages)
-{
-	if (atomic_long_add_return(pages, &bpf_jit_current) >
-	    (bpf_jit_limit >> PAGE_SHIFT)) {
-		if (!capable(CAP_SYS_ADMIN)) {
-			atomic_long_sub(pages, &bpf_jit_current);
-			return -EPERM;
-		}
-	}
-
-	return 0;
-}
-
-static void bpf_jit_uncharge_modmem(u32 pages)
-{
-	atomic_long_sub(pages, &bpf_jit_current);
-}
-
 struct bpf_binary_header *
 bpf_jit_binary_alloc(unsigned int proglen, u8 **image_ptr,
 		     unsigned int alignment,
 		     bpf_jit_fill_hole_t bpf_fill_ill_insns)
 {
 	struct bpf_binary_header *hdr;
-	u32 size, hole, start, pages;
+	unsigned int size, hole, start;
 
 	/* Most of BPF filters are really small, but if some of them
 	 * fill a page, allow at least 128 extra bytes to insert a
 	 * random section of illegal instructions.
 	 */
 	size = round_up(proglen + sizeof(*hdr) + 128, PAGE_SIZE);
-	pages = size / PAGE_SIZE;
-
-	if (bpf_jit_charge_modmem(pages))
-		return NULL;
 	hdr = module_alloc(size);
-	if (!hdr) {
-		bpf_jit_uncharge_modmem(pages);
+	if (hdr == NULL)
 		return NULL;
-	}
 
 	/* Fill space with illegal/arch-dep instructions. */
 	bpf_fill_ill_insns(hdr, size);
 
-	hdr->pages = pages;
+	hdr->pages = size / PAGE_SIZE;
 	hole = min_t(unsigned int, size - (proglen + sizeof(*hdr)),
 		     PAGE_SIZE - sizeof(*hdr));
 	start = (get_random_int() % hole) & ~(alignment - 1);
@@ -571,10 +522,7 @@ bpf_jit_binary_alloc(unsigned int proglen, u8 **image_ptr,
 
 void bpf_jit_binary_free(struct bpf_binary_header *hdr)
 {
-	u32 pages = hdr->pages;
-
 	module_memfree(hdr);
-	bpf_jit_uncharge_modmem(pages);
 }
 
 /* This symbol is only overridden by archs that have different
@@ -595,6 +543,8 @@ void __weak bpf_jit_free(struct bpf_prog *fp)
 	bpf_prog_unlock_free(fp);
 }
 
+int bpf_jit_harden __read_mostly;
+
 static int bpf_jit_blind_insn(const struct bpf_insn *from,
 			      const struct bpf_insn *aux,
 			      struct bpf_insn *to_buff)
@@ -605,26 +555,6 @@ static int bpf_jit_blind_insn(const struct bpf_insn *from,
 
 	BUILD_BUG_ON(BPF_REG_AX  + 1 != MAX_BPF_JIT_REG);
 	BUILD_BUG_ON(MAX_BPF_REG + 1 != MAX_BPF_JIT_REG);
-
-	/* Constraints on AX register:
-	 *
-	 * AX register is inaccessible from user space. It is mapped in
-	 * all JITs, and used here for constant blinding rewrites. It is
-	 * typically "stateless" meaning its contents are only valid within
-	 * the executed instruction, but not across several instructions.
-	 * There are a few exceptions however which are further detailed
-	 * below.
-	 *
-	 * Constant blinding is only used by JITs, not in the interpreter.
-	 * The interpreter uses AX in some occasions as a local temporary
-	 * register e.g. in DIV or MOD instructions.
-	 *
-	 * In restricted circumstances, the verifier can also use the AX
-	 * register for rewrites as long as they do not interfere with
-	 * the above cases!
-	 */
-	if (from->dst_reg == BPF_REG_AX || from->src_reg == BPF_REG_AX)
-		goto out;
 
 	if (from->imm == 0 &&
 	    (from->code == (BPF_ALU   | BPF_MOV | BPF_K) ||
@@ -732,6 +662,8 @@ static struct bpf_prog *bpf_prog_clone_create(struct bpf_prog *fp_other,
 
 	fp = __vmalloc(fp_other->pages * PAGE_SIZE, gfp_flags, PAGE_KERNEL);
 	if (fp != NULL) {
+		kmemcheck_annotate_bitfield(fp, meta);
+
 		/* aux->prog still points to the fp_other one, so
 		 * when promoting the clone to the real program,
 		 * this still needs to be adapted.
@@ -828,7 +760,6 @@ noinline u64 __bpf_call_base(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5)
 }
 EXPORT_SYMBOL_GPL(__bpf_call_base);
 
-#ifndef CONFIG_BPF_JIT_ALWAYS_ON
 /**
  *	__bpf_prog_run - run eBPF program on a given context
  *	@ctx: is the data we are operating on
@@ -1013,22 +944,22 @@ select_insn:
 	ALU64_MOD_X:
 		if (unlikely(SRC == 0))
 			return 0;
-		div64_u64_rem(DST, SRC, &AX);
-		DST = AX;
+		div64_u64_rem(DST, SRC, &tmp);
+		DST = tmp;
 		CONT;
 	ALU_MOD_X:
-		if (unlikely((u32)SRC == 0))
+		if (unlikely(SRC == 0))
 			return 0;
-		AX = (u32) DST;
-		DST = do_div(AX, (u32) SRC);
+		tmp = (u32) DST;
+		DST = do_div(tmp, (u32) SRC);
 		CONT;
 	ALU64_MOD_K:
-		div64_u64_rem(DST, IMM, &AX);
-		DST = AX;
+		div64_u64_rem(DST, IMM, &tmp);
+		DST = tmp;
 		CONT;
 	ALU_MOD_K:
-		AX = (u32) DST;
-		DST = do_div(AX, (u32) IMM);
+		tmp = (u32) DST;
+		DST = do_div(tmp, (u32) IMM);
 		CONT;
 	ALU64_DIV_X:
 		if (unlikely(SRC == 0))
@@ -1036,19 +967,19 @@ select_insn:
 		DST = div64_u64(DST, SRC);
 		CONT;
 	ALU_DIV_X:
-		if (unlikely((u32)SRC == 0))
+		if (unlikely(SRC == 0))
 			return 0;
-		AX = (u32) DST;
-		do_div(AX, (u32) SRC);
-		DST = (u32) AX;
+		tmp = (u32) DST;
+		do_div(tmp, (u32) SRC);
+		DST = (u32) tmp;
 		CONT;
 	ALU64_DIV_K:
 		DST = div64_u64(DST, IMM);
 		CONT;
 	ALU_DIV_K:
-		AX = (u32) DST;
-		do_div(AX, (u32) IMM);
-		DST = (u32) AX;
+		tmp = (u32) DST;
+		do_div(tmp, (u32) IMM);
+		DST = (u32) tmp;
 		CONT;
 	ALU_END_TO_BE:
 		switch (IMM) {
@@ -1352,7 +1283,7 @@ STACK_FRAME_NON_STANDARD(___bpf_prog_run); /* jump table */
 static unsigned int PROG_NAME(stack_size)(const void *ctx, const struct bpf_insn *insn) \
 { \
 	u64 stack[stack_size / sizeof(u64)]; \
-	u64 regs[MAX_BPF_EXT_REG]; \
+	u64 regs[MAX_BPF_REG]; \
 \
 	FP = (u64) (unsigned long) &stack[ARRAY_SIZE(stack)]; \
 	ARG1 = (u64) (unsigned long) ctx; \
@@ -1378,18 +1309,6 @@ EVAL6(PROG_NAME_LIST, 32, 64, 96, 128, 160, 192)
 EVAL6(PROG_NAME_LIST, 224, 256, 288, 320, 352, 384)
 EVAL4(PROG_NAME_LIST, 416, 448, 480, 512)
 };
-
-#else
-static unsigned int __bpf_prog_ret0_warn(const void *ctx,
-					 const struct bpf_insn *insn)
-{
-	/* If this handler ever gets executed, then BPF_JIT_ALWAYS_ON
-	 * is not working properly, so warn about it!
-	 */
-	WARN_ON_ONCE(1);
-	return 0;
-}
-#endif
 
 bool bpf_prog_array_compatible(struct bpf_array *array,
 			       const struct bpf_prog *fp)
@@ -1438,13 +1357,9 @@ static int bpf_check_tail_call(const struct bpf_prog *fp)
  */
 struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
 {
-#ifndef CONFIG_BPF_JIT_ALWAYS_ON
 	u32 stack_depth = max_t(u32, fp->aux->stack_depth, 1);
 
 	fp->bpf_func = interpreters[(round_up(stack_depth, 32) / 32) - 1];
-#else
-	fp->bpf_func = __bpf_prog_ret0_warn;
-#endif
 
 	/* eBPF JITs can rewrite the program in case constant
 	 * blinding is active. However, in case of error during
@@ -1453,12 +1368,6 @@ struct bpf_prog *bpf_prog_select_runtime(struct bpf_prog *fp, int *err)
 	 * be JITed, but falls back to the interpreter.
 	 */
 	fp = bpf_int_jit_compile(fp);
-#ifdef CONFIG_BPF_JIT_ALWAYS_ON
-	if (!fp->jited) {
-		*err = -ENOTSUPP;
-		return fp;
-	}
-#endif
 	bpf_prog_lock_ro(fp);
 
 	/* The tail call compatibility check can only be done at

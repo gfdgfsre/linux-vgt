@@ -969,7 +969,6 @@ static int i40e_set_pauseparam(struct net_device *netdev,
 	i40e_status status;
 	u8 aq_failures;
 	int err = 0;
-	u32 is_an;
 
 	/* Changing the port's flow control is not supported if this isn't the
 	 * port's controlling PF
@@ -982,14 +981,15 @@ static int i40e_set_pauseparam(struct net_device *netdev,
 	if (vsi != pf->vsi[pf->lan_vsi])
 		return -EOPNOTSUPP;
 
-	is_an = hw_link_info->an_info & I40E_AQ_AN_COMPLETED;
-	if (pause->autoneg != is_an) {
+	if (pause->autoneg != ((hw_link_info->an_info & I40E_AQ_AN_COMPLETED) ?
+	    AUTONEG_ENABLE : AUTONEG_DISABLE)) {
 		netdev_info(netdev, "To change autoneg please use: ethtool -s <dev> autoneg <on|off>\n");
 		return -EOPNOTSUPP;
 	}
 
 	/* If we have link and don't have autoneg */
-	if (!test_bit(__I40E_DOWN, pf->state) && !is_an) {
+	if (!test_bit(__I40E_DOWN, pf->state) &&
+	    !(hw_link_info->an_info & I40E_AQ_AN_COMPLETED)) {
 		/* Send message that it might not necessarily work*/
 		netdev_info(netdev, "Autoneg did not complete so changing settings may not result in an actual change.\n");
 	}
@@ -1040,7 +1040,7 @@ static int i40e_set_pauseparam(struct net_device *netdev,
 		err = -EAGAIN;
 	}
 
-	if (!test_bit(__I40E_DOWN, pf->state) && is_an) {
+	if (!test_bit(__I40E_DOWN, pf->state)) {
 		/* Give it a little more time to try to come back */
 		msleep(75);
 		if (!test_bit(__I40E_DOWN, pf->state))
@@ -2588,16 +2588,16 @@ static int i40e_get_ethtool_fdir_entry(struct i40e_pf *pf,
 
 no_input_set:
 	if (input_set & I40E_L3_SRC_MASK)
-		fsp->m_u.tcp_ip4_spec.ip4src = htonl(0xFFFFFFFF);
+		fsp->m_u.tcp_ip4_spec.ip4src = htonl(0xFFFF);
 
 	if (input_set & I40E_L3_DST_MASK)
-		fsp->m_u.tcp_ip4_spec.ip4dst = htonl(0xFFFFFFFF);
+		fsp->m_u.tcp_ip4_spec.ip4dst = htonl(0xFFFF);
 
 	if (input_set & I40E_L4_SRC_MASK)
-		fsp->m_u.tcp_ip4_spec.psrc = htons(0xFFFF);
+		fsp->m_u.tcp_ip4_spec.psrc = htons(0xFFFFFFFF);
 
 	if (input_set & I40E_L4_DST_MASK)
-		fsp->m_u.tcp_ip4_spec.pdst = htons(0xFFFF);
+		fsp->m_u.tcp_ip4_spec.pdst = htons(0xFFFFFFFF);
 
 	if (rule->dest_ctl == I40E_FILTER_PROGRAM_DESC_DEST_DROP_PACKET)
 		fsp->ring_cookie = RX_CLS_FLOW_DISC;
@@ -3647,16 +3647,6 @@ static int i40e_check_fdir_input_set(struct i40e_vsi *vsi,
 	}
 
 	i40e_write_fd_input_set(pf, index, new_mask);
-
-	/* IP_USER_FLOW filters match both IPv4/Other and IPv4/Fragmented
-	 * frames. If we're programming the input set for IPv4/Other, we also
-	 * need to program the IPv4/Fragmented input set. Since we don't have
-	 * separate support, we'll always assume and enforce that the two flow
-	 * types must have matching input sets.
-	 */
-	if (index == I40E_FILTER_PCTYPE_NONF_IPV4_OTHER)
-		i40e_write_fd_input_set(pf, I40E_FILTER_PCTYPE_FRAG_IPV4,
-					new_mask);
 
 	/* Add the new offset and update table, if necessary */
 	if (new_flex_offset) {

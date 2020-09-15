@@ -1143,7 +1143,6 @@ struct ib_cm_id *ib_cm_insert_listen(struct ib_device *device,
 			/* Sharing an ib_cm_id with different handlers is not
 			 * supported */
 			spin_unlock_irqrestore(&cm.lock, flags);
-			ib_destroy_cm_id(cm_id);
 			return ERR_PTR(-EINVAL);
 		}
 		atomic_inc(&cm_id_priv->refcount);
@@ -1576,7 +1575,7 @@ static void cm_format_req_event(struct cm_work *work,
 	param->bth_pkey = cm_get_bth_pkey(work);
 	param->port = cm_id_priv->av.port->port_num;
 	param->primary_path = &work->path[0];
-	if (cm_req_has_alt_path(req_msg))
+	if (req_msg->alt_local_lid)
 		param->alternate_path = &work->path[1];
 	else
 		param->alternate_path = NULL;
@@ -1857,8 +1856,7 @@ static int cm_req_handler(struct cm_work *work)
 	cm_process_routed_req(req_msg, work->mad_recv_wc->wc);
 
 	memset(&work->path[0], 0, sizeof(work->path[0]));
-	if (cm_req_has_alt_path(req_msg))
-		memset(&work->path[1], 0, sizeof(work->path[1]));
+	memset(&work->path[1], 0, sizeof(work->path[1]));
 	grh = rdma_ah_read_grh(&cm_id_priv->av.ah_attr);
 	ret = ib_get_cached_gid(work->port->cm_dev->ib_device,
 				work->port->port_num,
@@ -3819,16 +3817,14 @@ static void cm_recv_handler(struct ib_mad_agent *mad_agent,
 	struct cm_port *port = mad_agent->context;
 	struct cm_work *work;
 	enum ib_cm_event_type event;
-	bool alt_path = false;
 	u16 attr_id;
 	int paths = 0;
 	int going_down = 0;
 
 	switch (mad_recv_wc->recv_buf.mad->mad_hdr.attr_id) {
 	case CM_REQ_ATTR_ID:
-		alt_path = cm_req_has_alt_path((struct cm_req_msg *)
-						mad_recv_wc->recv_buf.mad);
-		paths = 1 + (alt_path != 0);
+		paths = 1 + (((struct cm_req_msg *) mad_recv_wc->recv_buf.mad)->
+						    alt_local_lid != 0);
 		event = IB_CM_REQ_RECEIVED;
 		break;
 	case CM_MRA_ATTR_ID:

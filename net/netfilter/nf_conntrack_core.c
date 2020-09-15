@@ -25,7 +25,6 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/jhash.h>
-#include <linux/siphash.h>
 #include <linux/err.h>
 #include <linux/percpu.h>
 #include <linux/moduleparam.h>
@@ -301,40 +300,6 @@ nf_ct_invert_tuple(struct nf_conntrack_tuple *inverse,
 }
 EXPORT_SYMBOL_GPL(nf_ct_invert_tuple);
 
-/* Generate a almost-unique pseudo-id for a given conntrack.
- *
- * intentionally doesn't re-use any of the seeds used for hash
- * table location, we assume id gets exposed to userspace.
- *
- * Following nf_conn items do not change throughout lifetime
- * of the nf_conn:
- *
- * 1. nf_conn address
- * 2. nf_conn->master address (normally NULL)
- * 3. the associated net namespace
- * 4. the original direction tuple
- */
-u32 nf_ct_get_id(const struct nf_conn *ct)
-{
-	static __read_mostly siphash_key_t ct_id_seed;
-	unsigned long a, b, c, d;
-
-	net_get_random_once(&ct_id_seed, sizeof(ct_id_seed));
-
-	a = (unsigned long)ct;
-	b = (unsigned long)ct->master;
-	c = (unsigned long)nf_ct_net(ct);
-	d = (unsigned long)siphash(&ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple,
-				   sizeof(ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple),
-				   &ct_id_seed);
-#ifdef CONFIG_64BIT
-	return siphash_4u64((u64)a, (u64)b, (u64)c, (u64)d, &ct_id_seed);
-#else
-	return siphash_4u32((u32)a, (u32)b, (u32)c, (u32)d, &ct_id_seed);
-#endif
-}
-EXPORT_SYMBOL_GPL(nf_ct_get_id);
-
 static void
 clean_from_lists(struct nf_conn *ct)
 {
@@ -543,18 +508,6 @@ nf_ct_key_equal(struct nf_conntrack_tuple_hash *h,
 	       net_eq(net, nf_ct_net(ct));
 }
 
-static inline bool
-nf_ct_match(const struct nf_conn *ct1, const struct nf_conn *ct2)
-{
-	return nf_ct_tuple_equal(&ct1->tuplehash[IP_CT_DIR_ORIGINAL].tuple,
-				 &ct2->tuplehash[IP_CT_DIR_ORIGINAL].tuple) &&
-	       nf_ct_tuple_equal(&ct1->tuplehash[IP_CT_DIR_REPLY].tuple,
-				 &ct2->tuplehash[IP_CT_DIR_REPLY].tuple) &&
-	       nf_ct_zone_equal(ct1, nf_ct_zone(ct2), IP_CT_DIR_ORIGINAL) &&
-	       nf_ct_zone_equal(ct1, nf_ct_zone(ct2), IP_CT_DIR_REPLY) &&
-	       net_eq(nf_ct_net(ct1), nf_ct_net(ct2));
-}
-
 /* caller must hold rcu readlock and none of the nf_conntrack_locks */
 static void nf_ct_gc_expired(struct nf_conn *ct)
 {
@@ -748,21 +701,19 @@ static int nf_ct_resolve_clash(struct net *net, struct sk_buff *skb,
 	/* This is the conntrack entry already in hashes that won race. */
 	struct nf_conn *ct = nf_ct_tuplehash_to_ctrack(h);
 	const struct nf_conntrack_l4proto *l4proto;
-	enum ip_conntrack_info oldinfo;
-	struct nf_conn *loser_ct = nf_ct_get(skb, &oldinfo);
 
 	l4proto = __nf_ct_l4proto_find(nf_ct_l3num(ct), nf_ct_protonum(ct));
 	if (l4proto->allow_clash &&
+	    ((ct->status & IPS_NAT_DONE_MASK) == 0) &&
 	    !nf_ct_is_dying(ct) &&
 	    atomic_inc_not_zero(&ct->ct_general.use)) {
-		if (((ct->status & IPS_NAT_DONE_MASK) == 0) ||
-		    nf_ct_match(ct, loser_ct)) {
-			nf_ct_acct_merge(ct, ctinfo, loser_ct);
-			nf_conntrack_put(&loser_ct->ct_general);
-			nf_ct_set(skb, ct, oldinfo);
-			return NF_ACCEPT;
-		}
-		nf_ct_put(ct);
+		enum ip_conntrack_info oldinfo;
+		struct nf_conn *loser_ct = nf_ct_get(skb, &oldinfo);
+
+		nf_ct_acct_merge(ct, ctinfo, loser_ct);
+		nf_conntrack_put(&loser_ct->ct_general);
+		nf_ct_set(skb, ct, oldinfo);
+		return NF_ACCEPT;
 	}
 	NF_CT_STAT_INC(net, drop);
 	return NF_DROP;
@@ -812,18 +763,10 @@ __nf_conntrack_confirm(struct sk_buff *skb)
 	 * REJECT will give spurious warnings here.
 	 */
 
-	/* Another skb with the same unconfirmed conntrack may
-	 * win the race. This may happen for bridge(br_flood)
-	 * or broadcast/multicast packets do skb_clone with
-	 * unconfirmed conntrack.
+	/* No external references means no one else could have
+	 * confirmed us.
 	 */
-	if (unlikely(nf_ct_is_confirmed(ct))) {
-		WARN_ON_ONCE(1);
-		nf_conntrack_double_unlock(hash, reply_hash);
-		local_bh_enable();
-		return NF_DROP;
-	}
-
+	WARN_ON(nf_ct_is_confirmed(ct));
 	pr_debug("Confirming conntrack %p\n", ct);
 	/* We have to check the DYING flag after unlink to prevent
 	 * a race against nf_ct_get_next_corpse() possibly called from
@@ -926,22 +869,6 @@ nf_conntrack_tuple_taken(const struct nf_conntrack_tuple *tuple,
 		}
 
 		if (nf_ct_key_equal(h, tuple, zone, net)) {
-			/* Tuple is taken already, so caller will need to find
-			 * a new source port to use.
-			 *
-			 * Only exception:
-			 * If the *original tuples* are identical, then both
-			 * conntracks refer to the same flow.
-			 * This is a rare situation, it can occur e.g. when
-			 * more than one UDP packet is sent from same socket
-			 * in different threads.
-			 *
-			 * Let nf_ct_resolve_clash() deal with this later.
-			 */
-			if (nf_ct_tuple_equal(&ignored_conntrack->tuplehash[IP_CT_DIR_ORIGINAL].tuple,
-					      &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple))
-				continue;
-
 			NF_CT_STAT_INC_ATOMIC(net, found);
 			rcu_read_unlock();
 			return 1;
@@ -1005,22 +932,19 @@ static unsigned int early_drop_list(struct net *net,
 	return drops;
 }
 
-static noinline int early_drop(struct net *net, unsigned int hash)
+static noinline int early_drop(struct net *net, unsigned int _hash)
 {
-	unsigned int i, bucket;
+	unsigned int i;
 
 	for (i = 0; i < NF_CT_EVICTION_RANGE; i++) {
 		struct hlist_nulls_head *ct_hash;
-		unsigned int hsize, drops;
+		unsigned int hash, hsize, drops;
 
 		rcu_read_lock();
 		nf_conntrack_get_ht(&ct_hash, &hsize);
-		if (!i)
-			bucket = reciprocal_scale(hash, hsize);
-		else
-			bucket = (bucket + 1) % hsize;
+		hash = reciprocal_scale(_hash++, hsize);
 
-		drops = early_drop_list(net, &ct_hash[bucket]);
+		drops = early_drop_list(net, &ct_hash[hash]);
 		rcu_read_unlock();
 
 		if (drops) {
@@ -1208,9 +1132,9 @@ __nf_conntrack_alloc(struct net *net,
 	*(unsigned long *)(&ct->tuplehash[IP_CT_DIR_REPLY].hnnode.pprev) = hash;
 	ct->status = 0;
 	write_pnet(&ct->ct_net, net);
-	memset(&ct->__nfct_init_offset, 0,
+	memset(&ct->__nfct_init_offset[0], 0,
 	       offsetof(struct nf_conn, proto) -
-	       offsetof(struct nf_conn, __nfct_init_offset));
+	       offsetof(struct nf_conn, __nfct_init_offset[0]));
 
 	nf_ct_zone_add(ct, zone);
 
@@ -2025,7 +1949,7 @@ int nf_conntrack_set_hashsize(const char *val, struct kernel_param *kp)
 		return -EOPNOTSUPP;
 
 	/* On boot, we can set this without any fancy locking. */
-	if (!nf_conntrack_hash)
+	if (!nf_conntrack_htable_size)
 		return param_set_uint(val, kp);
 
 	rc = kstrtouint(val, 0, &hashsize);

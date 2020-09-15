@@ -1520,7 +1520,7 @@ struct nfs_commit_data {
 };
 
 struct nfs_pgio_completion_ops {
-	void	(*error_cleanup)(struct list_head *head, int);
+	void	(*error_cleanup)(struct list_head *head);
 	void	(*init_hdr)(struct nfs_pgio_header *hdr);
 	void	(*completion)(struct nfs_pgio_header *hdr);
 	void	(*reschedule_io)(struct nfs_pgio_header *hdr);
@@ -1530,7 +1530,7 @@ struct nfs_unlinkdata {
 	struct nfs_removeargs args;
 	struct nfs_removeres res;
 	struct dentry *dentry;
-	struct swait_queue_head wq;
+	wait_queue_head_t wq;
 	struct rpc_cred	*cred;
 	struct nfs_fattr dir_attr;
 	long timeout;

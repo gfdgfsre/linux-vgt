@@ -58,7 +58,6 @@ struct f_ncm {
 	struct usb_ep			*notify;
 	struct usb_request		*notify_req;
 	u8				notify_state;
-	atomic_t			notify_count;
 	bool				is_open;
 
 	const struct ndp_parser_opts	*parser_opts;
@@ -78,7 +77,9 @@ struct f_ncm {
 	struct sk_buff			*skb_tx_ndp;
 	u16				ndp_dgram_count;
 	bool				timer_force_tx;
+	struct tasklet_struct		tx_tasklet;
 	struct hrtimer			task_timer;
+
 	bool				timer_stopping;
 };
 
@@ -552,7 +553,7 @@ static void ncm_do_notify(struct f_ncm *ncm)
 	int				status;
 
 	/* notification already in flight? */
-	if (atomic_read(&ncm->notify_count))
+	if (!req)
 		return;
 
 	event = req->buf;
@@ -592,8 +593,7 @@ static void ncm_do_notify(struct f_ncm *ncm)
 	event->bmRequestType = 0xA1;
 	event->wIndex = cpu_to_le16(ncm->ctrl_id);
 
-	atomic_inc(&ncm->notify_count);
-
+	ncm->notify_req = NULL;
 	/*
 	 * In double buffering if there is a space in FIFO,
 	 * completion callback can be called right after the call,
@@ -603,7 +603,7 @@ static void ncm_do_notify(struct f_ncm *ncm)
 	status = usb_ep_queue(ncm->notify, req, GFP_ATOMIC);
 	spin_lock(&ncm->lock);
 	if (status < 0) {
-		atomic_dec(&ncm->notify_count);
+		ncm->notify_req = req;
 		DBG(cdev, "notify --> %d\n", status);
 	}
 }
@@ -638,19 +638,17 @@ static void ncm_notify_complete(struct usb_ep *ep, struct usb_request *req)
 	case 0:
 		VDBG(cdev, "Notification %02x sent\n",
 		     event->bNotificationType);
-		atomic_dec(&ncm->notify_count);
 		break;
 	case -ECONNRESET:
 	case -ESHUTDOWN:
-		atomic_set(&ncm->notify_count, 0);
 		ncm->notify_state = NCM_NOTIFY_NONE;
 		break;
 	default:
 		DBG(cdev, "event %02x --> %d\n",
 			event->bNotificationType, req->status);
-		atomic_dec(&ncm->notify_count);
 		break;
 	}
+	ncm->notify_req = req;
 	ncm_do_notify(ncm);
 	spin_unlock(&ncm->lock);
 }
@@ -1110,7 +1108,7 @@ static struct sk_buff *ncm_wrap_ntb(struct gether *port,
 
 		/* Delay the timer. */
 		hrtimer_start(&ncm->task_timer, TX_TIMEOUT_NSECS,
-			      HRTIMER_MODE_REL_SOFT);
+			      HRTIMER_MODE_REL);
 
 		/* Add the datagram position entries */
 		ntb_ndp = skb_put_zero(ncm->skb_tx_ndp, dgram_idx_len);
@@ -1154,15 +1152,17 @@ err:
 }
 
 /*
- * The transmit should only be run if no skb data has been sent
- * for a certain duration.
+ * This transmits the NTB if there are frames waiting.
  */
-static enum hrtimer_restart ncm_tx_timeout(struct hrtimer *data)
+static void ncm_tx_tasklet(unsigned long data)
 {
-	struct f_ncm *ncm = container_of(data, struct f_ncm, task_timer);
+	struct f_ncm	*ncm = (void *)data;
+
+	if (ncm->timer_stopping)
+		return;
 
 	/* Only send if data is available. */
-	if (!ncm->timer_stopping && ncm->skb_tx_data) {
+	if (ncm->skb_tx_data) {
 		ncm->timer_force_tx = true;
 
 		/* XXX This allowance of a NULL skb argument to ndo_start_xmit
@@ -1175,6 +1175,16 @@ static enum hrtimer_restart ncm_tx_timeout(struct hrtimer *data)
 
 		ncm->timer_force_tx = false;
 	}
+}
+
+/*
+ * The transmit should only be run if no skb data has been sent
+ * for a certain duration.
+ */
+static enum hrtimer_restart ncm_tx_timeout(struct hrtimer *data)
+{
+	struct f_ncm *ncm = container_of(data, struct f_ncm, task_timer);
+	tasklet_schedule(&ncm->tx_tasklet);
 	return HRTIMER_NORESTART;
 }
 
@@ -1507,7 +1517,8 @@ static int ncm_bind(struct usb_configuration *c, struct usb_function *f)
 	ncm->port.open = ncm_open;
 	ncm->port.close = ncm_close;
 
-	hrtimer_init(&ncm->task_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+	tasklet_init(&ncm->tx_tasklet, ncm_tx_tasklet, (unsigned long) ncm);
+	hrtimer_init(&ncm->task_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	ncm->task_timer.function = ncm_tx_timeout;
 
 	DBG(cdev, "CDC Network: %s speed IN/%s OUT/%s NOTIFY/%s\n",
@@ -1616,14 +1627,10 @@ static void ncm_unbind(struct usb_configuration *c, struct usb_function *f)
 	DBG(c->cdev, "ncm unbind\n");
 
 	hrtimer_cancel(&ncm->task_timer);
+	tasklet_kill(&ncm->tx_tasklet);
 
 	ncm_string_defs[0].id = 0;
 	usb_free_all_descriptors(f);
-
-	if (atomic_read(&ncm->notify_count)) {
-		usb_ep_dequeue(ncm->notify, ncm->notify_req);
-		atomic_set(&ncm->notify_count, 0);
-	}
 
 	kfree(ncm->notify_req->buf);
 	usb_ep_free_request(ncm->notify, ncm->notify_req);

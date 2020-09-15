@@ -422,10 +422,7 @@ static const char *vgacon_startup(void)
 		vga_video_port_val = VGA_CRT_DM;
 		if ((screen_info.orig_video_ega_bx & 0xff) != 0x10) {
 			static struct resource ega_console_resource =
-			    { .name	= "ega",
-			      .flags	= IORESOURCE_IO,
-			      .start	= 0x3B0,
-			      .end	= 0x3BF };
+			    { .name = "ega", .start = 0x3B0, .end = 0x3BF };
 			vga_video_type = VIDEO_TYPE_EGAM;
 			vga_vram_size = 0x8000;
 			display_desc = "EGA+";
@@ -433,15 +430,9 @@ static const char *vgacon_startup(void)
 					 &ega_console_resource);
 		} else {
 			static struct resource mda1_console_resource =
-			    { .name	= "mda",
-			      .flags	= IORESOURCE_IO,
-			      .start	= 0x3B0,
-			      .end	= 0x3BB };
+			    { .name = "mda", .start = 0x3B0, .end = 0x3BB };
 			static struct resource mda2_console_resource =
-			    { .name	= "mda",
-			      .flags	= IORESOURCE_IO,
-			      .start	= 0x3BF,
-			      .end	= 0x3BF };
+			    { .name = "mda", .start = 0x3BF, .end = 0x3BF };
 			vga_video_type = VIDEO_TYPE_MDA;
 			vga_vram_size = 0x2000;
 			display_desc = "*MDA";
@@ -463,21 +454,15 @@ static const char *vgacon_startup(void)
 			vga_vram_size = 0x8000;
 
 			if (!screen_info.orig_video_isVGA) {
-				static struct resource ega_console_resource =
-				    { .name	= "ega",
-				      .flags	= IORESOURCE_IO,
-				      .start	= 0x3C0,
-				      .end	= 0x3DF };
+				static struct resource ega_console_resource
+				    = { .name = "ega", .start = 0x3C0, .end = 0x3DF };
 				vga_video_type = VIDEO_TYPE_EGAC;
 				display_desc = "EGA";
 				request_resource(&ioport_resource,
 						 &ega_console_resource);
 			} else {
-				static struct resource vga_console_resource =
-				    { .name	= "vga+",
-				      .flags	= IORESOURCE_IO,
-				      .start	= 0x3C0,
-				      .end	= 0x3DF };
+				static struct resource vga_console_resource
+				    = { .name = "vga+", .start = 0x3C0, .end = 0x3DF };
 				vga_video_type = VIDEO_TYPE_VGAC;
 				display_desc = "VGA+";
 				request_resource(&ioport_resource,
@@ -509,10 +494,7 @@ static const char *vgacon_startup(void)
 			}
 		} else {
 			static struct resource cga_console_resource =
-			    { .name	= "cga",
-			      .flags	= IORESOURCE_IO,
-			      .start	= 0x3D4,
-			      .end	= 0x3D5 };
+			    { .name = "cga", .start = 0x3D4, .end = 0x3D5 };
 			vga_video_type = VIDEO_TYPE_CGA;
 			vga_vram_size = 0x2000;
 			display_desc = "*CGA";
@@ -1309,9 +1291,6 @@ static int vgacon_font_get(struct vc_data *c, struct console_font *font)
 static int vgacon_resize(struct vc_data *c, unsigned int width,
 			 unsigned int height, unsigned int user)
 {
-	if ((width << 1) * height > vga_vram_size)
-		return -EINVAL;
-
 	if (width % 2 || width > screen_info.orig_video_cols ||
 	    height > (screen_info.orig_video_lines * vga_default_font_height)/
 	    c->vc_font.height)

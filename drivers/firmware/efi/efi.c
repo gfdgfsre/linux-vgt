@@ -74,7 +74,7 @@ static unsigned long *efi_tables[] = {
 	&efi.mem_attr_table,
 };
 
-static bool disable_runtime = IS_ENABLED(CONFIG_PREEMPT_RT_BASE);
+static bool disable_runtime;
 static int __init setup_noefi(char *arg)
 {
 	disable_runtime = true;
@@ -99,9 +99,6 @@ static int __init parse_efi_cmdline(char *str)
 
 	if (parse_option_str(str, "noruntime"))
 		disable_runtime = true;
-
-	if (parse_option_str(str, "runtime"))
-		disable_runtime = false;
 
 	return 0;
 }
@@ -146,7 +143,8 @@ static ssize_t systab_show(struct kobject *kobj,
 	return str - buf;
 }
 
-static struct kobj_attribute efi_attr_systab = __ATTR_RO_MODE(systab, 0400);
+static struct kobj_attribute efi_attr_systab =
+			__ATTR(systab, 0400, systab_show, NULL);
 
 #define EFI_FIELD(var) efi.var
 
@@ -224,7 +222,7 @@ static void generic_ops_unregister(void)
 	efivars_unregister(&generic_efivars);
 }
 
-#ifdef CONFIG_EFI_CUSTOM_SSDT_OVERLAYS
+#if IS_ENABLED(CONFIG_ACPI)
 #define EFIVAR_SSDT_NAME_MAX	16
 static char efivar_ssdt[EFIVAR_SSDT_NAME_MAX] __initdata;
 static int __init efivar_ssdt_setup(char *str)
@@ -268,9 +266,6 @@ static __init int efivar_ssdt_load(void)
 	unsigned long size;
 	void *data;
 	int ret;
-
-	if (!efivar_ssdt[0])
-		return 0;
 
 	ret = efivar_init(efivar_ssdt_iter, &entries, true, &entries);
 
@@ -553,7 +548,7 @@ int __init efi_config_parse_tables(void *config_tables, int count, int sz,
 		}
 	}
 
-	if (!IS_ENABLED(CONFIG_X86_32) && efi_enabled(EFI_MEMMAP))
+	if (efi_enabled(EFI_MEMMAP))
 		efi_memattr_init();
 
 	/* Parse the EFI Properties table if it exists */

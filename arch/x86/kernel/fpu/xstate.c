@@ -15,7 +15,6 @@
 #include <asm/fpu/xstate.h>
 
 #include <asm/tlbflush.h>
-#include <asm/cpufeature.h>
 
 /*
  * Although we spell it out in here, the Processor Trace
@@ -35,19 +34,6 @@ static const char *xfeature_names[] =
 	"Processor Trace (unused)"	,
 	"Protection Keys User registers",
 	"unknown xstate feature"	,
-};
-
-static short xsave_cpuid_features[] __initdata = {
-	X86_FEATURE_FPU,
-	X86_FEATURE_XMM,
-	X86_FEATURE_AVX,
-	X86_FEATURE_MPX,
-	X86_FEATURE_MPX,
-	X86_FEATURE_AVX512F,
-	X86_FEATURE_AVX512F,
-	X86_FEATURE_AVX512F,
-	X86_FEATURE_INTEL_PT,
-	X86_FEATURE_PKU,
 };
 
 /*
@@ -73,6 +59,26 @@ unsigned int fpu_user_xstate_size;
 void fpu__xstate_clear_all_cpu_caps(void)
 {
 	setup_clear_cpu_cap(X86_FEATURE_XSAVE);
+	setup_clear_cpu_cap(X86_FEATURE_XSAVEOPT);
+	setup_clear_cpu_cap(X86_FEATURE_XSAVEC);
+	setup_clear_cpu_cap(X86_FEATURE_XSAVES);
+	setup_clear_cpu_cap(X86_FEATURE_AVX);
+	setup_clear_cpu_cap(X86_FEATURE_AVX2);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512F);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512IFMA);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512PF);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512ER);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512CD);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512DQ);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512BW);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512VL);
+	setup_clear_cpu_cap(X86_FEATURE_MPX);
+	setup_clear_cpu_cap(X86_FEATURE_XGETBV1);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512VBMI);
+	setup_clear_cpu_cap(X86_FEATURE_PKU);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512_4VNNIW);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512_4FMAPS);
+	setup_clear_cpu_cap(X86_FEATURE_AVX512_VPOPCNTDQ);
 }
 
 /*
@@ -720,7 +726,6 @@ void __init fpu__init_system_xstate(void)
 	unsigned int eax, ebx, ecx, edx;
 	static int on_boot_cpu __initdata = 1;
 	int err;
-	int i;
 
 	WARN_ON_FPU(!on_boot_cpu);
 	on_boot_cpu = 0;
@@ -752,14 +757,6 @@ void __init fpu__init_system_xstate(void)
 		 */
 		pr_err("x86/fpu: FP/SSE not present amongst the CPU's xstate features: 0x%llx.\n", xfeatures_mask);
 		goto out_disable;
-	}
-
-	/*
-	 * Clear XSAVE features that are disabled in the normal CPUID.
-	 */
-	for (i = 0; i < ARRAY_SIZE(xsave_cpuid_features); i++) {
-		if (!boot_cpu_has(xsave_cpuid_features[i]))
-			xfeatures_mask &= ~BIT(i);
 	}
 
 	xfeatures_mask &= fpu__get_supported_xfeatures_mask();
@@ -964,31 +961,18 @@ static inline bool xfeatures_mxcsr_quirk(u64 xfeatures)
 	return true;
 }
 
-static void fill_gap(unsigned to, void **kbuf, unsigned *pos, unsigned *count)
+/*
+ * This is similar to user_regset_copyout(), but will not add offset to
+ * the source data pointer or increment pos, count, kbuf, and ubuf.
+ */
+static inline void
+__copy_xstate_to_kernel(void *kbuf, const void *data,
+			unsigned int offset, unsigned int size, unsigned int size_total)
 {
-	if (*pos < to) {
-		unsigned size = to - *pos;
+	if (offset < size_total) {
+		unsigned int copy = min(size, size_total - offset);
 
-		if (size > *count)
-			size = *count;
-		memcpy(*kbuf, (void *)&init_fpstate.xsave + *pos, size);
-		*kbuf += size;
-		*pos += size;
-		*count -= size;
-	}
-}
-
-static void copy_part(unsigned offset, unsigned size, void *from,
-			void **kbuf, unsigned *pos, unsigned *count)
-{
-	fill_gap(offset, kbuf, pos, count);
-	if (size > *count)
-		size = *count;
-	if (size) {
-		memcpy(*kbuf, from, size);
-		*kbuf += size;
-		*pos += size;
-		*count -= size;
+		memcpy(kbuf + offset, data, copy);
 	}
 }
 
@@ -1001,9 +985,8 @@ static void copy_part(unsigned offset, unsigned size, void *from,
  */
 int copy_xstate_to_kernel(void *kbuf, struct xregs_state *xsave, unsigned int offset_start, unsigned int size_total)
 {
+	unsigned int offset, size;
 	struct xstate_header header;
-	const unsigned off_mxcsr = offsetof(struct fxregs_state, mxcsr);
-	unsigned count = size_total;
 	int i;
 
 	/*
@@ -1019,42 +1002,46 @@ int copy_xstate_to_kernel(void *kbuf, struct xregs_state *xsave, unsigned int of
 	header.xfeatures = xsave->header.xfeatures;
 	header.xfeatures &= ~XFEATURE_MASK_SUPERVISOR;
 
-	if (header.xfeatures & XFEATURE_MASK_FP)
-		copy_part(0, off_mxcsr,
-			  &xsave->i387, &kbuf, &offset_start, &count);
-	if (header.xfeatures & (XFEATURE_MASK_SSE | XFEATURE_MASK_YMM))
-		copy_part(off_mxcsr, MXCSR_AND_FLAGS_SIZE,
-			  &xsave->i387.mxcsr, &kbuf, &offset_start, &count);
-	if (header.xfeatures & XFEATURE_MASK_FP)
-		copy_part(offsetof(struct fxregs_state, st_space), 128,
-			  &xsave->i387.st_space, &kbuf, &offset_start, &count);
-	if (header.xfeatures & XFEATURE_MASK_SSE)
-		copy_part(xstate_offsets[XFEATURE_SSE], 256,
-			  &xsave->i387.xmm_space, &kbuf, &offset_start, &count);
-	/*
-	 * Fill xsave->i387.sw_reserved value for ptrace frame:
-	 */
-	copy_part(offsetof(struct fxregs_state, sw_reserved), 48,
-		  xstate_fx_sw_bytes, &kbuf, &offset_start, &count);
 	/*
 	 * Copy xregs_state->header:
 	 */
-	copy_part(offsetof(struct xregs_state, header), sizeof(header),
-		  &header, &kbuf, &offset_start, &count);
+	offset = offsetof(struct xregs_state, header);
+	size = sizeof(header);
 
-	for (i = FIRST_EXTENDED_XFEATURE; i < XFEATURE_MAX; i++) {
+	__copy_xstate_to_kernel(kbuf, &header, offset, size, size_total);
+
+	for (i = 0; i < XFEATURE_MAX; i++) {
 		/*
 		 * Copy only in-use xstates:
 		 */
 		if ((header.xfeatures >> i) & 1) {
 			void *src = __raw_xsave_addr(xsave, 1 << i);
 
-			copy_part(xstate_offsets[i], xstate_sizes[i],
-				  src, &kbuf, &offset_start, &count);
+			offset = xstate_offsets[i];
+			size = xstate_sizes[i];
+
+			/* The next component has to fit fully into the output buffer: */
+			if (offset + size > size_total)
+				break;
+
+			__copy_xstate_to_kernel(kbuf, src, offset, size, size_total);
 		}
 
 	}
-	fill_gap(size_total, &kbuf, &offset_start, &count);
+
+	if (xfeatures_mxcsr_quirk(header.xfeatures)) {
+		offset = offsetof(struct fxregs_state, mxcsr);
+		size = MXCSR_AND_FLAGS_SIZE;
+		__copy_xstate_to_kernel(kbuf, &xsave->i387.mxcsr, offset, size, size_total);
+	}
+
+	/*
+	 * Fill xsave->i387.sw_reserved value for ptrace frame:
+	 */
+	offset = offsetof(struct fxregs_state, sw_reserved);
+	size = sizeof(xstate_fx_sw_bytes);
+
+	__copy_xstate_to_kernel(kbuf, xstate_fx_sw_bytes, offset, size, size_total);
 
 	return 0;
 }

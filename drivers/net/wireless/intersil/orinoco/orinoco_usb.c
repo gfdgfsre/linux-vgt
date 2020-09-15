@@ -697,7 +697,7 @@ static void ezusb_req_ctx_wait(struct ezusb_priv *upriv,
 			while (!ctx->done.done && msecs--)
 				udelay(1000);
 		} else {
-			swait_event_interruptible(ctx->done.wait,
+			wait_event_interruptible(ctx->done.wait,
 						 ctx->done.done);
 		}
 		break;
@@ -1364,8 +1364,7 @@ static int ezusb_init(struct hermes *hw)
 	int retval;
 
 	BUG_ON(in_interrupt());
-	if (!upriv)
-		return -EINVAL;
+	BUG_ON(!upriv);
 
 	upriv->reply_count = 0;
 	/* Write the MAGIC number on the simulated registers to keep
@@ -1614,9 +1613,9 @@ static int ezusb_probe(struct usb_interface *interface,
 	/* set up the endpoint information */
 	/* check out the endpoints */
 
-	iface_desc = &interface->cur_altsetting->desc;
+	iface_desc = &interface->altsetting[0].desc;
 	for (i = 0; i < iface_desc->bNumEndpoints; ++i) {
-		ep = &interface->cur_altsetting->endpoint[i].desc;
+		ep = &interface->altsetting[0].endpoint[i].desc;
 
 		if (usb_endpoint_is_bulk_in(ep)) {
 			/* we found a bulk in endpoint */

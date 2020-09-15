@@ -20,14 +20,12 @@
 #include <linux/sched.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
-#include <linux/delay.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/list.h>
 #include <linux/completion.h>
 #include <asm/current.h>
-#include <linux/magic.h>
 
 /* This is the range of ioctl() numbers we claim as ours */
 #define AUTOFS_IOC_FIRST     AUTOFS_IOC_READY
@@ -126,8 +124,7 @@ struct autofs_sb_info {
 
 static inline struct autofs_sb_info *autofs4_sbi(struct super_block *sb)
 {
-	return sb->s_magic != AUTOFS_SUPER_MAGIC ?
-		NULL : (struct autofs_sb_info *)(sb->s_fs_info);
+	return (struct autofs_sb_info *)(sb->s_fs_info);
 }
 
 static inline struct autofs_info *autofs4_dentry_ino(struct dentry *dentry)

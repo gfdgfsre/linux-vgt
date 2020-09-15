@@ -625,7 +625,7 @@ re_read:
 		err = read_sb_page(bitmap->mddev,
 				   offset,
 				   sb_page,
-				   0, sizeof(bitmap_super_t));
+				   0, PAGE_SIZE);
 	}
 	if (err)
 		return err;
@@ -1729,7 +1729,7 @@ void bitmap_flush(struct mddev *mddev)
 /*
  * free memory that was allocated
  */
-void md_bitmap_free(struct bitmap *bitmap)
+void bitmap_free(struct bitmap *bitmap)
 {
 	unsigned long k, pages;
 	struct bitmap_page *bp;
@@ -1763,7 +1763,7 @@ void md_bitmap_free(struct bitmap *bitmap)
 	kfree(bp);
 	kfree(bitmap);
 }
-EXPORT_SYMBOL(md_bitmap_free);
+EXPORT_SYMBOL(bitmap_free);
 
 void bitmap_wait_behind_writes(struct mddev *mddev)
 {
@@ -1796,7 +1796,7 @@ void bitmap_destroy(struct mddev *mddev)
 	if (mddev->thread)
 		mddev->thread->timeout = MAX_SCHEDULE_TIMEOUT;
 
-	md_bitmap_free(bitmap);
+	bitmap_free(bitmap);
 }
 
 /*
@@ -1815,12 +1815,6 @@ struct bitmap *bitmap_create(struct mddev *mddev, int slot)
 	BUILD_BUG_ON(sizeof(bitmap_super_t) != 256);
 
 	BUG_ON(file && mddev->bitmap_info.offset);
-
-	if (test_bit(MD_HAS_JOURNAL, &mddev->flags)) {
-		pr_notice("md/raid:%s: array with journal cannot have bitmap\n",
-			  mdname(mddev));
-		return ERR_PTR(-EBUSY);
-	}
 
 	bitmap = kzalloc(sizeof(*bitmap), GFP_KERNEL);
 	if (!bitmap)
@@ -1887,7 +1881,7 @@ struct bitmap *bitmap_create(struct mddev *mddev, int slot)
 
 	return bitmap;
  error:
-	md_bitmap_free(bitmap);
+	bitmap_free(bitmap);
 	return ERR_PTR(err);
 }
 
@@ -1958,7 +1952,7 @@ struct bitmap *get_bitmap_from_slot(struct mddev *mddev, int slot)
 
 	rv = bitmap_init_from_disk(bitmap, 0);
 	if (rv) {
-		md_bitmap_free(bitmap);
+		bitmap_free(bitmap);
 		return ERR_PTR(rv);
 	}
 
@@ -2129,7 +2123,7 @@ int bitmap_resize(struct bitmap *bitmap, sector_t blocks,
 	if (store.sb_page && bitmap->storage.sb_page)
 		memcpy(page_address(store.sb_page),
 		       page_address(bitmap->storage.sb_page),
-		       sizeof(bitmap_super_t));
+		       PAGE_SIZE);
 	bitmap_file_unmap(&bitmap->storage);
 	bitmap->storage = store;
 
@@ -2158,7 +2152,6 @@ int bitmap_resize(struct bitmap *bitmap, sector_t blocks,
 				for (k = 0; k < page; k++) {
 					kfree(new_bp[k].map);
 				}
-				kfree(new_bp);
 
 				/* restore some fields from old_counts */
 				bitmap->counts.bp = old_counts.bp;
@@ -2207,14 +2200,6 @@ int bitmap_resize(struct bitmap *bitmap, sector_t blocks,
 				old_blocks = new_blocks;
 		}
 		block += old_blocks;
-	}
-
-	if (bitmap->counts.bp != old_counts.bp) {
-		unsigned long k;
-		for (k = 0; k < old_counts.pages; k++)
-			if (!old_counts.bp[k].hijacked)
-				kfree(old_counts.bp[k].map);
-		kfree(old_counts.bp);
 	}
 
 	if (!init) {

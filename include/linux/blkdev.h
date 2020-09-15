@@ -27,7 +27,6 @@
 #include <linux/percpu-refcount.h>
 #include <linux/scatterlist.h>
 #include <linux/blkzoned.h>
-#include <linux/swork.h>
 
 struct module;
 struct scsi_ioctl_command;
@@ -135,11 +134,8 @@ typedef __u32 __bitwise req_flags_t;
  */
 struct request {
 	struct list_head queuelist;
-#ifdef CONFIG_PREEMPT_RT_FULL
-	struct work_struct work;
-#endif
 	union {
-		struct __call_single_data csd;
+		call_single_data_t csd;
 		u64 fifo_time;
 	};
 
@@ -245,36 +241,19 @@ struct request {
 	struct request *next_rq;
 };
 
-static inline bool blk_op_is_scsi(unsigned int op)
-{
-	return op == REQ_OP_SCSI_IN || op == REQ_OP_SCSI_OUT;
-}
-
-static inline bool blk_op_is_private(unsigned int op)
-{
-	return op == REQ_OP_DRV_IN || op == REQ_OP_DRV_OUT;
-}
-
 static inline bool blk_rq_is_scsi(struct request *rq)
 {
-	return blk_op_is_scsi(req_op(rq));
+	return req_op(rq) == REQ_OP_SCSI_IN || req_op(rq) == REQ_OP_SCSI_OUT;
 }
 
 static inline bool blk_rq_is_private(struct request *rq)
 {
-	return blk_op_is_private(req_op(rq));
+	return req_op(rq) == REQ_OP_DRV_IN || req_op(rq) == REQ_OP_DRV_OUT;
 }
 
 static inline bool blk_rq_is_passthrough(struct request *rq)
 {
 	return blk_rq_is_scsi(rq) || blk_rq_is_private(rq);
-}
-
-static inline bool bio_is_passthrough(struct bio *bio)
-{
-	unsigned op = bio_op(bio);
-
-	return blk_op_is_scsi(op) || blk_op_is_private(op);
 }
 
 static inline unsigned short req_get_ioprio(struct request *req)
@@ -347,7 +326,6 @@ struct queue_limits {
 	unsigned int		max_sectors;
 	unsigned int		max_segment_size;
 	unsigned int		physical_block_size;
-	unsigned int		logical_block_size;
 	unsigned int		alignment_offset;
 	unsigned int		io_min;
 	unsigned int		io_opt;
@@ -358,6 +336,7 @@ struct queue_limits {
 	unsigned int		discard_granularity;
 	unsigned int		discard_alignment;
 
+	unsigned short		logical_block_size;
 	unsigned short		max_segments;
 	unsigned short		max_integrity_segments;
 	unsigned short		max_discard_segments;
@@ -572,7 +551,7 @@ struct request_queue {
 	unsigned int		sg_reserved_size;
 	int			node;
 #ifdef CONFIG_BLK_DEV_IO_TRACE
-	struct blk_trace __rcu	*blk_trace;
+	struct blk_trace	*blk_trace;
 	struct mutex		blk_trace_mutex;
 #endif
 	/*
@@ -600,7 +579,6 @@ struct request_queue {
 #endif
 	struct rcu_head		rcu_head;
 	wait_queue_head_t	mq_freeze_wq;
-	struct swork_event	mq_pcpu_wake;
 	struct percpu_ref	q_usage_counter;
 	struct list_head	all_q_node;
 
@@ -974,7 +952,7 @@ extern int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
 extern void blk_rq_unprep_clone(struct request *rq);
 extern blk_status_t blk_insert_cloned_request(struct request_queue *q,
 				     struct request *rq);
-extern int blk_rq_append_bio(struct request *rq, struct bio **bio);
+extern int blk_rq_append_bio(struct request *rq, struct bio *bio);
 extern void blk_delay_queue(struct request_queue *, unsigned long);
 extern void blk_queue_split(struct request_queue *, struct bio **);
 extern void blk_recount_segments(struct request_queue *, struct bio *);
@@ -1093,8 +1071,8 @@ static inline unsigned int blk_max_size_offset(struct request_queue *q,
 	if (!q->limits.chunk_sectors)
 		return q->limits.max_sectors;
 
-	return min(q->limits.max_sectors, (unsigned int)(q->limits.chunk_sectors -
-			(offset & (q->limits.chunk_sectors - 1))));
+	return q->limits.chunk_sectors -
+			(offset & (q->limits.chunk_sectors - 1));
 }
 
 static inline unsigned int blk_rq_get_max_sectors(struct request *rq,
@@ -1183,7 +1161,7 @@ extern void blk_queue_max_write_same_sectors(struct request_queue *q,
 		unsigned int max_write_same_sectors);
 extern void blk_queue_max_write_zeroes_sectors(struct request_queue *q,
 		unsigned int max_write_same_sectors);
-extern void blk_queue_logical_block_size(struct request_queue *, unsigned int);
+extern void blk_queue_logical_block_size(struct request_queue *, unsigned short);
 extern void blk_queue_physical_block_size(struct request_queue *, unsigned int);
 extern void blk_queue_alignment_offset(struct request_queue *q,
 				       unsigned int alignment);
@@ -1441,7 +1419,7 @@ static inline unsigned int queue_max_segment_size(struct request_queue *q)
 	return q->limits.max_segment_size;
 }
 
-static inline unsigned queue_logical_block_size(struct request_queue *q)
+static inline unsigned short queue_logical_block_size(struct request_queue *q)
 {
 	int retval = 512;
 
@@ -1451,7 +1429,7 @@ static inline unsigned queue_logical_block_size(struct request_queue *q)
 	return retval;
 }
 
-static inline unsigned int bdev_logical_block_size(struct block_device *bdev)
+static inline unsigned short bdev_logical_block_size(struct block_device *bdev)
 {
 	return queue_logical_block_size(bdev_get_queue(bdev));
 }

@@ -3,7 +3,6 @@
  * Copyright 2006-2007	Jiri Benc <jbenc@suse.cz>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
  * Copyright (C) 2015 - 2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2020 Intel Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -315,7 +314,7 @@ struct sta_info *sta_info_alloc(struct ieee80211_sub_if_data *sdata,
 
 	if (ieee80211_hw_check(hw, USES_RSS)) {
 		sta->pcpu_rx_stats =
-			alloc_percpu_gfp(struct ieee80211_sta_rx_stats, gfp);
+			alloc_percpu(struct ieee80211_sta_rx_stats);
 		if (!sta->pcpu_rx_stats)
 			goto free;
 	}
@@ -440,7 +439,6 @@ free_txq:
 	if (sta->sta.txq[0])
 		kfree(to_txq_info(sta->sta.txq[0]));
 free:
-	free_percpu(sta->pcpu_rx_stats);
 #ifdef CONFIG_MAC80211_MESH
 	kfree(sta->mesh);
 #endif
@@ -951,11 +949,6 @@ static void __sta_info_destroy_part2(struct sta_info *sta)
 
 	might_sleep();
 	lockdep_assert_held(&local->sta_mtx);
-
-	while (sta->sta_state == IEEE80211_STA_AUTHORIZED) {
-		ret = sta_info_move_state(sta, IEEE80211_STA_ASSOC);
-		WARN_ON_ONCE(ret);
-	}
 
 	/* now keys can no longer be reached */
 	ieee80211_free_sta_keys(local, sta);
@@ -1905,10 +1898,6 @@ int sta_info_move_state(struct sta_info *sta,
 			ieee80211_check_fast_xmit(sta);
 			ieee80211_check_fast_rx(sta);
 		}
-		if (sta->sdata->vif.type == NL80211_IFTYPE_AP_VLAN ||
-		    sta->sdata->vif.type == NL80211_IFTYPE_AP)
-			cfg80211_send_layer2_update(sta->sdata->dev,
-						    sta->sta.addr);
 		break;
 	default:
 		break;
@@ -2323,8 +2312,7 @@ unsigned long ieee80211_sta_last_active(struct sta_info *sta)
 {
 	struct ieee80211_sta_rx_stats *stats = sta_get_last_rx_stats(sta);
 
-	if (!sta->status_stats.last_ack ||
-	    time_after(stats->last_rx, sta->status_stats.last_ack))
+	if (time_after(stats->last_rx, sta->status_stats.last_ack))
 		return stats->last_rx;
 	return sta->status_stats.last_ack;
 }

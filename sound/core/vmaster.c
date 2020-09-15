@@ -68,13 +68,10 @@ static int slave_update(struct link_slave *slave)
 		return -ENOMEM;
 	uctl->id = slave->slave.id;
 	err = slave->slave.get(&slave->slave, uctl);
-	if (err < 0)
-		goto error;
 	for (ch = 0; ch < slave->info.count; ch++)
 		slave->vals[ch] = uctl->value.integer.value[ch];
- error:
 	kfree(uctl);
-	return err < 0 ? err : 0;
+	return 0;
 }
 
 /* get the slave ctl info and save the initial values */
@@ -498,9 +495,7 @@ EXPORT_SYMBOL_GPL(snd_ctl_sync_vmaster);
  * Returns 0 if successful, or a negative error code.
  */
 int snd_ctl_apply_vmaster_slaves(struct snd_kcontrol *kctl,
-				 int (*func)(struct snd_kcontrol *vslave,
-					     struct snd_kcontrol *slave,
-					     void *arg),
+				 int (*func)(struct snd_kcontrol *, void *),
 				 void *arg)
 {
 	struct link_master *master;
@@ -512,7 +507,7 @@ int snd_ctl_apply_vmaster_slaves(struct snd_kcontrol *kctl,
 	if (err < 0)
 		return err;
 	list_for_each_entry(slave, &master->slaves, list) {
-		err = func(slave->kctl, &slave->slave, arg);
+		err = func(&slave->slave, arg);
 		if (err < 0)
 			return err;
 	}

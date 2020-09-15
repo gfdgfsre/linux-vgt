@@ -21,6 +21,8 @@
 
 #include "bpf_jit64.h"
 
+int bpf_jit_enable __read_mostly;
+
 static void bpf_jit_fill_ill_insns(void *area, unsigned int size)
 {
 	memset32(area, BREAKPOINT_INSTRUCTION, size/4);
@@ -201,37 +203,25 @@ static void bpf_jit_build_epilogue(u32 *image, struct codegen_context *ctx)
 
 static void bpf_jit_emit_func_call(u32 *image, struct codegen_context *ctx, u64 func)
 {
-	unsigned int i, ctx_idx = ctx->idx;
-
-	/* Load function address into r12 */
-	PPC_LI64(12, func);
-
-	/* For bpf-to-bpf function calls, the callee's address is unknown
-	 * until the last extra pass. As seen above, we use PPC_LI64() to
-	 * load the callee's address, but this may optimize the number of
-	 * instructions required based on the nature of the address.
-	 *
-	 * Since we don't want the number of instructions emitted to change,
-	 * we pad the optimized PPC_LI64() call with NOPs to guarantee that
-	 * we always have a five-instruction sequence, which is the maximum
-	 * that PPC_LI64() can emit.
-	 */
-	for (i = ctx->idx - ctx_idx; i < 5; i++)
-		PPC_NOP();
-
 #ifdef PPC64_ELF_ABI_v1
+	/* func points to the function descriptor */
+	PPC_LI64(b2p[TMP_REG_2], func);
+	/* Load actual entry point from function descriptor */
+	PPC_BPF_LL(b2p[TMP_REG_1], b2p[TMP_REG_2], 0);
+	/* ... and move it to LR */
+	PPC_MTLR(b2p[TMP_REG_1]);
 	/*
 	 * Load TOC from function descriptor at offset 8.
 	 * We can clobber r2 since we get called through a
 	 * function pointer (so caller will save/restore r2)
 	 * and since we don't use a TOC ourself.
 	 */
-	PPC_BPF_LL(2, 12, 8);
-	/* Load actual entry point from function descriptor */
-	PPC_BPF_LL(12, 12, 0);
-#endif
-
+	PPC_BPF_LL(2, b2p[TMP_REG_2], 8);
+#else
+	/* We can clobber r12 */
+	PPC_FUNC_ADDR(12, func);
 	PPC_MTLR(12);
+#endif
 	PPC_BLRL();
 }
 
@@ -251,7 +241,6 @@ static void bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 
 	 *   goto out;
 	 */
 	PPC_LWZ(b2p[TMP_REG_1], b2p_bpf_array, offsetof(struct bpf_array, map.max_entries));
-	PPC_RLWINM(b2p_index, b2p_index, 0, 0, 31);
 	PPC_CMPLW(b2p_index, b2p[TMP_REG_1]);
 	PPC_BCC(COND_GE, out);
 
@@ -259,7 +248,7 @@ static void bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 
 	 * if (tail_call_cnt > MAX_TAIL_CALL_CNT)
 	 *   goto out;
 	 */
-	PPC_BPF_LL(b2p[TMP_REG_1], 1, bpf_jit_stack_tailcallcnt(ctx));
+	PPC_LD(b2p[TMP_REG_1], 1, bpf_jit_stack_tailcallcnt(ctx));
 	PPC_CMPLWI(b2p[TMP_REG_1], MAX_TAIL_CALL_CNT);
 	PPC_BCC(COND_GT, out);
 
@@ -272,7 +261,7 @@ static void bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 
 	/* prog = array->ptrs[index]; */
 	PPC_MULI(b2p[TMP_REG_1], b2p_index, 8);
 	PPC_ADD(b2p[TMP_REG_1], b2p[TMP_REG_1], b2p_bpf_array);
-	PPC_BPF_LL(b2p[TMP_REG_1], b2p[TMP_REG_1], offsetof(struct bpf_array, ptrs));
+	PPC_LD(b2p[TMP_REG_1], b2p[TMP_REG_1], offsetof(struct bpf_array, ptrs));
 
 	/*
 	 * if (prog == NULL)
@@ -282,7 +271,7 @@ static void bpf_jit_emit_tail_call(u32 *image, struct codegen_context *ctx, u32 
 	PPC_BCC(COND_EQ, out);
 
 	/* goto *(prog->bpf_func + prologue_size); */
-	PPC_BPF_LL(b2p[TMP_REG_1], b2p[TMP_REG_1], offsetof(struct bpf_prog, bpf_func));
+	PPC_LD(b2p[TMP_REG_1], b2p[TMP_REG_1], offsetof(struct bpf_prog, bpf_func));
 #ifdef PPC64_ELF_ABI_v1
 	/* skip past the function descriptor */
 	PPC_ADDI(b2p[TMP_REG_1], b2p[TMP_REG_1],
@@ -320,7 +309,6 @@ static int bpf_jit_build_body(struct bpf_prog *fp, u32 *image,
 		u64 imm64;
 		u8 *func;
 		u32 true_cond;
-		u32 tmp_idx;
 
 		/*
 		 * addrs[] maps a BPF bytecode address into a real offset from
@@ -413,12 +401,12 @@ static int bpf_jit_build_body(struct bpf_prog *fp, u32 *image,
 			PPC_LI(b2p[BPF_REG_0], 0);
 			PPC_JMP(exit_addr);
 			if (BPF_OP(code) == BPF_MOD) {
-				PPC_DIVDU(b2p[TMP_REG_1], dst_reg, src_reg);
+				PPC_DIVD(b2p[TMP_REG_1], dst_reg, src_reg);
 				PPC_MULD(b2p[TMP_REG_1], src_reg,
 						b2p[TMP_REG_1]);
 				PPC_SUB(dst_reg, dst_reg, b2p[TMP_REG_1]);
 			} else
-				PPC_DIVDU(dst_reg, dst_reg, src_reg);
+				PPC_DIVD(dst_reg, dst_reg, src_reg);
 			break;
 		case BPF_ALU | BPF_MOD | BPF_K: /* (u32) dst %= (u32) imm */
 		case BPF_ALU | BPF_DIV | BPF_K: /* (u32) dst /= (u32) imm */
@@ -446,7 +434,7 @@ static int bpf_jit_build_body(struct bpf_prog *fp, u32 *image,
 				break;
 			case BPF_ALU64:
 				if (BPF_OP(code) == BPF_MOD) {
-					PPC_DIVDU(b2p[TMP_REG_2], dst_reg,
+					PPC_DIVD(b2p[TMP_REG_2], dst_reg,
 							b2p[TMP_REG_1]);
 					PPC_MULD(b2p[TMP_REG_1],
 							b2p[TMP_REG_1],
@@ -454,7 +442,7 @@ static int bpf_jit_build_body(struct bpf_prog *fp, u32 *image,
 					PPC_SUB(dst_reg, dst_reg,
 							b2p[TMP_REG_1]);
 				} else
-					PPC_DIVDU(dst_reg, dst_reg,
+					PPC_DIVD(dst_reg, dst_reg,
 							b2p[TMP_REG_1]);
 				break;
 			}
@@ -614,7 +602,7 @@ bpf_alu32_trunc:
 				 * the instructions generated will remain the
 				 * same across all passes
 				 */
-				PPC_BPF_STL(dst_reg, 1, bpf_jit_stack_local(ctx));
+				PPC_STD(dst_reg, 1, bpf_jit_stack_local(ctx));
 				PPC_ADDI(b2p[TMP_REG_1], 1, bpf_jit_stack_local(ctx));
 				PPC_LDBRX(dst_reg, 0, b2p[TMP_REG_1]);
 				break;
@@ -670,7 +658,7 @@ emit_clear:
 				PPC_LI32(b2p[TMP_REG_1], imm);
 				src_reg = b2p[TMP_REG_1];
 			}
-			PPC_BPF_STL(src_reg, dst_reg, off);
+			PPC_STD(src_reg, dst_reg, off);
 			break;
 
 		/*
@@ -680,7 +668,11 @@ emit_clear:
 		case BPF_STX | BPF_XADD | BPF_W:
 			/* Get EA into TMP_REG_1 */
 			PPC_ADDI(b2p[TMP_REG_1], dst_reg, off);
-			tmp_idx = ctx->idx * 4;
+			/* error if EA is not word-aligned */
+			PPC_ANDI(b2p[TMP_REG_2], b2p[TMP_REG_1], 0x03);
+			PPC_BCC_SHORT(COND_EQ, (ctx->idx * 4) + 12);
+			PPC_LI(b2p[BPF_REG_0], 0);
+			PPC_JMP(exit_addr);
 			/* load value from memory into TMP_REG_2 */
 			PPC_BPF_LWARX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1], 0);
 			/* add value from src_reg into this */
@@ -688,16 +680,32 @@ emit_clear:
 			/* store result back */
 			PPC_BPF_STWCX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1]);
 			/* we're done if this succeeded */
-			PPC_BCC_SHORT(COND_NE, tmp_idx);
+			PPC_BCC_SHORT(COND_EQ, (ctx->idx * 4) + (7*4));
+			/* otherwise, let's try once more */
+			PPC_BPF_LWARX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1], 0);
+			PPC_ADD(b2p[TMP_REG_2], b2p[TMP_REG_2], src_reg);
+			PPC_BPF_STWCX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1]);
+			/* exit if the store was not successful */
+			PPC_LI(b2p[BPF_REG_0], 0);
+			PPC_BCC(COND_NE, exit_addr);
 			break;
 		/* *(u64 *)(dst + off) += src */
 		case BPF_STX | BPF_XADD | BPF_DW:
 			PPC_ADDI(b2p[TMP_REG_1], dst_reg, off);
-			tmp_idx = ctx->idx * 4;
+			/* error if EA is not doubleword-aligned */
+			PPC_ANDI(b2p[TMP_REG_2], b2p[TMP_REG_1], 0x07);
+			PPC_BCC_SHORT(COND_EQ, (ctx->idx * 4) + (3*4));
+			PPC_LI(b2p[BPF_REG_0], 0);
+			PPC_JMP(exit_addr);
 			PPC_BPF_LDARX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1], 0);
 			PPC_ADD(b2p[TMP_REG_2], b2p[TMP_REG_2], src_reg);
 			PPC_BPF_STDCX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1]);
-			PPC_BCC_SHORT(COND_NE, tmp_idx);
+			PPC_BCC_SHORT(COND_EQ, (ctx->idx * 4) + (7*4));
+			PPC_BPF_LDARX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1], 0);
+			PPC_ADD(b2p[TMP_REG_2], b2p[TMP_REG_2], src_reg);
+			PPC_BPF_STDCX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1]);
+			PPC_LI(b2p[BPF_REG_0], 0);
+			PPC_BCC(COND_NE, exit_addr);
 			break;
 
 		/*
@@ -717,7 +725,7 @@ emit_clear:
 			break;
 		/* dst = *(u64 *)(ul) (src + off) */
 		case BPF_LDX | BPF_MEM | BPF_DW:
-			PPC_BPF_LL(dst_reg, src_reg, off);
+			PPC_LD(dst_reg, src_reg, off);
 			break;
 
 		/*
@@ -754,8 +762,7 @@ emit_clear:
 			func = (u8 *) __bpf_call_base + imm;
 
 			/* Save skb pointer if we need to re-cache skb data */
-			if ((ctx->seen & SEEN_SKB) &&
-			    bpf_helper_changes_pkt_data(func))
+			if (bpf_helper_changes_pkt_data(func))
 				PPC_BPF_STL(3, 1, bpf_jit_stack_local(ctx));
 
 			bpf_jit_emit_func_call(image, ctx, (u64)func);
@@ -764,8 +771,7 @@ emit_clear:
 			PPC_MR(b2p[BPF_REG_0], 3);
 
 			/* refresh skb cache */
-			if ((ctx->seen & SEEN_SKB) &&
-			    bpf_helper_changes_pkt_data(func)) {
+			if (bpf_helper_changes_pkt_data(func)) {
 				/* reload skb pointer to r3 */
 				PPC_BPF_LL(3, 1, bpf_jit_stack_local(ctx));
 				bpf_jit_emit_skb_loads(image, ctx);

@@ -470,10 +470,7 @@ static void trie_free(struct bpf_map *map)
 	struct lpm_trie_node __rcu **slot;
 	struct lpm_trie_node *node;
 
-	/* Wait for outstanding programs to complete
-	 * update/lookup/delete/get_next_key and free the trie.
-	 */
-	synchronize_rcu();
+	raw_spin_lock(&trie->lock);
 
 	/* Always start at the root and walk down to a node that has no
 	 * children. Then free that node, nullify its reference in the parent
@@ -484,9 +481,10 @@ static void trie_free(struct bpf_map *map)
 		slot = &trie->root;
 
 		for (;;) {
-			node = rcu_dereference_protected(*slot, 1);
+			node = rcu_dereference_protected(*slot,
+					lockdep_is_held(&trie->lock));
 			if (!node)
-				goto out;
+				goto unlock;
 
 			if (rcu_access_pointer(node->child[0])) {
 				slot = &node->child[0];
@@ -504,8 +502,8 @@ static void trie_free(struct bpf_map *map)
 		}
 	}
 
-out:
-	kfree(trie);
+unlock:
+	raw_spin_unlock(&trie->lock);
 }
 
 static int trie_get_next_key(struct bpf_map *map, void *key, void *next_key)

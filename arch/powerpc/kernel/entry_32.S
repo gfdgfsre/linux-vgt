@@ -33,7 +33,6 @@
 #include <asm/unistd.h>
 #include <asm/ptrace.h>
 #include <asm/export.h>
-#include <asm/barrier.h>
 
 /*
  * MSR_KERNEL is > 0x10000 on 4xx/Book-E since it include MSR_CE.
@@ -359,15 +358,6 @@ syscall_dotrace_cont:
 	ori	r10,r10,sys_call_table@l
 	slwi	r0,r0,2
 	bge-	66f
-
-	barrier_nospec_asm
-	/*
-	 * Prevent the load of the handler below (based on the user-passed
-	 * system call number) being speculatively executed until the test
-	 * against NR_syscalls and branch to .66f above has
-	 * committed.
-	 */
-
 	lwzx	r10,r10,r0	/* Fetch system call handler [ptr] */
 	mtlr	r10
 	addi	r9,r1,STACK_FRAME_OVERHEAD
@@ -736,9 +726,6 @@ fast_exception_return:
 	mtcr	r10
 	lwz	r10,_LINK(r11)
 	mtlr	r10
-	/* Clear the exception_marker on the stack to avoid confusing stacktrace */
-	li	r10, 0
-	stw	r10, 8(r11)
 	REST_GPR(10, r11)
 #ifdef CONFIG_PPC_8xx_PERF_EVENT
 	mtspr	SPRN_NRI, r0
@@ -879,14 +866,7 @@ resume_kernel:
 	cmpwi	0,r0,0		/* if non-zero, just restore regs and return */
 	bne	restore
 	andi.	r8,r8,_TIF_NEED_RESCHED
-	bne+	1f
-	lwz	r0,TI_PREEMPT_LAZY(r9)
-	cmpwi	0,r0,0		/* if non-zero, just restore regs and return */
-	bne	restore
-	lwz	r0,TI_FLAGS(r9)
-	andi.	r0,r0,_TIF_NEED_RESCHED_LAZY
 	beq+	restore
-1:
 	lwz	r3,_MSR(r1)
 	andi.	r0,r3,MSR_EE	/* interrupts off? */
 	beq	restore		/* don't schedule if so */
@@ -897,11 +877,11 @@ resume_kernel:
 	 */
 	bl	trace_hardirqs_off
 #endif
-2:	bl	preempt_schedule_irq
+1:	bl	preempt_schedule_irq
 	CURRENT_THREAD_INFO(r9, r1)
 	lwz	r3,TI_FLAGS(r9)
-	andi.	r0,r3,_TIF_NEED_RESCHED_MASK
-	bne-	2b
+	andi.	r0,r3,_TIF_NEED_RESCHED
+	bne-	1b
 #ifdef CONFIG_TRACE_IRQFLAGS
 	/* And now, to properly rebalance the above, we tell lockdep they
 	 * are being turned back on, which will happen when we return
@@ -983,9 +963,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_NEED_PAIRED_STWCX)
 	mtcrf	0xFF,r10
 	mtlr	r11
 
-	/* Clear the exception_marker on the stack to avoid confusing stacktrace */
-	li	r10, 0
-	stw	r10, 8(r1)
 	/*
 	 * Once we put values in SRR0 and SRR1, we are in a state
 	 * where exceptions are not recoverable, since taking an
@@ -1025,9 +1002,6 @@ exc_exit_restart_end:
 	mtlr	r11
 	lwz	r10,_CCR(r1)
 	mtcrf	0xff,r10
-	/* Clear the exception_marker on the stack to avoid confusing stacktrace */
-	li	r10, 0
-	stw	r10, 8(r1)
 	REST_2GPRS(9, r1)
 	.globl exc_exit_restart
 exc_exit_restart:
@@ -1230,7 +1204,7 @@ global_dbcr0:
 #endif /* !(CONFIG_4xx || CONFIG_BOOKE) */
 
 do_work:			/* r10 contains MSR_KERNEL here */
-	andi.	r0,r9,_TIF_NEED_RESCHED_MASK
+	andi.	r0,r9,_TIF_NEED_RESCHED
 	beq	do_user_signal
 
 do_resched:			/* r10 contains MSR_KERNEL here */
@@ -1251,7 +1225,7 @@ recheck:
 	MTMSRD(r10)		/* disable interrupts */
 	CURRENT_THREAD_INFO(r9, r1)
 	lwz	r9,TI_FLAGS(r9)
-	andi.	r0,r9,_TIF_NEED_RESCHED_MASK
+	andi.	r0,r9,_TIF_NEED_RESCHED
 	bne-	do_resched
 	andi.	r0,r9,_TIF_USER_WORK_MASK
 	beq	restore_user

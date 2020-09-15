@@ -696,21 +696,13 @@ static void fat_set_state(struct super_block *sb,
 	brelse(bh);
 }
 
-static void fat_reset_iocharset(struct fat_mount_options *opts)
-{
-	if (opts->iocharset != fat_default_iocharset) {
-		/* Note: opts->iocharset can be NULL here */
-		kfree(opts->iocharset);
-		opts->iocharset = fat_default_iocharset;
-	}
-}
-
 static void delayed_free(struct rcu_head *p)
 {
 	struct msdos_sb_info *sbi = container_of(p, struct msdos_sb_info, rcu);
 	unload_nls(sbi->nls_disk);
 	unload_nls(sbi->nls_io);
-	fat_reset_iocharset(&sbi->options);
+	if (sbi->options.iocharset != fat_default_iocharset)
+		kfree(sbi->options.iocharset);
 	kfree(sbi);
 }
 
@@ -736,13 +728,6 @@ static struct inode *fat_alloc_inode(struct super_block *sb)
 		return NULL;
 
 	init_rwsem(&ei->truncate_lock);
-	/* Zeroing to allow iput() even if partial initialized inode. */
-	ei->mmu_private = 0;
-	ei->i_start = 0;
-	ei->i_logstart = 0;
-	ei->i_attrs = 0;
-	ei->i_pos = 0;
-
 	return &ei->vfs_inode;
 }
 
@@ -794,7 +779,7 @@ static void __exit fat_destroy_inodecache(void)
 
 static int fat_remount(struct super_block *sb, int *flags, char *data)
 {
-	bool new_rdonly;
+	int new_rdonly;
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
 	*flags |= MS_NODIRATIME | (sbi->options.isvfat ? 0 : MS_NOATIME);
 
@@ -1132,7 +1117,7 @@ static int parse_options(struct super_block *sb, char *options, int is_vfat,
 	opts->fs_fmask = opts->fs_dmask = current_umask();
 	opts->allow_utime = -1;
 	opts->codepage = fat_default_codepage;
-	fat_reset_iocharset(opts);
+	opts->iocharset = fat_default_iocharset;
 	if (is_vfat) {
 		opts->shortname = VFAT_SFN_DISPLAY_WINNT|VFAT_SFN_CREATE_WIN95;
 		opts->rodir = 0;
@@ -1289,7 +1274,8 @@ static int parse_options(struct super_block *sb, char *options, int is_vfat,
 
 		/* vfat specific */
 		case Opt_charset:
-			fat_reset_iocharset(opts);
+			if (opts->iocharset != fat_default_iocharset)
+				kfree(opts->iocharset);
 			iocharset = match_strdup(&args[0]);
 			if (!iocharset)
 				return -ENOMEM;
@@ -1371,6 +1357,16 @@ out:
 	}
 
 	return 0;
+}
+
+static void fat_dummy_inode_init(struct inode *inode)
+{
+	/* Initialize this dummy inode to work as no-op. */
+	MSDOS_I(inode)->mmu_private = 0;
+	MSDOS_I(inode)->i_start = 0;
+	MSDOS_I(inode)->i_logstart = 0;
+	MSDOS_I(inode)->i_attrs = 0;
+	MSDOS_I(inode)->i_pos = 0;
 }
 
 static int fat_read_root(struct inode *inode)
@@ -1509,12 +1505,6 @@ static int fat_read_bpb(struct super_block *sb, struct fat_boot_sector *b,
 		if (!silent)
 			fat_msg(sb, KERN_ERR, "bogus sectors per cluster %u",
 				(unsigned)bpb->fat_sec_per_clus);
-		goto out;
-	}
-
-	if (bpb->fat_fat_length == 0 && bpb->fat32_length == 0) {
-		if (!silent)
-			fat_msg(sb, KERN_ERR, "bogus number of FAT sectors");
 		goto out;
 	}
 
@@ -1823,11 +1813,13 @@ int fat_fill_super(struct super_block *sb, void *data, int silent, int isvfat,
 	fat_inode = new_inode(sb);
 	if (!fat_inode)
 		goto out_fail;
+	fat_dummy_inode_init(fat_inode);
 	sbi->fat_inode = fat_inode;
 
 	fsinfo_inode = new_inode(sb);
 	if (!fsinfo_inode)
 		goto out_fail;
+	fat_dummy_inode_init(fsinfo_inode);
 	fsinfo_inode->i_ino = MSDOS_FSINFO_INO;
 	sbi->fsinfo_inode = fsinfo_inode;
 	insert_inode_hash(fsinfo_inode);
@@ -1874,7 +1866,8 @@ out_fail:
 		iput(fat_inode);
 	unload_nls(sbi->nls_io);
 	unload_nls(sbi->nls_disk);
-	fat_reset_iocharset(&sbi->options);
+	if (sbi->options.iocharset != fat_default_iocharset)
+		kfree(sbi->options.iocharset);
 	sb->s_fs_info = NULL;
 	kfree(sbi);
 	return error;

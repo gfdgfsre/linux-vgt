@@ -1643,12 +1643,7 @@ static int mlxsw_pci_sw_reset(struct mlxsw_pci *mlxsw_pci,
 		return 0;
 	}
 
-	/* Reset needs to be written before we read control register, and
-	 * we must wait for the HW to become responsive once again
-	 */
-	wmb();
-	msleep(MLXSW_PCI_SW_RESET_WAIT_MSECS);
-
+	wmb(); /* reset needs to be written before we read control register */
 	end = jiffies + msecs_to_jiffies(MLXSW_PCI_SW_RESET_TIMEOUT_MSECS);
 	do {
 		u32 val = mlxsw_pci_read32(mlxsw_pci, FW_READY);

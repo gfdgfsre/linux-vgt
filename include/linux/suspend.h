@@ -196,12 +196,6 @@ struct platform_s2idle_ops {
 	void (*end)(void);
 };
 
-#if defined(CONFIG_SUSPEND) || defined(CONFIG_HIBERNATION)
-extern bool pm_in_action;
-#else
-# define pm_in_action false
-#endif
-
 #ifdef CONFIG_SUSPEND
 extern suspend_state_t mem_sleep_current;
 extern suspend_state_t mem_sleep_default;
@@ -390,8 +384,6 @@ extern int swsusp_page_is_forbidden(struct page *);
 extern void swsusp_set_page_free(struct page *);
 extern void swsusp_unset_page_free(struct page *);
 extern unsigned long get_safe_page(gfp_t gfp_mask);
-extern asmlinkage int swsusp_arch_suspend(void);
-extern asmlinkage int swsusp_arch_resume(void);
 
 extern void hibernation_set_ops(const struct platform_hibernation_ops *ops);
 extern int hibernate(void);

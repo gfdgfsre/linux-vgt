@@ -212,7 +212,6 @@ static int drm_open_helper(struct file *filp, struct drm_minor *minor)
 		return -ENOMEM;
 
 	filp->private_data = priv;
-	filp->f_mode |= FMODE_UNSIGNED_OFFSET;
 	priv->filp = filp;
 	priv->pid = get_pid(task_pid(current));
 	priv->minor = minor;
@@ -525,7 +524,6 @@ put_back_event:
 				file_priv->event_space -= length;
 				list_add(&e->link, &file_priv->event_list);
 				spin_unlock_irq(&dev->event_lock);
-				wake_up_interruptible(&file_priv->event_wait);
 				break;
 			}
 

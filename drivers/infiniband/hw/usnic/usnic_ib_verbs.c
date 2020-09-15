@@ -310,16 +310,13 @@ int usnic_ib_query_port(struct ib_device *ibdev, u8 port,
 
 	usnic_dbg("\n");
 
-	if (ib_get_eth_speed(ibdev, port, &props->active_speed,
-			     &props->active_width))
-		return -EINVAL;
-
-	/*
-	 * usdev_lock is acquired after (and not before) ib_get_eth_speed call
-	 * because acquiring rtnl_lock in ib_get_eth_speed, while holding
-	 * usdev_lock could lead to a deadlock.
-	 */
 	mutex_lock(&us_ibdev->usdev_lock);
+	if (ib_get_eth_speed(ibdev, port, &props->active_speed,
+			     &props->active_width)) {
+		mutex_unlock(&us_ibdev->usdev_lock);
+		return -EINVAL;
+	}
+
 	/* props being zeroed by the caller, avoid zeroing it here */
 
 	props->lid = 0;
@@ -423,7 +420,7 @@ struct net_device *usnic_get_netdev(struct ib_device *device, u8 port_num)
 int usnic_ib_query_pkey(struct ib_device *ibdev, u8 port, u16 index,
 				u16 *pkey)
 {
-	if (index > 0)
+	if (index > 1)
 		return -EINVAL;
 
 	*pkey = 0xffff;
@@ -645,7 +642,7 @@ int usnic_ib_dereg_mr(struct ib_mr *ibmr)
 
 	usnic_dbg("va 0x%lx length 0x%zx\n", mr->umem->va, mr->umem->length);
 
-	usnic_uiom_reg_release(mr->umem, ibmr->uobject->context);
+	usnic_uiom_reg_release(mr->umem, ibmr->pd->uobject->context->closing);
 	kfree(mr);
 	return 0;
 }

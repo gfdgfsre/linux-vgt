@@ -92,9 +92,7 @@ static inline void rxrpc_instant_resend(struct rxrpc_call *call, int ix)
 	spin_lock_bh(&call->lock);
 
 	if (call->state < RXRPC_CALL_COMPLETE) {
-		call->rxtx_annotations[ix] =
-			(call->rxtx_annotations[ix] & RXRPC_TX_ANNO_LAST) |
-			RXRPC_TX_ANNO_RETRANS;
+		call->rxtx_annotations[ix] = RXRPC_TX_ANNO_RETRANS;
 		if (!test_and_set_bit(RXRPC_CALL_EV_RESEND, &call->events))
 			rxrpc_queue_call(call);
 	}
@@ -222,7 +220,7 @@ static int rxrpc_send_data(struct rxrpc_sock *rx,
 	/* this should be in poll */
 	sk_clear_bit(SOCKWQ_ASYNC_NOSPACE, sk);
 
-	if (sk->sk_shutdown & SEND_SHUTDOWN)
+	if (sk->sk_err || (sk->sk_shutdown & SEND_SHUTDOWN))
 		return -EPIPE;
 
 	more = msg->msg_flags & MSG_MORE;
@@ -565,8 +563,8 @@ int rxrpc_do_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg, size_t len)
 		/* The socket is now unlocked. */
 		if (IS_ERR(call))
 			return PTR_ERR(call);
-		ret = 0;
-		goto out_put_unlock;
+		rxrpc_put_call(call, rxrpc_call_put);
+		return 0;
 	}
 
 	call = rxrpc_find_call_by_user_ID(rx, p.user_call_ID);
@@ -586,7 +584,6 @@ int rxrpc_do_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg, size_t len)
 		case RXRPC_CALL_SERVER_PREALLOC:
 		case RXRPC_CALL_SERVER_SECURING:
 		case RXRPC_CALL_SERVER_ACCEPTING:
-			rxrpc_put_call(call, rxrpc_call_put);
 			ret = -EBUSY;
 			goto error_release_sock;
 		default:
@@ -636,7 +633,6 @@ int rxrpc_do_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg, size_t len)
 		ret = rxrpc_send_data(rx, call, msg, len, NULL);
 	}
 
-out_put_unlock:
 	mutex_unlock(&call->user_mutex);
 error_put:
 	rxrpc_put_call(call, rxrpc_call_put);

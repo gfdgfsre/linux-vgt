@@ -31,7 +31,6 @@
 #include <linux/compiler.h>
 #include <linux/llist.h>
 #include <linux/bitops.h>
-#include <linux/overflow.h>
 
 #include <linux/uaccess.h>
 #include <asm/tlbflush.h>
@@ -499,11 +498,7 @@ nocache:
 	}
 
 found:
-	/*
-	 * Check also calculated address against the vstart,
-	 * because it can be 0 because of big align request.
-	 */
-	if (addr + size > vend || addr < vstart)
+	if (addr + size > vend)
 		goto overflow;
 
 	va->va_start = addr;
@@ -870,7 +865,7 @@ static void *new_vmap_block(unsigned int order, gfp_t gfp_mask)
 	struct vmap_block *vb;
 	struct vmap_area *va;
 	unsigned long vb_idx;
-	int node, err, cpu;
+	int node, err;
 	void *vaddr;
 
 	node = numa_node_id();
@@ -913,12 +908,11 @@ static void *new_vmap_block(unsigned int order, gfp_t gfp_mask)
 	BUG_ON(err);
 	radix_tree_preload_end();
 
-	cpu = get_cpu_light();
-	vbq = this_cpu_ptr(&vmap_block_queue);
+	vbq = &get_cpu_var(vmap_block_queue);
 	spin_lock(&vbq->lock);
 	list_add_tail_rcu(&vb->free_list, &vbq->free);
 	spin_unlock(&vbq->lock);
-	put_cpu_light();
+	put_cpu_var(vmap_block_queue);
 
 	return vaddr;
 }
@@ -987,7 +981,6 @@ static void *vb_alloc(unsigned long size, gfp_t gfp_mask)
 	struct vmap_block *vb;
 	void *vaddr = NULL;
 	unsigned int order;
-	int cpu;
 
 	BUG_ON(offset_in_page(size));
 	BUG_ON(size > PAGE_SIZE*VMAP_MAX_ALLOC);
@@ -1002,8 +995,7 @@ static void *vb_alloc(unsigned long size, gfp_t gfp_mask)
 	order = get_order(size);
 
 	rcu_read_lock();
-	cpu = get_cpu_light();
-	vbq = this_cpu_ptr(&vmap_block_queue);
+	vbq = &get_cpu_var(vmap_block_queue);
 	list_for_each_entry_rcu(vb, &vbq->free, free_list) {
 		unsigned long pages_off;
 
@@ -1026,7 +1018,7 @@ static void *vb_alloc(unsigned long size, gfp_t gfp_mask)
 		break;
 	}
 
-	put_cpu_light();
+	put_cpu_var(vmap_block_queue);
 	rcu_read_unlock();
 
 	/* Allocate new block if nothing was found */
@@ -1527,7 +1519,7 @@ static void __vunmap(const void *addr, int deallocate_pages)
 			addr))
 		return;
 
-	area = find_vm_area(addr);
+	area = remove_vm_area(addr);
 	if (unlikely(!area)) {
 		WARN(1, KERN_ERR "Trying to vfree() nonexistent vm area (%p)\n",
 				addr);
@@ -1537,7 +1529,6 @@ static void __vunmap(const void *addr, int deallocate_pages)
 	debug_check_no_locks_freed(addr, get_vm_area_size(area));
 	debug_check_no_obj_freed(addr, get_vm_area_size(area));
 
-	remove_vm_area(addr);
 	if (deallocate_pages) {
 		int i;
 
@@ -1686,6 +1677,7 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 	nr_pages = get_vm_area_size(area) >> PAGE_SHIFT;
 	array_size = (nr_pages * sizeof(struct page *));
 
+	area->nr_pages = nr_pages;
 	/* Please note that the recursion is strictly bounded. */
 	if (array_size > PAGE_SIZE) {
 		pages = __vmalloc_node(array_size, 1, nested_gfp|highmem_mask,
@@ -1693,15 +1685,12 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 	} else {
 		pages = kmalloc_node(array_size, nested_gfp, node);
 	}
-
-	if (!pages) {
+	area->pages = pages;
+	if (!area->pages) {
 		remove_vm_area(area->addr);
 		kfree(area);
 		return NULL;
 	}
-
-	area->pages = pages;
-	area->nr_pages = nr_pages;
 
 	for (i = 0; i < area->nr_pages; i++) {
 		struct page *page;
@@ -1770,12 +1759,6 @@ void *__vmalloc_node_range(unsigned long size, unsigned long align,
 	addr = __vmalloc_area_node(area, gfp_mask, prot, node);
 	if (!addr)
 		return NULL;
-
-	/*
-	 * First make sure the mappings are removed from all page-tables
-	 * before they are freed.
-	 */
-	vmalloc_sync_unmappings();
 
 	/*
 	 * In this function, newly allocated vm_struct has VM_UNINITIALIZED
@@ -1960,15 +1943,11 @@ void *vmalloc_exec(unsigned long size)
 }
 
 #if defined(CONFIG_64BIT) && defined(CONFIG_ZONE_DMA32)
-#define GFP_VMALLOC32 (GFP_DMA32 | GFP_KERNEL)
-#elif defined(CONFIG_64BIT) && defined(CONFIG_ZONE_DMA)
-#define GFP_VMALLOC32 (GFP_DMA | GFP_KERNEL)
-#else
-/*
- * 64b systems should always have either DMA or DMA32 zones. For others
- * GFP_DMA32 should do the right thing and use the normal zone.
- */
 #define GFP_VMALLOC32 GFP_DMA32 | GFP_KERNEL
+#elif defined(CONFIG_64BIT) && defined(CONFIG_ZONE_DMA)
+#define GFP_VMALLOC32 GFP_DMA | GFP_KERNEL
+#else
+#define GFP_VMALLOC32 GFP_KERNEL
 #endif
 
 /**
@@ -2250,7 +2229,6 @@ finished:
  *	@vma:		vma to cover
  *	@uaddr:		target user address to start at
  *	@kaddr:		virtual address of vmalloc kernel memory
- *	@pgoff:		offset from @kaddr to start at
  *	@size:		size of map area
  *
  *	Returns:	0 for success, -Exxx on failure
@@ -2263,15 +2241,9 @@ finished:
  *	Similar to remap_pfn_range() (see mm/memory.c)
  */
 int remap_vmalloc_range_partial(struct vm_area_struct *vma, unsigned long uaddr,
-				void *kaddr, unsigned long pgoff,
-				unsigned long size)
+				void *kaddr, unsigned long size)
 {
 	struct vm_struct *area;
-	unsigned long off;
-	unsigned long end_index;
-
-	if (check_shl_overflow(pgoff, PAGE_SHIFT, &off))
-		return -EINVAL;
 
 	size = PAGE_ALIGN(size);
 
@@ -2285,10 +2257,8 @@ int remap_vmalloc_range_partial(struct vm_area_struct *vma, unsigned long uaddr,
 	if (!(area->flags & VM_USERMAP))
 		return -EINVAL;
 
-	if (check_add_overflow(size, off, &end_index) ||
-	    end_index > get_vm_area_size(area))
+	if (kaddr + size > area->addr + area->size)
 		return -EINVAL;
-	kaddr += off;
 
 	do {
 		struct page *page = vmalloc_to_page(kaddr);
@@ -2327,25 +2297,19 @@ int remap_vmalloc_range(struct vm_area_struct *vma, void *addr,
 						unsigned long pgoff)
 {
 	return remap_vmalloc_range_partial(vma, vma->vm_start,
-					   addr, pgoff,
+					   addr + (pgoff << PAGE_SHIFT),
 					   vma->vm_end - vma->vm_start);
 }
 EXPORT_SYMBOL(remap_vmalloc_range);
 
 /*
- * Implement stubs for vmalloc_sync_[un]mappings () if the architecture chose
- * not to have one.
- *
- * The purpose of this function is to make sure the vmalloc area
- * mappings are identical in all page-tables in the system.
+ * Implement a stub for vmalloc_sync_all() if the architecture chose not to
+ * have one.
  */
-void __weak vmalloc_sync_mappings(void)
+void __weak vmalloc_sync_all(void)
 {
 }
 
-void __weak vmalloc_sync_unmappings(void)
-{
-}
 
 static int f(pte_t *pte, pgtable_t table, unsigned long addr, void *data)
 {

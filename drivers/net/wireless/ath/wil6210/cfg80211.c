@@ -1224,12 +1224,6 @@ static int _wil_cfg80211_merge_extra_ies(const u8 *ies1, u16 ies1_len,
 	u8 *buf, *dpos;
 	const u8 *spos;
 
-	if (!ies1)
-		ies1_len = 0;
-
-	if (!ies2)
-		ies2_len = 0;
-
 	if (ies1_len == 0 && ies2_len == 0) {
 		*merged_ies = NULL;
 		*merged_len = 0;
@@ -1239,19 +1233,17 @@ static int _wil_cfg80211_merge_extra_ies(const u8 *ies1, u16 ies1_len,
 	buf = kmalloc(ies1_len + ies2_len, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
-	if (ies1)
-		memcpy(buf, ies1, ies1_len);
+	memcpy(buf, ies1, ies1_len);
 	dpos = buf + ies1_len;
 	spos = ies2;
-	while (spos && (spos + 1 < ies2 + ies2_len)) {
+	while (spos + 1 < ies2 + ies2_len) {
 		/* IE tag at offset 0, length at offset 1 */
 		u16 ielen = 2 + spos[1];
 
 		if (spos + ielen > ies2 + ies2_len)
 			break;
 		if (spos[0] == WLAN_EID_VENDOR_SPECIFIC &&
-		    (!ies1 || !_wil_cfg80211_find_ie(ies1, ies1_len,
-						     spos, ielen))) {
+		    !_wil_cfg80211_find_ie(ies1, ies1_len, spos, ielen)) {
 			memcpy(dpos, spos, ielen);
 			dpos += ielen;
 		}
@@ -1735,12 +1727,9 @@ static int wil_cfg80211_suspend(struct wiphy *wiphy,
 
 	wil_dbg_pm(wil, "suspending\n");
 
-	mutex_lock(&wil->mutex);
-	mutex_lock(&wil->p2p_wdev_mutex);
-	wil_p2p_stop_radio_operations(wil);
+	wil_p2p_stop_discovery(wil);
+
 	wil_abort_scan(wil, true);
-	mutex_unlock(&wil->p2p_wdev_mutex);
-	mutex_unlock(&wil->mutex);
 
 out:
 	return rc;

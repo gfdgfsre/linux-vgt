@@ -364,8 +364,6 @@ static int qib_tid_update(struct qib_ctxtdata *rcd, struct file *fp,
 		goto done;
 	}
 	for (i = 0; i < cnt; i++, vaddr += PAGE_SIZE) {
-		dma_addr_t daddr;
-
 		for (; ntids--; tid++) {
 			if (tid == tidcnt)
 				tid = 0;
@@ -382,14 +380,12 @@ static int qib_tid_update(struct qib_ctxtdata *rcd, struct file *fp,
 			ret = -ENOMEM;
 			break;
 		}
-		ret = qib_map_page(dd->pcidev, pagep[i], &daddr);
-		if (ret)
-			break;
-
 		tidlist[i] = tid + tidoff;
 		/* we "know" system pages and TID pages are same size */
 		dd->pageshadow[ctxttid + tid] = pagep[i];
-		dd->physshadow[ctxttid + tid] = daddr;
+		dd->physshadow[ctxttid + tid] =
+			qib_map_page(dd->pcidev, pagep[i], 0, PAGE_SIZE,
+				     PCI_DMA_FROMDEVICE);
 		/*
 		 * don't need atomic or it's overhead
 		 */
@@ -1167,7 +1163,7 @@ static unsigned int qib_poll(struct file *fp, struct poll_table_struct *pt)
 static void assign_ctxt_affinity(struct file *fp, struct qib_devdata *dd)
 {
 	struct qib_filedata *fd = fp->private_data;
-	const unsigned int weight = current->nr_cpus_allowed;
+	const unsigned int weight = cpumask_weight(&current->cpus_allowed);
 	const struct cpumask *local_mask = cpumask_of_pcibus(dd->pcidev->bus);
 	int local_cpu;
 
@@ -1648,8 +1644,9 @@ static int qib_assign_ctxt(struct file *fp, const struct qib_user_info *uinfo)
 		ret = find_free_ctxt(i_minor - 1, fp, uinfo);
 	else {
 		int unit;
-		const unsigned int cpu = cpumask_first(current->cpus_ptr);
-		const unsigned int weight = current->nr_cpus_allowed;
+		const unsigned int cpu = cpumask_first(&current->cpus_allowed);
+		const unsigned int weight =
+			cpumask_weight(&current->cpus_allowed);
 
 		if (weight == 1 && !test_bit(cpu, qib_cpulist))
 			if (!find_hca(cpu, &unit) && unit >= 0)

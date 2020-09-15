@@ -66,8 +66,6 @@
 #include <asm/sclp.h>
 #include <asm/sysinfo.h>
 #include <asm/numa.h>
-#include <asm/alternative.h>
-#include <asm/nospec-branch.h>
 #include "entry.h"
 
 /*
@@ -300,7 +298,7 @@ early_param("vmalloc", parse_vmalloc);
 
 void *restart_stack __section(.data);
 
-static void __init setup_lowcore_dat_off(void)
+static void __init setup_lowcore(void)
 {
 	struct lowcore *lc;
 
@@ -311,16 +309,19 @@ static void __init setup_lowcore_dat_off(void)
 	lc = memblock_virt_alloc_low(sizeof(*lc), sizeof(*lc));
 	lc->restart_psw.mask = PSW_KERNEL_BITS;
 	lc->restart_psw.addr = (unsigned long) restart_int_handler;
-	lc->external_new_psw.mask = PSW_KERNEL_BITS | PSW_MASK_MCHECK;
+	lc->external_new_psw.mask = PSW_KERNEL_BITS |
+		PSW_MASK_DAT | PSW_MASK_MCHECK;
 	lc->external_new_psw.addr = (unsigned long) ext_int_handler;
 	lc->svc_new_psw.mask = PSW_KERNEL_BITS |
-		PSW_MASK_IO | PSW_MASK_EXT | PSW_MASK_MCHECK;
+		PSW_MASK_DAT | PSW_MASK_IO | PSW_MASK_EXT | PSW_MASK_MCHECK;
 	lc->svc_new_psw.addr = (unsigned long) system_call;
-	lc->program_new_psw.mask = PSW_KERNEL_BITS | PSW_MASK_MCHECK;
+	lc->program_new_psw.mask = PSW_KERNEL_BITS |
+		PSW_MASK_DAT | PSW_MASK_MCHECK;
 	lc->program_new_psw.addr = (unsigned long) pgm_check_handler;
 	lc->mcck_new_psw.mask = PSW_KERNEL_BITS;
 	lc->mcck_new_psw.addr = (unsigned long) mcck_int_handler;
-	lc->io_new_psw.mask = PSW_KERNEL_BITS | PSW_MASK_MCHECK;
+	lc->io_new_psw.mask = PSW_KERNEL_BITS |
+		PSW_MASK_DAT | PSW_MASK_MCHECK;
 	lc->io_new_psw.addr = (unsigned long) io_int_handler;
 	lc->clock_comparator = clock_comparator_max;
 	lc->kernel_stack = ((unsigned long) &init_thread_union)
@@ -337,9 +338,7 @@ static void __init setup_lowcore_dat_off(void)
 	lc->preempt_count = S390_lowcore.preempt_count;
 	lc->stfl_fac_list = S390_lowcore.stfl_fac_list;
 	memcpy(lc->stfle_fac_list, S390_lowcore.stfle_fac_list,
-	       sizeof(lc->stfle_fac_list));
-	memcpy(lc->alt_stfle_fac_list, S390_lowcore.alt_stfle_fac_list,
-	       sizeof(lc->alt_stfle_fac_list));
+	       MAX_FACILITY_BIT/8);
 	if (MACHINE_HAS_VX || MACHINE_HAS_GS) {
 		unsigned long bits, size;
 
@@ -382,20 +381,9 @@ static void __init setup_lowcore_dat_off(void)
 #ifdef CONFIG_SMP
 	lc->spinlock_lockval = arch_spin_lockval(0);
 #endif
-	lc->br_r1_trampoline = 0x07f1;	/* br %r1 */
 
 	set_prefix((u32)(unsigned long) lc);
 	lowcore_ptr[0] = lc;
-}
-
-static void __init setup_lowcore_dat_on(void)
-{
-	__ctl_clear_bit(0, 28);
-	S390_lowcore.external_new_psw.mask |= PSW_MASK_DAT;
-	S390_lowcore.svc_new_psw.mask |= PSW_MASK_DAT;
-	S390_lowcore.program_new_psw.mask |= PSW_MASK_DAT;
-	S390_lowcore.io_new_psw.mask |= PSW_MASK_DAT;
-	__ctl_set_bit(0, 28);
 }
 
 static struct resource code_resource = {
@@ -891,8 +879,6 @@ void __init setup_arch(char **cmdline_p)
 		pr_info("Linux is running under KVM in 64-bit mode\n");
 	else if (MACHINE_IS_LPAR)
 		pr_info("Linux is running natively in 64-bit mode\n");
-	else
-		pr_info("Linux is running as a guest in 64-bit mode\n");
 
 	/* Have one command line that is parsed and saved in /proc/cmdline */
 	/* boot_command_line has been already set up in early.c */
@@ -905,9 +891,6 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_code = (unsigned long) &_etext;
 	init_mm.end_data = (unsigned long) &_edata;
 	init_mm.brk = (unsigned long) &_end;
-
-	if (IS_ENABLED(CONFIG_EXPOLINE_AUTO))
-		nospec_auto_detect();
 
 	parse_early_param();
 #ifdef CONFIG_CRASH_DUMP
@@ -955,7 +938,7 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 	setup_resources();
-	setup_lowcore_dat_off();
+	setup_lowcore();
 	smp_fill_possible_mask();
 	cpu_detect_mhz_feature();
         cpu_init();
@@ -968,19 +951,9 @@ void __init setup_arch(char **cmdline_p)
 	 */
         paging_init();
 
-	/*
-	 * After paging_init created the kernel page table, the new PSWs
-	 * in lowcore can now run with DAT enabled.
-	 */
-	setup_lowcore_dat_on();
-
         /* Setup default console */
 	conmode_default();
 	set_preferred_console();
-
-	apply_alternative_instructions();
-	if (IS_ENABLED(CONFIG_EXPOLINE))
-		nospec_init_branches();
 
 	/* Setup zfcpdump support */
 	setup_zfcpdump();

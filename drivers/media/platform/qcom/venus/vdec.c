@@ -469,14 +469,8 @@ static int vdec_subscribe_event(struct v4l2_fh *fh,
 static int
 vdec_try_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 {
-	switch (cmd->cmd) {
-	case V4L2_DEC_CMD_STOP:
-		if (cmd->flags & V4L2_DEC_CMD_STOP_TO_BLACK)
-			return -EINVAL;
-		break;
-	default:
+	if (cmd->cmd != V4L2_DEC_CMD_STOP)
 		return -EINVAL;
-	}
 
 	return 0;
 }
@@ -485,7 +479,6 @@ static int
 vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 {
 	struct venus_inst *inst = to_inst(file);
-	struct hfi_frame_data fdata = {0};
 	int ret;
 
 	ret = vdec_try_decoder_cmd(file, fh, cmd);
@@ -493,23 +486,12 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 		return ret;
 
 	mutex_lock(&inst->lock);
-
-	/*
-	 * Implement V4L2_DEC_CMD_STOP by enqueue an empty buffer on decoder
-	 * input to signal EOS.
-	 */
-	if (!(inst->streamon_out & inst->streamon_cap))
-		goto unlock;
-
-	fdata.buffer_type = HFI_BUFFER_INPUT;
-	fdata.flags |= HFI_BUFFERFLAG_EOS;
-	fdata.device_addr = 0xdeadbeef;
-
-	ret = hfi_session_process_buf(inst, &fdata);
-
-unlock:
+	inst->cmd_stop = true;
 	mutex_unlock(&inst->lock);
-	return ret;
+
+	hfi_session_flush(inst);
+
+	return 0;
 }
 
 static const struct v4l2_ioctl_ops vdec_ioctl_ops = {
@@ -736,6 +718,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	inst->reconfig = false;
 	inst->sequence_cap = 0;
 	inst->sequence_out = 0;
+	inst->cmd_stop = false;
 
 	ret = vdec_init_session(inst);
 	if (ret)
@@ -823,6 +806,11 @@ static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
 		vb->planes[0].data_offset = data_offset;
 		vb->timestamp = timestamp_us * NSEC_PER_USEC;
 		vbuf->sequence = inst->sequence_cap++;
+
+		if (inst->cmd_stop) {
+			vbuf->flags |= V4L2_BUF_FLAG_LAST;
+			inst->cmd_stop = false;
+		}
 
 		if (vbuf->flags & V4L2_BUF_FLAG_LAST) {
 			const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
@@ -1060,6 +1048,9 @@ static const struct v4l2_file_operations vdec_fops = {
 	.unlocked_ioctl = video_ioctl2,
 	.poll = v4l2_m2m_fop_poll,
 	.mmap = v4l2_m2m_fop_mmap,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl32 = v4l2_compat_ioctl32,
+#endif
 };
 
 static int vdec_probe(struct platform_device *pdev)

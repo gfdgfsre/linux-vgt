@@ -103,8 +103,6 @@ static void smc_lgr_unregister_conn(struct smc_connection *conn)
 	struct smc_link_group *lgr = conn->lgr;
 	int reduced = 0;
 
-	if (!lgr)
-		return;
 	write_lock_bh(&lgr->conns_lock);
 	if (conn->alert_token_local) {
 		reduced = 1;
@@ -176,7 +174,6 @@ static int smc_lgr_create(struct smc_sock *smc, __be32 peer_in_addr,
 
 	lnk = &lgr->lnk[SMC_SINGLE_LINK];
 	/* initialize link */
-	lnk->link_id = SMC_SINGLE_LINK;
 	lnk->smcibdev = smcibdev;
 	lnk->ibport = ibport;
 	lnk->path_mtu = smcibdev->pattr[ibport - 1].active_mtu;
@@ -433,8 +430,6 @@ int smc_conn_create(struct smc_sock *smc, __be32 peer_in_addr,
 			local_contact = SMC_REUSE_CONTACT;
 			conn->lgr = lgr;
 			smc_lgr_register_conn(conn); /* add smc conn to lgr */
-			if (delayed_work_pending(&lgr->free_work))
-				cancel_delayed_work(&lgr->free_work);
 			write_unlock_bh(&lgr->conns_lock);
 			break;
 		}
@@ -576,7 +571,7 @@ static int __smc_buf_create(struct smc_sock *smc, bool is_rmb)
 		/* use socket send buffer size (w/o overhead) as start value */
 		sk_buf_size = smc->sk.sk_sndbuf / 2;
 
-	for (bufsize_short = smc_compress_bufsize(sk_buf_size);
+	for (bufsize_short = smc_compress_bufsize(smc->sk.sk_sndbuf / 2);
 	     bufsize_short >= 0; bufsize_short--) {
 
 		if (is_rmb) {

@@ -145,11 +145,6 @@ static noinline int bad_area(struct pt_regs *regs, unsigned long address)
 	return __bad_area(regs, address, SEGV_MAPERR);
 }
 
-static noinline int bad_access(struct pt_regs *regs, unsigned long address)
-{
-	return __bad_area(regs, address, SEGV_ACCERR);
-}
-
 static int do_sigbus(struct pt_regs *regs, unsigned long address,
 		     unsigned int fault)
 {
@@ -215,9 +210,7 @@ static int mm_fault_error(struct pt_regs *regs, unsigned long addr, int fault)
 static bool bad_kernel_fault(bool is_exec, unsigned long error_code,
 			     unsigned long address)
 {
-	/* NX faults set DSISR_PROTFAULT on the 8xx, DSISR_NOEXEC_OR_G on others */
-	if (is_exec && (error_code & (DSISR_NOEXEC_OR_G | DSISR_KEYFAULT |
-				      DSISR_PROTFAULT))) {
+	if (is_exec && (error_code & (DSISR_NOEXEC_OR_G | DSISR_KEYFAULT))) {
 		printk_ratelimited(KERN_CRIT "kernel tried to execute"
 				   " exec-protected page (%lx) -"
 				   "exploit attempt? (uid: %d)\n",
@@ -497,7 +490,7 @@ retry:
 
 good_area:
 	if (unlikely(access_error(is_write, is_exec, vma)))
-		return bad_access(regs, address);
+		return bad_area(regs, address);
 
 	/*
 	 * If for any reason at all we couldn't handle the fault,
@@ -581,22 +574,21 @@ void bad_page_fault(struct pt_regs *regs, unsigned long address, int sig)
 	switch (regs->trap) {
 	case 0x300:
 	case 0x380:
-		pr_alert("BUG: %s at 0x%08lx\n",
-			 regs->dar < PAGE_SIZE ? "Kernel NULL pointer dereference" :
-			 "Unable to handle kernel data access", regs->dar);
+		printk(KERN_ALERT "Unable to handle kernel paging request for "
+			"data at address 0x%08lx\n", regs->dar);
 		break;
 	case 0x400:
 	case 0x480:
-		pr_alert("BUG: Unable to handle kernel instruction fetch%s",
-			 regs->nip < PAGE_SIZE ? " (NULL pointer?)\n" : "\n");
+		printk(KERN_ALERT "Unable to handle kernel paging request for "
+			"instruction fetch\n");
 		break;
 	case 0x600:
-		pr_alert("BUG: Unable to handle kernel unaligned access at 0x%08lx\n",
-			 regs->dar);
+		printk(KERN_ALERT "Unable to handle kernel paging request for "
+			"unaligned access at address 0x%08lx\n", regs->dar);
 		break;
 	default:
-		pr_alert("BUG: Unable to handle unknown paging fault at 0x%08lx\n",
-			 regs->dar);
+		printk(KERN_ALERT "Unable to handle kernel paging request for "
+			"unknown fault\n");
 		break;
 	}
 	printk(KERN_ALERT "Faulting instruction address: 0x%08lx\n",

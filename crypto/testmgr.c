@@ -1839,21 +1839,14 @@ static int alg_test_crc32c(const struct alg_test_desc *desc,
 
 	err = alg_test_hash(desc, driver, type, mask);
 	if (err)
-		return err;
+		goto out;
 
 	tfm = crypto_alloc_shash(driver, type, mask);
 	if (IS_ERR(tfm)) {
-		if (PTR_ERR(tfm) == -ENOENT) {
-			/*
-			 * This crc32c implementation is only available through
-			 * ahash API, not the shash API, so the remaining part
-			 * of the test is not applicable to it.
-			 */
-			return 0;
-		}
 		printk(KERN_ERR "alg: crc32c: Failed to load transform for %s: "
 		       "%ld\n", driver, PTR_ERR(tfm));
-		return PTR_ERR(tfm);
+		err = PTR_ERR(tfm);
+		goto out;
 	}
 
 	do {
@@ -1880,6 +1873,7 @@ static int alg_test_crc32c(const struct alg_test_desc *desc,
 
 	crypto_free_shash(tfm);
 
+out:
 	return err;
 }
 

@@ -187,8 +187,6 @@ static int trace_define_common_fields(void)
 	__common_field(unsigned char, flags);
 	__common_field(unsigned char, preempt_count);
 	__common_field(int, pid);
-	__common_field(unsigned char, migrate_disable);
-	__common_field(unsigned char, preempt_lazy_count);
 
 	return ret;
 }
@@ -328,8 +326,7 @@ void trace_event_enable_cmd_record(bool enable)
 	struct trace_event_file *file;
 	struct trace_array *tr;
 
-	lockdep_assert_held(&event_mutex);
-
+	mutex_lock(&event_mutex);
 	do_for_each_event_file(tr, file) {
 
 		if (!(file->flags & EVENT_FILE_FL_ENABLED))
@@ -343,6 +340,7 @@ void trace_event_enable_cmd_record(bool enable)
 			clear_bit(EVENT_FILE_FL_RECORDED_CMD_BIT, &file->flags);
 		}
 	} while_for_each_event_file();
+	mutex_unlock(&event_mutex);
 }
 
 void trace_event_enable_tgid_record(bool enable)
@@ -350,8 +348,7 @@ void trace_event_enable_tgid_record(bool enable)
 	struct trace_event_file *file;
 	struct trace_array *tr;
 
-	lockdep_assert_held(&event_mutex);
-
+	mutex_lock(&event_mutex);
 	do_for_each_event_file(tr, file) {
 		if (!(file->flags & EVENT_FILE_FL_ENABLED))
 			continue;
@@ -365,6 +362,7 @@ void trace_event_enable_tgid_record(bool enable)
 				  &file->flags);
 		}
 	} while_for_each_event_file();
+	mutex_unlock(&event_mutex);
 }
 
 static int __ftrace_event_enable_disable(struct trace_event_file *file,
@@ -1321,6 +1319,9 @@ event_id_read(struct file *filp, char __user *ubuf, size_t cnt, loff_t *ppos)
 	char buf[32];
 	int len;
 
+	if (*ppos)
+		return 0;
+
 	if (unlikely(!id))
 		return -ENODEV;
 
@@ -1405,8 +1406,8 @@ static int subsystem_open(struct inode *inode, struct file *filp)
 		return -ENODEV;
 
 	/* Make sure the system still exists */
-	mutex_lock(&event_mutex);
 	mutex_lock(&trace_types_lock);
+	mutex_lock(&event_mutex);
 	list_for_each_entry(tr, &ftrace_trace_arrays, list) {
 		list_for_each_entry(dir, &tr->systems, list) {
 			if (dir == inode->i_private) {
@@ -1420,8 +1421,8 @@ static int subsystem_open(struct inode *inode, struct file *filp)
 		}
 	}
  exit_loop:
-	mutex_unlock(&trace_types_lock);
 	mutex_unlock(&event_mutex);
+	mutex_unlock(&trace_types_lock);
 
 	if (!system)
 		return -ENODEV;
@@ -2212,7 +2213,6 @@ void trace_event_eval_update(struct trace_eval_map **map, int len)
 {
 	struct trace_event_call *call, *p;
 	const char *last_system = NULL;
-	bool first = false;
 	int last_i;
 	int i;
 
@@ -2220,28 +2220,15 @@ void trace_event_eval_update(struct trace_eval_map **map, int len)
 	list_for_each_entry_safe(call, p, &ftrace_events, list) {
 		/* events are usually grouped together with systems */
 		if (!last_system || call->class->system != last_system) {
-			first = true;
 			last_i = 0;
 			last_system = call->class->system;
 		}
 
-		/*
-		 * Since calls are grouped by systems, the likelyhood that the
-		 * next call in the iteration belongs to the same system as the
-		 * previous call is high. As an optimization, we skip seaching
-		 * for a map[] that matches the call's system if the last call
-		 * was from the same system. That's what last_i is for. If the
-		 * call has the same system as the previous call, then last_i
-		 * will be the index of the first map[] that has a matching
-		 * system.
-		 */
 		for (i = last_i; i < len; i++) {
 			if (call->class->system == map[i]->system) {
 				/* Save the first system if need be */
-				if (first) {
+				if (!last_i)
 					last_i = i;
-					first = false;
-				}
 				update_event_printk(call, map[i]);
 			}
 		}
@@ -2307,15 +2294,15 @@ static void __add_event_to_tracers(struct trace_event_call *call);
 int trace_add_event_call(struct trace_event_call *call)
 {
 	int ret;
-	mutex_lock(&event_mutex);
 	mutex_lock(&trace_types_lock);
+	mutex_lock(&event_mutex);
 
 	ret = __register_event(call, NULL);
 	if (ret >= 0)
 		__add_event_to_tracers(call);
 
-	mutex_unlock(&trace_types_lock);
 	mutex_unlock(&event_mutex);
+	mutex_unlock(&trace_types_lock);
 	return ret;
 }
 
@@ -2369,13 +2356,13 @@ int trace_remove_event_call(struct trace_event_call *call)
 {
 	int ret;
 
-	mutex_lock(&event_mutex);
 	mutex_lock(&trace_types_lock);
+	mutex_lock(&event_mutex);
 	down_write(&trace_event_sem);
 	ret = probe_remove_event_call(call);
 	up_write(&trace_event_sem);
-	mutex_unlock(&trace_types_lock);
 	mutex_unlock(&event_mutex);
+	mutex_unlock(&trace_types_lock);
 
 	return ret;
 }
@@ -2437,8 +2424,8 @@ static int trace_module_notify(struct notifier_block *self,
 {
 	struct module *mod = data;
 
-	mutex_lock(&event_mutex);
 	mutex_lock(&trace_types_lock);
+	mutex_lock(&event_mutex);
 	switch (val) {
 	case MODULE_STATE_COMING:
 		trace_module_add_events(mod);
@@ -2447,8 +2434,8 @@ static int trace_module_notify(struct notifier_block *self,
 		trace_module_remove_events(mod);
 		break;
 	}
-	mutex_unlock(&trace_types_lock);
 	mutex_unlock(&event_mutex);
+	mutex_unlock(&trace_types_lock);
 
 	return 0;
 }
@@ -2963,24 +2950,24 @@ create_event_toplevel_files(struct dentry *parent, struct trace_array *tr)
  * creates the event hierachry in the @parent/events directory.
  *
  * Returns 0 on success.
- *
- * Must be called with event_mutex held.
  */
 int event_trace_add_tracer(struct dentry *parent, struct trace_array *tr)
 {
 	int ret;
 
-	lockdep_assert_held(&event_mutex);
+	mutex_lock(&event_mutex);
 
 	ret = create_event_toplevel_files(parent, tr);
 	if (ret)
-		goto out;
+		goto out_unlock;
 
 	down_write(&trace_event_sem);
 	__trace_add_event_dirs(tr);
 	up_write(&trace_event_sem);
 
- out:
+ out_unlock:
+	mutex_unlock(&event_mutex);
+
 	return ret;
 }
 
@@ -3009,10 +2996,9 @@ early_event_add_tracer(struct dentry *parent, struct trace_array *tr)
 	return ret;
 }
 
-/* Must be called with event_mutex held */
 int event_trace_del_tracer(struct trace_array *tr)
 {
-	lockdep_assert_held(&event_mutex);
+	mutex_lock(&event_mutex);
 
 	/* Disable any event triggers and associated soft-disabled events */
 	clear_event_triggers(tr);
@@ -3032,6 +3018,8 @@ int event_trace_del_tracer(struct trace_array *tr)
 	up_write(&trace_event_sem);
 
 	tr->event_dir = NULL;
+
+	mutex_unlock(&event_mutex);
 
 	return 0;
 }

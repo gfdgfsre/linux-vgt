@@ -856,13 +856,14 @@ struct sdma_engine *sdma_select_user_engine(struct hfi1_devdata *dd,
 {
 	struct sdma_rht_node *rht_node;
 	struct sdma_engine *sde = NULL;
+	const struct cpumask *current_mask = &current->cpus_allowed;
 	unsigned long cpu_id;
 
 	/*
 	 * To ensure that always the same sdma engine(s) will be
 	 * selected make sure the process is pinned to this CPU only.
 	 */
-	if (current->nr_cpus_allowed != 1)
+	if (cpumask_weight(current_mask) != 1)
 		goto out;
 
 	cpu_id = smp_processor_id();
@@ -1528,11 +1529,8 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 	}
 
 	ret = rhashtable_init(tmp_sdma_rht, &sdma_rht_params);
-	if (ret < 0) {
-		kfree(tmp_sdma_rht);
+	if (ret < 0)
 		goto bail;
-	}
-
 	dd->sdma_rht = tmp_sdma_rht;
 
 	dd_dev_info(dd, "SDMA num_sdma: %u\n", dd->num_sdma);

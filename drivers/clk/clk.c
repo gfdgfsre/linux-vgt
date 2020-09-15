@@ -351,9 +351,9 @@ static bool mux_is_better_rate(unsigned long rate, unsigned long now,
 	return now <= rate && now > best;
 }
 
-int clk_mux_determine_rate_flags(struct clk_hw *hw,
-				 struct clk_rate_request *req,
-				 unsigned long flags)
+static int
+clk_mux_determine_rate_flags(struct clk_hw *hw, struct clk_rate_request *req,
+			     unsigned long flags)
 {
 	struct clk_core *core = hw->core, *parent, *best_parent = NULL;
 	int i, num_parents, ret;
@@ -413,7 +413,6 @@ out:
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(clk_mux_determine_rate_flags);
 
 struct clk *__clk_lookup(const char *name)
 {
@@ -1932,9 +1931,6 @@ static int clk_core_get_phase(struct clk_core *core)
 	int ret;
 
 	clk_prepare_lock();
-	/* Always try to update cached phase if possible */
-	if (core->ops->get_phase)
-		core->phase = core->ops->get_phase(core->hw);
 	ret = core->phase;
 	clk_prepare_unlock();
 
@@ -2172,16 +2168,18 @@ static int clk_debug_create_one(struct clk_core *core, struct dentry *pdentry)
 
 	core->dentry = d;
 
-	d = debugfs_create_ulong("clk_rate", 0444, core->dentry, &core->rate);
+	d = debugfs_create_u32("clk_rate", S_IRUGO, core->dentry,
+			(u32 *)&core->rate);
 	if (!d)
 		goto err_out;
 
-	d = debugfs_create_ulong("clk_accuracy", 0444, core->dentry,
-				 &core->accuracy);
+	d = debugfs_create_u32("clk_accuracy", S_IRUGO, core->dentry,
+			(u32 *)&core->accuracy);
 	if (!d)
 		goto err_out;
 
-	d = debugfs_create_u32("clk_phase", 0444, core->dentry, &core->phase);
+	d = debugfs_create_u32("clk_phase", S_IRUGO, core->dentry,
+			(u32 *)&core->phase);
 	if (!d)
 		goto err_out;
 
@@ -2190,23 +2188,23 @@ static int clk_debug_create_one(struct clk_core *core, struct dentry *pdentry)
 	if (!d)
 		goto err_out;
 
-	d = debugfs_create_u32("clk_prepare_count", 0444, core->dentry,
-			       &core->prepare_count);
+	d = debugfs_create_u32("clk_prepare_count", S_IRUGO, core->dentry,
+			(u32 *)&core->prepare_count);
 	if (!d)
 		goto err_out;
 
-	d = debugfs_create_u32("clk_enable_count", 0444, core->dentry,
-			       &core->enable_count);
+	d = debugfs_create_u32("clk_enable_count", S_IRUGO, core->dentry,
+			(u32 *)&core->enable_count);
 	if (!d)
 		goto err_out;
 
-	d = debugfs_create_u32("clk_notifier_count", 0444, core->dentry,
-			       &core->notifier_count);
+	d = debugfs_create_u32("clk_notifier_count", S_IRUGO, core->dentry,
+			(u32 *)&core->notifier_count);
 	if (!d)
 		goto err_out;
 
 	if (core->num_parents > 1) {
-		d = debugfs_create_file("clk_possible_parents", 0444,
+		d = debugfs_create_file("clk_possible_parents", S_IRUGO,
 				core->dentry, core, &possible_parents_fops);
 		if (!d)
 			goto err_out;
@@ -2302,22 +2300,22 @@ static int __init clk_debug_init(void)
 	if (!rootdir)
 		return -ENOMEM;
 
-	d = debugfs_create_file("clk_summary", 0444, rootdir, &all_lists,
+	d = debugfs_create_file("clk_summary", S_IRUGO, rootdir, &all_lists,
 				&clk_summary_fops);
 	if (!d)
 		return -ENOMEM;
 
-	d = debugfs_create_file("clk_dump", 0444, rootdir, &all_lists,
+	d = debugfs_create_file("clk_dump", S_IRUGO, rootdir, &all_lists,
 				&clk_dump_fops);
 	if (!d)
 		return -ENOMEM;
 
-	d = debugfs_create_file("clk_orphan_summary", 0444, rootdir,
+	d = debugfs_create_file("clk_orphan_summary", S_IRUGO, rootdir,
 				&orphan_list, &clk_summary_fops);
 	if (!d)
 		return -ENOMEM;
 
-	d = debugfs_create_file("clk_orphan_dump", 0444, rootdir,
+	d = debugfs_create_file("clk_orphan_dump", S_IRUGO, rootdir,
 				&orphan_list, &clk_dump_fops);
 	if (!d)
 		return -ENOMEM;
@@ -2473,27 +2471,6 @@ static int __clk_core_init(struct clk_core *core)
 	core->rate = core->req_rate = rate;
 
 	/*
-	 * Enable CLK_IS_CRITICAL clocks so newly added critical clocks
-	 * don't get accidentally disabled when walking the orphan tree and
-	 * reparenting clocks
-	 */
-	if (core->flags & CLK_IS_CRITICAL) {
-		unsigned long flags;
-
-		ret = clk_core_prepare(core);
-		if (ret)
-			goto out;
-
-		flags = clk_enable_lock();
-		ret = clk_core_enable(core);
-		clk_enable_unlock(flags);
-		if (ret) {
-			clk_core_unprepare(core);
-			goto out;
-		}
-	}
-
-	/*
 	 * walk the list of orphan clocks and reparent any that newly finds a
 	 * parent.
 	 */
@@ -2501,13 +2478,10 @@ static int __clk_core_init(struct clk_core *core)
 		struct clk_core *parent = __clk_init_parent(orphan);
 
 		/*
-		 * We need to use __clk_set_parent_before() and _after() to
-		 * to properly migrate any prepare/enable count of the orphan
-		 * clock. This is important for CLK_IS_CRITICAL clocks, which
-		 * are enabled during init but might not have a parent yet.
+		 * we could call __clk_set_parent, but that would result in a
+		 * redundant call to the .set_rate op, if it exists
 		 */
 		if (parent) {
-			/* update the clk tree topology */
 			__clk_set_parent_before(orphan, parent);
 			__clk_set_parent_after(orphan, parent, NULL);
 			__clk_recalc_accuracies(orphan);
@@ -2525,6 +2499,16 @@ static int __clk_core_init(struct clk_core *core)
 	 */
 	if (core->ops->init)
 		core->ops->init(core->hw);
+
+	if (core->flags & CLK_IS_CRITICAL) {
+		unsigned long flags;
+
+		clk_core_prepare(core);
+
+		flags = clk_enable_lock();
+		clk_core_enable(core);
+		clk_enable_unlock(flags);
+	}
 
 	kref_init(&core->ref);
 out:
@@ -2561,7 +2545,6 @@ struct clk *__clk_create_clk(struct clk_hw *hw, const char *dev_id,
 	return clk;
 }
 
-/* keep in sync with __clk_put */
 void __clk_free_clk(struct clk *clk)
 {
 	clk_prepare_lock();
@@ -2927,7 +2910,6 @@ int __clk_get(struct clk *clk)
 	return 1;
 }
 
-/* keep in sync with __clk_free_clk */
 void __clk_put(struct clk *clk)
 {
 	struct module *owner;
@@ -2949,7 +2931,6 @@ void __clk_put(struct clk *clk)
 
 	module_put(owner);
 
-	kfree_const(clk->con_id);
 	kfree(clk);
 }
 

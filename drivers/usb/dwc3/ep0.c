@@ -884,12 +884,7 @@ static void dwc3_ep0_complete_data(struct dwc3 *dwc,
 		trb++;
 		trb->ctrl &= ~DWC3_TRB_CTRL_HWO;
 		trace_dwc3_complete_trb(ep0, trb);
-
-		if (r->direction)
-			dwc->eps[1]->trb_enqueue = 0;
-		else
-			dwc->eps[0]->trb_enqueue = 0;
-
+		ep0->trb_enqueue = 0;
 		dwc->ep0_bounced = false;
 	}
 
@@ -1147,9 +1142,6 @@ static void dwc3_ep0_xfernotready(struct dwc3 *dwc,
 void dwc3_ep0_interrupt(struct dwc3 *dwc,
 		const struct dwc3_event_depevt *event)
 {
-	struct dwc3_ep	*dep = dwc->eps[event->endpoint_number];
-	u8		cmd;
-
 	switch (event->endpoint_event) {
 	case DWC3_DEPEVT_XFERCOMPLETE:
 		dwc3_ep0_xfer_complete(dwc, event);
@@ -1162,12 +1154,7 @@ void dwc3_ep0_interrupt(struct dwc3 *dwc,
 	case DWC3_DEPEVT_XFERINPROGRESS:
 	case DWC3_DEPEVT_RXTXFIFOEVT:
 	case DWC3_DEPEVT_STREAMEVT:
-		break;
 	case DWC3_DEPEVT_EPCMDCMPLT:
-		cmd = DEPEVT_PARAMETER_CMD(event->parameters);
-
-		if (cmd == DWC3_DEPCMD_ENDTRANSFER)
-			dep->flags &= ~DWC3_EP_TRANSFER_STARTED;
 		break;
 	}
 }

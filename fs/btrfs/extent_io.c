@@ -1721,8 +1721,7 @@ static int __process_pages_contig(struct address_space *mapping,
 				if (!PageDirty(pages[i]) ||
 				    pages[i]->mapping != mapping) {
 					unlock_page(pages[i]);
-					for (; i < ret; i++)
-						put_page(pages[i]);
+					put_page(pages[i]);
 					err = -EAGAIN;
 					goto out;
 				}
@@ -3015,11 +3014,11 @@ static int __do_readpage(struct extent_io_tree *tree,
 		 */
 		if (test_bit(EXTENT_FLAG_COMPRESSED, &em->flags) &&
 		    prev_em_start && *prev_em_start != (u64)-1 &&
-		    *prev_em_start != em->start)
+		    *prev_em_start != em->orig_start)
 			force_bio_submit = true;
 
 		if (prev_em_start)
-			*prev_em_start = em->start;
+			*prev_em_start = em->orig_start;
 
 		free_extent_map(em);
 		em = NULL;
@@ -4049,14 +4048,6 @@ retry:
 		 */
 		scanned = 1;
 		index = 0;
-
-		/*
-		 * If we're looping we could run into a page that is locked by a
-		 * writer and that writer could be waiting on writeback for a
-		 * page in our current bio, and thus deadlock, so flush the
-		 * write bio here.
-		 */
-		flush_write_bio(data);
 		goto retry;
 	}
 
@@ -4289,7 +4280,6 @@ int try_release_extent_mapping(struct extent_map_tree *map,
 	struct extent_map *em;
 	u64 start = page_offset(page);
 	u64 end = start + PAGE_SIZE - 1;
-	struct btrfs_inode *btrfs_inode = BTRFS_I(page->mapping->host);
 
 	if (gfpflags_allow_blocking(mask) &&
 	    page->mapping->host->i_size > SZ_16M) {
@@ -4312,8 +4302,6 @@ int try_release_extent_mapping(struct extent_map_tree *map,
 					    extent_map_end(em) - 1,
 					    EXTENT_LOCKED | EXTENT_WRITEBACK,
 					    0, NULL)) {
-				set_bit(BTRFS_INODE_NEEDS_FULL_SYNC,
-					&btrfs_inode->runtime_flags);
 				remove_extent_mapping(map, em);
 				/* once for the rb tree */
 				free_extent_map(em);
@@ -4863,28 +4851,25 @@ struct extent_buffer *alloc_dummy_extent_buffer(struct btrfs_fs_info *fs_info,
 static void check_buffer_tree_ref(struct extent_buffer *eb)
 {
 	int refs;
-	/*
-	 * The TREE_REF bit is first set when the extent_buffer is added
-	 * to the radix tree. It is also reset, if unset, when a new reference
-	 * is created by find_extent_buffer.
+	/* the ref bit is tricky.  We have to make sure it is set
+	 * if we have the buffer dirty.   Otherwise the
+	 * code to free a buffer can end up dropping a dirty
+	 * page
 	 *
-	 * It is only cleared in two cases: freeing the last non-tree
-	 * reference to the extent_buffer when its STALE bit is set or
-	 * calling releasepage when the tree reference is the only reference.
+	 * Once the ref bit is set, it won't go away while the
+	 * buffer is dirty or in writeback, and it also won't
+	 * go away while we have the reference count on the
+	 * eb bumped.
 	 *
-	 * In both cases, care is taken to ensure that the extent_buffer's
-	 * pages are not under io. However, releasepage can be concurrently
-	 * called with creating new references, which is prone to race
-	 * conditions between the calls to check_buffer_tree_ref in those
-	 * codepaths and clearing TREE_REF in try_release_extent_buffer.
+	 * We can't just set the ref bit without bumping the
+	 * ref on the eb because free_extent_buffer might
+	 * see the ref bit and try to clear it.  If this happens
+	 * free_extent_buffer might end up dropping our original
+	 * ref by mistake and freeing the page before we are able
+	 * to add one more ref.
 	 *
-	 * The actual lifetime of the extent_buffer in the radix tree is
-	 * adequately protected by the refcount, but the TREE_REF bit and
-	 * its corresponding reference are not. To protect against this
-	 * class of races, we call check_buffer_tree_ref from the codepaths
-	 * which trigger io after they set eb->io_pages. Note that once io is
-	 * initiated, TREE_REF can no longer be cleared, so that is the
-	 * moment at which any such race is best fixed.
+	 * So bump the ref count first, then set the bit.  If someone
+	 * beat us to it, drop the ref we added.
 	 */
 	refs = atomic_read(&eb->refs);
 	if (refs >= 2 && test_bit(EXTENT_BUFFER_TREE_REF, &eb->bflags))
@@ -4961,14 +4946,12 @@ struct extent_buffer *alloc_test_extent_buffer(struct btrfs_fs_info *fs_info,
 		return eb;
 	eb = alloc_dummy_extent_buffer(fs_info, start);
 	if (!eb)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 	eb->fs_info = fs_info;
 again:
 	ret = radix_tree_preload(GFP_NOFS);
-	if (ret) {
-		exists = ERR_PTR(ret);
+	if (ret)
 		goto free_eb;
-	}
 	spin_lock(&fs_info->buffer_lock);
 	ret = radix_tree_insert(&fs_info->buffer_radix,
 				start >> PAGE_SHIFT, eb);
@@ -5348,11 +5331,6 @@ int read_extent_buffer_pages(struct extent_io_tree *tree,
 	clear_bit(EXTENT_BUFFER_READ_ERR, &eb->bflags);
 	eb->read_mirror = 0;
 	atomic_set(&eb->io_pages, num_reads);
-	/*
-	 * It is possible for releasepage to clear the TREE_REF bit before we
-	 * set io_pages. See check_buffer_tree_ref for a more detailed comment.
-	 */
-	check_buffer_tree_ref(eb);
 	for (i = 0; i < num_pages; i++) {
 		page = eb->pages[i];
 

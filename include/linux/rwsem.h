@@ -20,10 +20,6 @@
 #include <linux/osq_lock.h>
 #endif
 
-#ifdef CONFIG_PREEMPT_RT_FULL
-#include <linux/rwsem-rt.h>
-#else /* PREEMPT_RT_FULL */
-
 struct rw_semaphore;
 
 #ifdef CONFIG_RWSEM_GENERIC_SPINLOCK
@@ -47,12 +43,6 @@ struct rw_semaphore {
 	struct lockdep_map	dep_map;
 #endif
 };
-
-/*
- * Setting bit 0 of the owner field with other non-zero bits will indicate
- * that the rwsem is writer-owned with an unknown owner.
- */
-#define RWSEM_OWNER_UNKNOWN	((struct task_struct *)-1L)
 
 extern struct rw_semaphore *rwsem_down_read_failed(struct rw_semaphore *sem);
 extern struct rw_semaphore *rwsem_down_read_failed_killable(struct rw_semaphore *sem);
@@ -117,13 +107,6 @@ static inline int rwsem_is_contended(struct rw_semaphore *sem)
 {
 	return !list_empty(&sem->wait_list);
 }
-
-#endif /* !PREEMPT_RT_FULL */
-
-/*
- * The functions below are the same for all rwsem implementations including
- * the RT specific variant.
- */
 
 /*
  * lock for reading

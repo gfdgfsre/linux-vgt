@@ -779,14 +779,8 @@ static int spi_map_buf(struct spi_controller *ctlr, struct device *dev,
 	for (i = 0; i < sgs; i++) {
 
 		if (vmalloced_buf || kmap_buf) {
-			/*
-			 * Next scatterlist entry size is the minimum between
-			 * the desc_len and the remaining buffer length that
-			 * fits in a page.
-			 */
-			min = min_t(size_t, desc_len,
-				    min_t(size_t, len,
-					  PAGE_SIZE - offset_in_page(buf)));
+			min = min_t(size_t,
+				    len, desc_len - offset_in_page(buf));
 			if (vmalloced_buf)
 				vm_page = vmalloc_to_page(buf);
 			else
@@ -991,8 +985,6 @@ static int spi_map_msg(struct spi_controller *ctlr, struct spi_message *msg)
 		if (max_tx || max_rx) {
 			list_for_each_entry(xfer, &msg->transfers,
 					    transfer_list) {
-				if (!xfer->len)
-					continue;
 				if (!xfer->tx_buf)
 					xfer->tx_buf = ctlr->dummy_tx;
 				if (!xfer->rx_buf)
@@ -1224,7 +1216,6 @@ static void __spi_pump_messages(struct spi_controller *ctlr, bool in_kthread)
 	if (!was_busy && ctlr->auto_runtime_pm) {
 		ret = pm_runtime_get_sync(ctlr->dev.parent);
 		if (ret < 0) {
-			pm_runtime_put_noidle(ctlr->dev.parent);
 			dev_err(&ctlr->dev, "Failed to power device: %d\n",
 				ret);
 			mutex_unlock(&ctlr->io_mutex);
@@ -2110,17 +2101,8 @@ int spi_register_controller(struct spi_controller *ctlr)
 	 */
 	if (ctlr->num_chipselect == 0)
 		return -EINVAL;
-	if (ctlr->bus_num >= 0) {
-		/* devices with a fixed bus num must check-in with the num */
-		mutex_lock(&board_lock);
-		id = idr_alloc(&spi_master_idr, ctlr, ctlr->bus_num,
-			ctlr->bus_num + 1, GFP_KERNEL);
-		mutex_unlock(&board_lock);
-		if (WARN(id < 0, "couldn't get idr"))
-			return id == -ENOSPC ? -EBUSY : id;
-		ctlr->bus_num = id;
-	} else if (ctlr->dev.of_node) {
-		/* allocate dynamic bus number using Linux idr */
+	/* allocate dynamic bus number using Linux idr */
+	if ((ctlr->bus_num < 0) && ctlr->dev.of_node) {
 		id = of_alias_get_id(ctlr->dev.of_node, "spi");
 		if (id >= 0) {
 			ctlr->bus_num = id;
@@ -2263,14 +2245,18 @@ static int __unregister(struct device *dev, void *null)
 void spi_unregister_controller(struct spi_controller *ctlr)
 {
 	struct spi_controller *found;
-	int id = ctlr->bus_num;
-
-	device_for_each_child(&ctlr->dev, NULL, __unregister);
+	int dummy;
 
 	/* First make sure that this controller was ever added */
 	mutex_lock(&board_lock);
-	found = idr_find(&spi_master_idr, id);
+	found = idr_find(&spi_master_idr, ctlr->bus_num);
 	mutex_unlock(&board_lock);
+	if (found != ctlr) {
+		dev_dbg(&ctlr->dev,
+			"attempting to delete unregistered controller [%s]\n",
+			dev_name(&ctlr->dev));
+		return;
+	}
 	if (ctlr->queued) {
 		if (spi_destroy_queue(ctlr))
 			dev_err(&ctlr->dev, "queue remove failed\n");
@@ -2279,11 +2265,11 @@ void spi_unregister_controller(struct spi_controller *ctlr)
 	list_del(&ctlr->list);
 	mutex_unlock(&board_lock);
 
+	dummy = device_for_each_child(&ctlr->dev, NULL, __unregister);
 	device_unregister(&ctlr->dev);
 	/* free bus id */
 	mutex_lock(&board_lock);
-	if (found == ctlr)
-		idr_remove(&spi_master_idr, id);
+	idr_remove(&spi_master_idr, ctlr->bus_num);
 	mutex_unlock(&board_lock);
 }
 EXPORT_SYMBOL_GPL(spi_unregister_controller);

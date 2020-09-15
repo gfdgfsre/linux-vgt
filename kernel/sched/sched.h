@@ -20,7 +20,6 @@
 #include <linux/sched/task_stack.h>
 #include <linux/sched/cputime.h>
 #include <linux/sched/init.h>
-#include <linux/sched/smt.h>
 
 #include <linux/u64_stats_sync.h>
 #include <linux/kernel_stat.h>
@@ -89,13 +88,7 @@ static inline void cpu_load_update_active(struct rq *this_rq) { }
 #ifdef CONFIG_64BIT
 # define NICE_0_LOAD_SHIFT	(SCHED_FIXEDPOINT_SHIFT + SCHED_FIXEDPOINT_SHIFT)
 # define scale_load(w)		((w) << SCHED_FIXEDPOINT_SHIFT)
-# define scale_load_down(w) \
-({ \
-	unsigned long __w = (w); \
-	if (__w) \
-		__w = max(2UL, __w >> SCHED_FIXEDPOINT_SHIFT); \
-	__w; \
-})
+# define scale_load_down(w)	((w) >> SCHED_FIXEDPOINT_SHIFT)
 #else
 # define NICE_0_LOAD_SHIFT	(SCHED_FIXEDPOINT_SHIFT)
 # define scale_load(w)		(w)
@@ -286,16 +279,15 @@ struct cfs_bandwidth {
 	ktime_t period;
 	u64 quota, runtime;
 	s64 hierarchical_quota;
+	u64 runtime_expires;
 
-	short idle, period_active;
+	int idle, period_active;
 	struct hrtimer period_timer, slack_timer;
 	struct list_head throttled_cfs_rq;
 
 	/* statistics */
 	int nr_periods, nr_throttled;
 	u64 throttled_time;
-
-	bool distribute_running;
 #endif
 };
 
@@ -493,6 +485,7 @@ struct cfs_rq {
 
 #ifdef CONFIG_CFS_BANDWIDTH
 	int runtime_enabled;
+	u64 runtime_expires;
 	s64 runtime_remaining;
 
 	u64 throttled_clock, throttled_clock_task;
@@ -509,7 +502,7 @@ static inline int rt_bandwidth_enabled(void)
 }
 
 /* RT IPI pull logic requires IRQ_WORK */
-#if defined(CONFIG_IRQ_WORK) && defined(CONFIG_SMP)
+#ifdef CONFIG_IRQ_WORK
 # define HAVE_RT_PUSH_IPI
 #endif
 
@@ -531,6 +524,12 @@ struct rt_rq {
 	unsigned long rt_nr_total;
 	int overloaded;
 	struct plist_head pushable_tasks;
+#ifdef HAVE_RT_PUSH_IPI
+	int push_flags;
+	int push_cpu;
+	struct irq_work push_work;
+	raw_spinlock_t push_lock;
+#endif
 #endif /* CONFIG_SMP */
 	int rt_queued;
 
@@ -639,19 +638,6 @@ struct root_domain {
 	struct dl_bw dl_bw;
 	struct cpudl cpudl;
 
-#ifdef HAVE_RT_PUSH_IPI
-	/*
-	 * For IPI pull requests, loop across the rto_mask.
-	 */
-	struct irq_work rto_push_work;
-	raw_spinlock_t rto_lock;
-	/* These are only updated and read within rto_lock */
-	int rto_loop;
-	int rto_cpu;
-	/* These atomics are updated outside of a lock */
-	atomic_t rto_loop_next;
-	atomic_t rto_loop_start;
-#endif
 	/*
 	 * The "RT overload" flag: it gets set if a CPU has more than
 	 * one runnable RT task.
@@ -668,12 +654,7 @@ extern struct mutex sched_domains_mutex;
 extern void init_defrootdomain(void);
 extern int sched_init_domains(const struct cpumask *cpu_map);
 extern void rq_attach_root(struct rq *rq, struct root_domain *rd);
-extern void sched_get_rd(struct root_domain *rd);
-extern void sched_put_rd(struct root_domain *rd);
 
-#ifdef HAVE_RT_PUSH_IPI
-extern void rto_push_irq_work_func(struct irq_work *work);
-#endif
 #endif /* CONFIG_SMP */
 
 /*
@@ -817,10 +798,6 @@ struct rq {
 	/* Must be inspected within a rcu lock section */
 	struct cpuidle_state *idle_state;
 #endif
-
-#if defined(CONFIG_PREEMPT_RT_BASE) && defined(CONFIG_SMP)
-	int			nr_pinned;
-#endif
 };
 
 static inline int cpu_of(struct rq *rq)
@@ -834,6 +811,9 @@ static inline int cpu_of(struct rq *rq)
 
 
 #ifdef CONFIG_SCHED_SMT
+
+extern struct static_key_false sched_smt_present;
+
 extern void __update_idle_core(struct rq *rq);
 
 static inline void update_idle_core(struct rq *rq)
@@ -1362,7 +1342,6 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 #define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
 #define WF_FORK		0x02		/* child wakeup after fork */
 #define WF_MIGRATED	0x4		/* internal use, task got migrated */
-#define WF_LOCK_SLEEPER	0x08		/* wakeup spinlock "sleeper" */
 
 /*
  * To aid in avoiding the subversion of "niceness" due to uneven distribution
@@ -1553,15 +1532,6 @@ extern void init_sched_fair_class(void);
 
 extern void resched_curr(struct rq *rq);
 extern void resched_cpu(int cpu);
-
-#ifdef CONFIG_PREEMPT_LAZY
-extern void resched_curr_lazy(struct rq *rq);
-#else
-static inline void resched_curr_lazy(struct rq *rq)
-{
-	resched_curr(rq);
-}
-#endif
 
 extern struct rt_bandwidth def_rt_bandwidth;
 extern void init_rt_bandwidth(struct rt_bandwidth *rt_b, u64 period, u64 runtime);
@@ -1987,9 +1957,8 @@ extern bool sched_debug_enabled;
 extern void print_cfs_stats(struct seq_file *m, int cpu);
 extern void print_rt_stats(struct seq_file *m, int cpu);
 extern void print_dl_stats(struct seq_file *m, int cpu);
-extern void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq);
-extern void print_rt_rq(struct seq_file *m, int cpu, struct rt_rq *rt_rq);
-extern void print_dl_rq(struct seq_file *m, int cpu, struct dl_rq *dl_rq);
+extern void
+print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq);
 #ifdef CONFIG_NUMA_BALANCING
 extern void
 show_numa_stats(struct task_struct *p, struct seq_file *m);

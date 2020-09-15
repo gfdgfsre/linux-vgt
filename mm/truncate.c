@@ -41,10 +41,8 @@ static void clear_shadow_entry(struct address_space *mapping, pgoff_t index,
 		goto unlock;
 	if (*slot != entry)
 		goto unlock;
-	local_lock(shadow_nodes_lock);
 	__radix_tree_replace(&mapping->page_tree, node, slot, NULL,
-			     __workingset_update_node, mapping);
-	local_unlock(shadow_nodes_lock);
+			     workingset_update_node, mapping);
 	mapping->nrexceptional--;
 unlock:
 	spin_unlock_irq(&mapping->tree_lock);
@@ -473,13 +471,9 @@ void truncate_inode_pages_final(struct address_space *mapping)
 		 */
 		spin_lock_irq(&mapping->tree_lock);
 		spin_unlock_irq(&mapping->tree_lock);
-	}
 
-	/*
-	 * Cleancache needs notification even if there are no pages or shadow
-	 * entries.
-	 */
-	truncate_inode_pages(mapping, 0);
+		truncate_inode_pages(mapping, 0);
+	}
 }
 EXPORT_SYMBOL(truncate_inode_pages_final);
 

@@ -185,7 +185,6 @@ static struct shash_alg crc32_pmull_algs[] = { {
 	.base.cra_name		= "crc32",
 	.base.cra_driver_name	= "crc32-arm64-ce",
 	.base.cra_priority	= 200,
-	.base.cra_flags		= CRYPTO_ALG_OPTIONAL_KEY,
 	.base.cra_blocksize	= 1,
 	.base.cra_module	= THIS_MODULE,
 }, {
@@ -201,15 +200,13 @@ static struct shash_alg crc32_pmull_algs[] = { {
 	.base.cra_name		= "crc32c",
 	.base.cra_driver_name	= "crc32c-arm64-ce",
 	.base.cra_priority	= 200,
-	.base.cra_flags		= CRYPTO_ALG_OPTIONAL_KEY,
 	.base.cra_blocksize	= 1,
 	.base.cra_module	= THIS_MODULE,
 } };
 
 static int __init crc32_pmull_mod_init(void)
 {
-	if (IS_ENABLED(CONFIG_KERNEL_MODE_NEON) &&
-	    !IS_ENABLED(CONFIG_PREEMPT_RT_BASE) && (elf_hwcap & HWCAP_PMULL)) {
+	if (IS_ENABLED(CONFIG_KERNEL_MODE_NEON) && (elf_hwcap & HWCAP_PMULL)) {
 		crc32_pmull_algs[0].update = crc32_pmull_update;
 		crc32_pmull_algs[1].update = crc32c_pmull_update;
 

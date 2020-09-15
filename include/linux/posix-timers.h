@@ -82,8 +82,8 @@ struct k_itimer {
 	clockid_t		it_clock;
 	timer_t			it_id;
 	int			it_active;
-	s64			it_overrun;
-	s64			it_overrun_last;
+	int			it_overrun;
+	int			it_overrun_last;
 	int			it_requeue_pending;
 	int			it_sigev_notify;
 	ktime_t			it_interval;
@@ -101,8 +101,8 @@ struct k_itimer {
 		struct {
 			struct alarm	alarmtimer;
 		} alarm;
+		struct rcu_head		rcu;
 	} it;
-	struct rcu_head		rcu;
 };
 
 void run_posix_cpu_timers(struct task_struct *task);

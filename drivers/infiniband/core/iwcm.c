@@ -80,7 +80,7 @@ const char *__attribute_const__ iwcm_reject_msg(int reason)
 }
 EXPORT_SYMBOL(iwcm_reject_msg);
 
-static struct rdma_nl_cbs iwcm_nl_cb_table[RDMA_NL_IWPM_NUM_OPS] = {
+static struct rdma_nl_cbs iwcm_nl_cb_table[] = {
 	[RDMA_NL_IWPM_REG_PID] = {.dump = iwpm_register_pid_cb},
 	[RDMA_NL_IWPM_ADD_MAPPING] = {.dump = iwpm_add_mapping_cb},
 	[RDMA_NL_IWPM_QUERY_MAPPING] = {.dump = iwpm_add_and_query_mapping_cb},
@@ -158,10 +158,8 @@ static void dealloc_work_entries(struct iwcm_id_private *cm_id_priv)
 {
 	struct list_head *e, *tmp;
 
-	list_for_each_safe(e, tmp, &cm_id_priv->work_free_list) {
-		list_del(e);
+	list_for_each_safe(e, tmp, &cm_id_priv->work_free_list)
 		kfree(list_entry(e, struct iwcm_work, free_list));
-	}
 }
 
 static int alloc_work_entries(struct iwcm_id_private *cm_id_priv, int count)

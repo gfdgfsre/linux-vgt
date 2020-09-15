@@ -18,4 +18,12 @@ source "drivers/soc/ux500/Kconfig"
 source "drivers/soc/versatile/Kconfig"
 source "drivers/soc/zte/Kconfig"
 
+source "drivers/soc/sunxi-scr/Kconfig"
+source "drivers/soc/sunxi-sysinfo/Kconfig"
+
+source "drivers/soc/timer_test/Kconfig"
+source "drivers/soc/sunxi_tr/Kconfig"
+source "drivers/soc/sunxi-di/Kconfig"
+source "drivers/soc/sunxi_g2d/Kconfig"
+
 endmenu

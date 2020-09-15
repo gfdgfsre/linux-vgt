@@ -2647,9 +2647,7 @@ get_guid(ipmi_smi_t intf)
 	if (rv)
 		/* Send failed, no GUID available. */
 		intf->bmc->guid_set = 0;
-	else
-		wait_event(intf->waitq, intf->bmc->guid_set != 2);
-
+	wait_event(intf->waitq, intf->bmc->guid_set != 2);
 	intf->null_user_handler = NULL;
 }
 
@@ -4032,8 +4030,7 @@ smi_from_recv_msg(ipmi_smi_t intf, struct ipmi_recv_msg *recv_msg,
 }
 
 static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
-			      struct list_head *timeouts,
-			      unsigned long timeout_period,
+			      struct list_head *timeouts, long timeout_period,
 			      int slot, unsigned long *flags,
 			      unsigned int *waiting_msgs)
 {
@@ -4046,8 +4043,8 @@ static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
 	if (!ent->inuse)
 		return;
 
-	if (timeout_period < ent->timeout) {
-		ent->timeout -= timeout_period;
+	ent->timeout -= timeout_period;
+	if (ent->timeout > 0) {
 		(*waiting_msgs)++;
 		return;
 	}
@@ -4113,8 +4110,7 @@ static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
 	}
 }
 
-static unsigned int ipmi_timeout_handler(ipmi_smi_t intf,
-					 unsigned long timeout_period)
+static unsigned int ipmi_timeout_handler(ipmi_smi_t intf, long timeout_period)
 {
 	struct list_head     timeouts;
 	struct ipmi_recv_msg *msg, *msg2;

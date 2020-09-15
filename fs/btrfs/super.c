@@ -202,6 +202,7 @@ static struct ratelimit_state printk_limits[] = {
 
 void btrfs_printk(const struct btrfs_fs_info *fs_info, const char *fmt, ...)
 {
+	struct super_block *sb = fs_info->sb;
 	char lvl[PRINTK_MAX_SINGLE_HEADER_LEN + 1] = "\0";
 	struct va_format vaf;
 	va_list args;
@@ -227,8 +228,7 @@ void btrfs_printk(const struct btrfs_fs_info *fs_info, const char *fmt, ...)
 	vaf.va = &args;
 
 	if (__ratelimit(ratelimit))
-		printk("%sBTRFS %s (device %s): %pV\n", lvl, type,
-			fs_info ? fs_info->sb->s_id : "<unknown>", &vaf);
+		printk("%sBTRFS %s (device %s): %pV\n", lvl, type, sb->s_id, &vaf);
 
 	va_end(args);
 }
@@ -1581,7 +1581,7 @@ static struct dentry *btrfs_mount(struct file_system_type *fs_type, int flags,
 	 * it for searching for existing supers, so this lets us do that and
 	 * then open_ctree will properly initialize everything later.
 	 */
-	fs_info = kvzalloc(sizeof(struct btrfs_fs_info), GFP_KERNEL);
+	fs_info = kzalloc(sizeof(struct btrfs_fs_info), GFP_KERNEL);
 	if (!fs_info) {
 		error = -ENOMEM;
 		goto error_sec_opts;
@@ -1801,8 +1801,6 @@ static int btrfs_remount(struct super_block *sb, int *flags, char *data)
 		}
 
 		if (btrfs_super_log_root(fs_info->super_copy) != 0) {
-			btrfs_warn(fs_info,
-		"mount required to replay tree-log, cannot remount read-write");
 			ret = -EINVAL;
 			goto restore;
 		}
@@ -1865,7 +1863,7 @@ restore:
 }
 
 /* Used to sort the devices by max_avail(descending sort) */
-static inline int btrfs_cmp_device_free_bytes(const void *dev_info1,
+static int btrfs_cmp_device_free_bytes(const void *dev_info1,
 				       const void *dev_info2)
 {
 	if (((struct btrfs_device_info *)dev_info1)->max_avail >
@@ -1894,8 +1892,8 @@ static inline void btrfs_descending_sort_devices(
  * The helper to calc the free space on the devices that can be used to store
  * file data.
  */
-static inline int btrfs_calc_avail_data_space(struct btrfs_fs_info *fs_info,
-					      u64 *free_bytes)
+static int btrfs_calc_avail_data_space(struct btrfs_fs_info *fs_info,
+				       u64 *free_bytes)
 {
 	struct btrfs_device_info *devices_info;
 	struct btrfs_fs_devices *fs_devices = fs_info->fs_devices;
@@ -2116,15 +2114,7 @@ static int btrfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	 */
 	thresh = 4 * 1024 * 1024;
 
-	/*
-	 * We only want to claim there's no available space if we can no longer
-	 * allocate chunks for our metadata profile and our global reserve will
-	 * not fit in the free metadata space.  If we aren't ->full then we
-	 * still can allocate chunks and thus are fine using the currently
-	 * calculated f_bavail.
-	 */
-	if (!mixed && block_rsv->space_info->full &&
-	    total_free_meta - thresh < block_rsv->size)
+	if (!mixed && total_free_meta - thresh < block_rsv->size)
 		buf->f_bavail = 0;
 
 	buf->f_type = BTRFS_SUPER_MAGIC;
@@ -2186,7 +2176,6 @@ static long btrfs_control_ioctl(struct file *file, unsigned int cmd,
 	vol = memdup_user((void __user *)arg, sizeof(*vol));
 	if (IS_ERR(vol))
 		return PTR_ERR(vol);
-	vol->name[BTRFS_PATH_NAME_MAX] = '\0';
 
 	switch (cmd) {
 	case BTRFS_IOC_SCAN_DEV:
@@ -2282,6 +2271,7 @@ static const struct super_operations btrfs_super_ops = {
 	.sync_fs	= btrfs_sync_fs,
 	.show_options	= btrfs_show_options,
 	.show_devname	= btrfs_show_devname,
+	.write_inode	= btrfs_write_inode,
 	.alloc_inode	= btrfs_alloc_inode,
 	.destroy_inode	= btrfs_destroy_inode,
 	.statfs		= btrfs_statfs,

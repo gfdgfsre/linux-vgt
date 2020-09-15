@@ -149,12 +149,14 @@ static struct binder_buffer *binder_alloc_prepare_to_free_locked(
 		else {
 			/*
 			 * Guard against user threads attempting to
-			 * free the buffer when in use by kernel or
-			 * after it's already been freed.
+			 * free the buffer twice
 			 */
-			if (!buffer->allow_user_free)
-				return ERR_PTR(-EPERM);
-			buffer->allow_user_free = 0;
+			if (buffer->free_in_progress) {
+				pr_err("%d:%d FREE_BUFFER u%016llx user freed buffer twice\n",
+				       alloc->pid, current->pid, (u64)user_ptr);
+				return NULL;
+			}
+			buffer->free_in_progress = 1;
 			return buffer;
 		}
 	}
@@ -289,7 +291,8 @@ static int binder_update_page_range(struct binder_alloc *alloc, int allocate,
 	return 0;
 
 free_range:
-	for (page_addr = end - PAGE_SIZE; 1; page_addr -= PAGE_SIZE) {
+	for (page_addr = end - PAGE_SIZE; page_addr >= start;
+	     page_addr -= PAGE_SIZE) {
 		bool ret;
 		size_t index;
 
@@ -302,8 +305,6 @@ free_range:
 		WARN_ON(!ret);
 
 		trace_binder_free_lru_end(alloc, index);
-		if (page_addr == start)
-			break;
 		continue;
 
 err_vm_insert_page_failed:
@@ -313,8 +314,7 @@ err_map_kernel_failed:
 		page->page_ptr = NULL;
 err_alloc_page_failed:
 err_page_ptr_cleared:
-		if (page_addr == start)
-			break;
+		;
 	}
 err_no_vma:
 	if (mm) {
@@ -322,34 +322,6 @@ err_no_vma:
 		mmput(mm);
 	}
 	return vma ? -ENOMEM : -ESRCH;
-}
-
-static inline void binder_alloc_set_vma(struct binder_alloc *alloc,
-		struct vm_area_struct *vma)
-{
-	if (vma)
-		alloc->vma_vm_mm = vma->vm_mm;
-	/*
-	 * If we see alloc->vma is not NULL, buffer data structures set up
-	 * completely. Look at smp_rmb side binder_alloc_get_vma.
-	 * We also want to guarantee new alloc->vma_vm_mm is always visible
-	 * if alloc->vma is set.
-	 */
-	smp_wmb();
-	alloc->vma = vma;
-}
-
-static inline struct vm_area_struct *binder_alloc_get_vma(
-		struct binder_alloc *alloc)
-{
-	struct vm_area_struct *vma = NULL;
-
-	if (alloc->vma) {
-		/* Look at description in binder_alloc_set_vma */
-		smp_rmb();
-		vma = alloc->vma;
-	}
-	return vma;
 }
 
 struct binder_buffer *binder_alloc_new_buf_locked(struct binder_alloc *alloc,
@@ -367,7 +339,7 @@ struct binder_buffer *binder_alloc_new_buf_locked(struct binder_alloc *alloc,
 	size_t size, data_offsets_size;
 	int ret;
 
-	if (!binder_alloc_get_vma(alloc)) {
+	if (alloc->vma == NULL) {
 		pr_err("%d: binder_alloc_buf, no vma\n",
 		       alloc->pid);
 		return ERR_PTR(-ESRCH);
@@ -486,7 +458,7 @@ struct binder_buffer *binder_alloc_new_buf_locked(struct binder_alloc *alloc,
 
 	rb_erase(best_fit, &alloc->free_buffers);
 	buffer->free = 0;
-	buffer->allow_user_free = 0;
+	buffer->free_in_progress = 0;
 	binder_insert_allocated_buffer_locked(alloc, buffer);
 	binder_alloc_debug(BINDER_DEBUG_BUFFER_ALLOC,
 		     "%d: binder_alloc_buf size %zd got %pK\n",
@@ -696,7 +668,7 @@ int binder_alloc_mmap_handler(struct binder_alloc *alloc,
 		goto err_already_mapped;
 	}
 
-	area = get_vm_area(vma->vm_end - vma->vm_start, VM_ALLOC);
+	area = get_vm_area(vma->vm_end - vma->vm_start, VM_IOREMAP);
 	if (area == NULL) {
 		ret = -ENOMEM;
 		failure_string = "get_vm_area";
@@ -740,7 +712,9 @@ int binder_alloc_mmap_handler(struct binder_alloc *alloc,
 	buffer->free = 1;
 	binder_insert_free_buffer(alloc, buffer);
 	alloc->free_async_space = alloc->buffer_size / 2;
-	binder_alloc_set_vma(alloc, vma);
+	barrier();
+	alloc->vma = vma;
+	alloc->vma_vm_mm = vma->vm_mm;
 	mmgrab(alloc->vma_vm_mm);
 
 	return 0;
@@ -767,10 +741,10 @@ void binder_alloc_deferred_release(struct binder_alloc *alloc)
 	int buffers, page_count;
 	struct binder_buffer *buffer;
 
-	buffers = 0;
-	mutex_lock(&alloc->mutex);
 	BUG_ON(alloc->vma);
 
+	buffers = 0;
+	mutex_lock(&alloc->mutex);
 	while ((n = rb_first(&alloc->allocated_buffers))) {
 		buffer = rb_entry(n, struct binder_buffer, rb_node);
 
@@ -912,7 +886,7 @@ int binder_alloc_get_allocated_count(struct binder_alloc *alloc)
  */
 void binder_alloc_vma_close(struct binder_alloc *alloc)
 {
-	binder_alloc_set_vma(alloc, NULL);
+	WRITE_ONCE(alloc->vma, NULL);
 }
 
 /**
@@ -947,13 +921,14 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 
 	index = page - alloc->pages;
 	page_addr = (uintptr_t)alloc->buffer + index * PAGE_SIZE;
-
-	mm = alloc->vma_vm_mm;
-	if (!mmget_not_zero(mm))
-		goto err_mmget;
-	if (!down_read_trylock(&mm->mmap_sem))
-		goto err_down_read_mmap_sem_failed;
-	vma = binder_alloc_get_vma(alloc);
+	vma = alloc->vma;
+	if (vma) {
+		if (!mmget_not_zero(alloc->vma_vm_mm))
+			goto err_mmget;
+		mm = alloc->vma_vm_mm;
+		if (!down_write_trylock(&mm->mmap_sem))
+			goto err_down_write_mmap_sem_failed;
+	}
 
 	list_lru_isolate(lru, item);
 	spin_unlock(lock);
@@ -966,9 +941,10 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 			       PAGE_SIZE);
 
 		trace_binder_unmap_user_end(alloc, index);
+
+		up_write(&mm->mmap_sem);
+		mmput(mm);
 	}
-	up_read(&mm->mmap_sem);
-	mmput_async(mm);
 
 	trace_binder_unmap_kernel_start(alloc, index);
 
@@ -982,7 +958,7 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 	mutex_unlock(&alloc->mutex);
 	return LRU_REMOVED_RETRY;
 
-err_down_read_mmap_sem_failed:
+err_down_write_mmap_sem_failed:
 	mmput_async(mm);
 err_mmget:
 err_page_already_freed:

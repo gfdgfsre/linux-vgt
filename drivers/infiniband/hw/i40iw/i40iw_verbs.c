@@ -428,7 +428,6 @@ void i40iw_free_qp_resources(struct i40iw_device *iwdev,
 {
 	struct i40iw_pbl *iwpbl = &iwqp->iwpbl;
 
-	i40iw_ieq_cleanup_qp(iwdev->vsi.ieq, &iwqp->sc_qp);
 	i40iw_dealloc_push_page(iwdev, &iwqp->sc_qp);
 	if (qp_num)
 		i40iw_free_resource(iwdev, iwdev->allocated_qps, qp_num);
@@ -631,7 +630,6 @@ static struct ib_qp *i40iw_create_qp(struct ib_pd *ibpd,
 		return ERR_PTR(-ENOMEM);
 
 	iwqp = (struct i40iw_qp *)mem;
-	iwqp->allocated_buffer = mem;
 	qp = &iwqp->sc_qp;
 	qp->back_qp = (void *)iwqp;
 	qp->push_idx = I40IW_INVALID_PUSH_PAGE_INDEX;
@@ -660,6 +658,7 @@ static struct ib_qp *i40iw_create_qp(struct ib_pd *ibpd,
 		goto error;
 	}
 
+	iwqp->allocated_buffer = mem;
 	iwqp->iwdev = iwdev;
 	iwqp->iwpd = iwpd;
 	iwqp->ibqp.qp_num = qp_num;
@@ -821,8 +820,6 @@ static int i40iw_query_qp(struct ib_qp *ibqp,
 	struct i40iw_qp *iwqp = to_iwqp(ibqp);
 	struct i40iw_sc_qp *qp = &iwqp->sc_qp;
 
-	attr->qp_state = iwqp->ibqp_state;
-	attr->cur_qp_state = attr->qp_state;
 	attr->qp_access_flags = 0;
 	attr->cap.max_send_wr = qp->qp_uk.sq_size;
 	attr->cap.max_recv_wr = qp->qp_uk.rq_size;
@@ -1410,7 +1407,6 @@ static void i40iw_set_hugetlb_values(u64 addr, struct i40iw_mr *iwmr)
 	struct vm_area_struct *vma;
 	struct hstate *h;
 
-	down_read(&current->mm->mmap_sem);
 	vma = find_vma(current->mm, addr);
 	if (vma && is_vm_hugetlb_page(vma)) {
 		h = hstate_vma(vma);
@@ -1419,7 +1415,6 @@ static void i40iw_set_hugetlb_values(u64 addr, struct i40iw_mr *iwmr)
 			iwmr->page_msk = huge_page_mask(h);
 		}
 	}
-	up_read(&current->mm->mmap_sem);
 }
 
 /**
@@ -1660,7 +1655,6 @@ static struct ib_mr *i40iw_alloc_mr(struct ib_pd *pd,
 		err_code = -EOVERFLOW;
 		goto err;
 	}
-	stag &= ~I40IW_CQPSQ_STAG_KEY_MASK;
 	iwmr->stag = stag;
 	iwmr->ibmr.rkey = stag;
 	iwmr->ibmr.lkey = stag;

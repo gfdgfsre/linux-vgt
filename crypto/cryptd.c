@@ -37,7 +37,6 @@
 struct cryptd_cpu_queue {
 	struct crypto_queue queue;
 	struct work_struct work;
-	spinlock_t qlock;
 };
 
 struct cryptd_queue {
@@ -116,7 +115,6 @@ static int cryptd_init_queue(struct cryptd_queue *queue,
 		cpu_queue = per_cpu_ptr(queue->cpu_queue, cpu);
 		crypto_init_queue(&cpu_queue->queue, max_cpu_qlen);
 		INIT_WORK(&cpu_queue->work, cryptd_queue_worker);
-		spin_lock_init(&cpu_queue->qlock);
 	}
 	return 0;
 }
@@ -141,10 +139,8 @@ static int cryptd_enqueue_request(struct cryptd_queue *queue,
 	atomic_t *refcnt;
 	bool may_backlog;
 
-	cpu_queue = raw_cpu_ptr(queue->cpu_queue);
-	spin_lock_bh(&cpu_queue->qlock);
-	cpu = smp_processor_id();
-
+	cpu = get_cpu();
+	cpu_queue = this_cpu_ptr(queue->cpu_queue);
 	err = crypto_enqueue_request(&cpu_queue->queue, request);
 
 	refcnt = crypto_tfm_ctx(request->tfm);
@@ -161,7 +157,7 @@ static int cryptd_enqueue_request(struct cryptd_queue *queue,
 	atomic_inc(refcnt);
 
 out_put_cpu:
-	spin_unlock_bh(&cpu_queue->qlock);
+	put_cpu();
 
 	return err;
 }
@@ -177,11 +173,16 @@ static void cryptd_queue_worker(struct work_struct *work)
 	cpu_queue = container_of(work, struct cryptd_cpu_queue, work);
 	/*
 	 * Only handle one request at a time to avoid hogging crypto workqueue.
+	 * preempt_disable/enable is used to prevent being preempted by
+	 * cryptd_enqueue_request(). local_bh_disable/enable is used to prevent
+	 * cryptd_enqueue_request() being accessed from software interrupts.
 	 */
-	spin_lock_bh(&cpu_queue->qlock);
+	local_bh_disable();
+	preempt_disable();
 	backlog = crypto_get_backlog(&cpu_queue->queue);
 	req = crypto_dequeue_request(&cpu_queue->queue);
-	spin_unlock_bh(&cpu_queue->qlock);
+	preempt_enable();
+	local_bh_enable();
 
 	if (!req)
 		return;
@@ -584,7 +585,6 @@ static void cryptd_skcipher_free(struct skcipher_instance *inst)
 	struct skcipherd_instance_ctx *ctx = skcipher_instance_ctx(inst);
 
 	crypto_drop_skcipher(&ctx->spawn);
-	kfree(inst);
 }
 
 static int cryptd_create_skcipher(struct crypto_template *tmpl,
@@ -895,9 +895,10 @@ static int cryptd_create_hash(struct crypto_template *tmpl, struct rtattr **tb,
 	if (err)
 		goto out_free_inst;
 
-	inst->alg.halg.base.cra_flags = CRYPTO_ALG_ASYNC |
-		(alg->cra_flags & (CRYPTO_ALG_INTERNAL |
-				   CRYPTO_ALG_OPTIONAL_KEY));
+	type = CRYPTO_ALG_ASYNC;
+	if (alg->cra_flags & CRYPTO_ALG_INTERNAL)
+		type |= CRYPTO_ALG_INTERNAL;
+	inst->alg.halg.base.cra_flags = type;
 
 	inst->alg.halg.digestsize = salg->digestsize;
 	inst->alg.halg.statesize = salg->statesize;
@@ -912,8 +913,7 @@ static int cryptd_create_hash(struct crypto_template *tmpl, struct rtattr **tb,
 	inst->alg.finup  = cryptd_hash_finup_enqueue;
 	inst->alg.export = cryptd_hash_export;
 	inst->alg.import = cryptd_hash_import;
-	if (crypto_shash_alg_has_setkey(salg))
-		inst->alg.setkey = cryptd_hash_setkey;
+	inst->alg.setkey = cryptd_hash_setkey;
 	inst->alg.digest = cryptd_hash_digest_enqueue;
 
 	err = ahash_register_instance(tmpl, inst);

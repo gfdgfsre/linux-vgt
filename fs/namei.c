@@ -222,10 +222,9 @@ getname_kernel(const char * filename)
 	if (len <= EMBEDDED_NAME_MAX) {
 		result->name = (char *)result->iname;
 	} else if (len <= PATH_MAX) {
-		const size_t size = offsetof(struct filename, iname[1]);
 		struct filename *tmp;
 
-		tmp = kmalloc(size, GFP_KERNEL);
+		tmp = kmalloc(sizeof(*tmp), GFP_KERNEL);
 		if (unlikely(!tmp)) {
 			__putname(result);
 			return ERR_PTR(-ENOMEM);
@@ -579,10 +578,9 @@ static int __nd_alloc_stack(struct nameidata *nd)
 static bool path_connected(const struct path *path)
 {
 	struct vfsmount *mnt = path->mnt;
-	struct super_block *sb = mnt->mnt_sb;
 
-	/* Bind mounts and multi-root filesystems can have disconnected paths */
-	if (!(sb->s_iflags & SB_I_MULTIROOT) && (mnt->mnt_root == sb->s_root))
+	/* Only bind mounts can have disconnected paths */
+	if (mnt->mnt_root == mnt->mnt_sb->s_root)
 		return true;
 
 	return is_subdir(path->dentry, mnt->mnt_root);
@@ -904,8 +902,6 @@ static inline void put_link(struct nameidata *nd)
 
 int sysctl_protected_symlinks __read_mostly = 0;
 int sysctl_protected_hardlinks __read_mostly = 0;
-int sysctl_protected_fifos __read_mostly;
-int sysctl_protected_regular __read_mostly;
 
 /**
  * may_follow_link - Check symlink following for unsafe situations
@@ -1017,46 +1013,6 @@ static int may_linkat(struct path *link)
 
 	audit_log_link_denied("linkat", link);
 	return -EPERM;
-}
-
-/**
- * may_create_in_sticky - Check whether an O_CREAT open in a sticky directory
- *			  should be allowed, or not, on files that already
- *			  exist.
- * @dir_mode: mode bits of directory
- * @dir_uid: owner of directory
- * @inode: the inode of the file to open
- *
- * Block an O_CREAT open of a FIFO (or a regular file) when:
- *   - sysctl_protected_fifos (or sysctl_protected_regular) is enabled
- *   - the file already exists
- *   - we are in a sticky directory
- *   - we don't own the file
- *   - the owner of the directory doesn't own the file
- *   - the directory is world writable
- * If the sysctl_protected_fifos (or sysctl_protected_regular) is set to 2
- * the directory doesn't have to be world writable: being group writable will
- * be enough.
- *
- * Returns 0 if the open is allowed, -ve on error.
- */
-static int may_create_in_sticky(umode_t dir_mode, kuid_t dir_uid,
-				struct inode * const inode)
-{
-	if ((!sysctl_protected_fifos && S_ISFIFO(inode->i_mode)) ||
-	    (!sysctl_protected_regular && S_ISREG(inode->i_mode)) ||
-	    likely(!(dir_mode & S_ISVTX)) ||
-	    uid_eq(inode->i_uid, dir_uid) ||
-	    uid_eq(current_fsuid(), inode->i_uid))
-		return 0;
-
-	if (likely(dir_mode & 0002) ||
-	    (dir_mode & 0020 &&
-	     ((sysctl_protected_fifos >= 2 && S_ISFIFO(inode->i_mode)) ||
-	      (sysctl_protected_regular >= 2 && S_ISREG(inode->i_mode))))) {
-		return -EACCES;
-	}
-	return 0;
 }
 
 static __always_inline
@@ -1173,9 +1129,21 @@ static int follow_automount(struct path *path, struct nameidata *nd,
 	 * of the daemon to instantiate them before they can be used.
 	 */
 	if (!(nd->flags & (LOOKUP_PARENT | LOOKUP_DIRECTORY |
-			   LOOKUP_OPEN | LOOKUP_CREATE | LOOKUP_AUTOMOUNT)) &&
-	    path->dentry->d_inode)
-		return -EISDIR;
+			   LOOKUP_OPEN | LOOKUP_CREATE |
+			   LOOKUP_AUTOMOUNT))) {
+		/* Positive dentry that isn't meant to trigger an
+		 * automount, EISDIR will allow it to be used,
+		 * otherwise there's no mount here "now" so return
+		 * ENOENT.
+		 */
+		if (path->dentry->d_inode)
+			return -EISDIR;
+		else
+			return -ENOENT;
+	}
+
+	if (path->dentry->d_sb->s_user_ns != &init_user_ns)
+		return -EACCES;
 
 	nd->total_link_count++;
 	if (nd->total_link_count >= 40)
@@ -1382,7 +1350,7 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 			nd->path.dentry = parent;
 			nd->seq = seq;
 			if (unlikely(!path_connected(&nd->path)))
-				return -ECHILD;
+				return -ENOENT;
 			break;
 		} else {
 			struct mount *mnt = real_mount(nd->path.mnt);
@@ -1669,7 +1637,7 @@ static struct dentry *lookup_slow(const struct qstr *name,
 {
 	struct dentry *dentry = ERR_PTR(-ENOENT), *old;
 	struct inode *inode = dir->d_inode;
-	DECLARE_SWAIT_QUEUE_HEAD_ONSTACK(wq);
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
 
 	inode_lock_shared(inode);
 	/* Don't go there if it's already dead */
@@ -3142,7 +3110,7 @@ static int lookup_open(struct nameidata *nd, struct path *path,
 	struct dentry *dentry;
 	int error, create_error = 0;
 	umode_t mode = op->mode;
-	DECLARE_SWAIT_QUEUE_HEAD_ONSTACK(wq);
+	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
 
 	if (unlikely(IS_DEADDIR(dir_inode)))
 		return -ENOENT;
@@ -3266,8 +3234,6 @@ static int do_last(struct nameidata *nd,
 		   int *opened)
 {
 	struct dentry *dir = nd->path.dentry;
-	kuid_t dir_uid = nd->inode->i_uid;
-	umode_t dir_mode = nd->inode->i_mode;
 	int open_flag = op->open_flag;
 	bool will_truncate = (open_flag & O_TRUNC) != 0;
 	bool got_write = false;
@@ -3399,15 +3365,9 @@ finish_open:
 	if (error)
 		return error;
 	audit_inode(nd->name, nd->path.dentry, 0);
-	if (open_flag & O_CREAT) {
-		error = -EISDIR;
-		if (d_is_dir(nd->path.dentry))
-			goto out;
-		error = may_create_in_sticky(dir_mode, dir_uid,
-					     d_backing_inode(nd->path.dentry));
-		if (unlikely(error))
-			goto out;
-	}
+	error = -EISDIR;
+	if ((open_flag & O_CREAT) && d_is_dir(nd->path.dentry))
+		goto out;
 	error = -ENOTDIR;
 	if ((nd->flags & LOOKUP_DIRECTORY) && !d_can_lookup(nd->path.dentry))
 		goto out;

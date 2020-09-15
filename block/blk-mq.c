@@ -118,25 +118,6 @@ void blk_mq_in_flight(struct request_queue *q, struct hd_struct *part,
 	blk_mq_queue_tag_busy_iter(q, blk_mq_check_inflight, &mi);
 }
 
-static void blk_mq_check_inflight_rw(struct blk_mq_hw_ctx *hctx,
-				     struct request *rq, void *priv,
-				     bool reserved)
-{
-	struct mq_inflight *mi = priv;
-
-	if (rq->part == mi->part)
-		mi->inflight[rq_data_dir(rq)]++;
-}
-
-void blk_mq_in_flight_rw(struct request_queue *q, struct hd_struct *part,
-			 unsigned int inflight[2])
-{
-	struct mq_inflight mi = { .part = part, .inflight = inflight, };
-
-	inflight[0] = inflight[1] = 0;
-	blk_mq_queue_tag_busy_iter(q, blk_mq_check_inflight_rw, &mi);
-}
-
 void blk_freeze_queue_start(struct request_queue *q)
 {
 	int freeze_depth;
@@ -178,8 +159,6 @@ void blk_freeze_queue(struct request_queue *q)
 	 * exported to drivers as the only user for unfreeze is blk_mq.
 	 */
 	blk_freeze_queue_start(q);
-	if (!q->mq_ops)
-		blk_drain_queue(q);
 	blk_mq_freeze_queue_wait(q);
 }
 
@@ -339,9 +318,6 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 	/* tag was already set */
 	rq->extra_len = 0;
 
-#ifdef CONFIG_PREEMPT_RT_FULL
-	INIT_WORK(&rq->work, __blk_mq_complete_request_remote_work);
-#endif
 	INIT_LIST_HEAD(&rq->timeout_list);
 	rq->timeout = 0;
 
@@ -536,24 +512,12 @@ void blk_mq_end_request(struct request *rq, blk_status_t error)
 }
 EXPORT_SYMBOL(blk_mq_end_request);
 
-#ifdef CONFIG_PREEMPT_RT_FULL
-
-void __blk_mq_complete_request_remote_work(struct work_struct *work)
-{
-	struct request *rq = container_of(work, struct request, work);
-
-	rq->q->softirq_done_fn(rq);
-}
-
-#else
-
 static void __blk_mq_complete_request_remote(void *data)
 {
 	struct request *rq = data;
 
 	rq->q->softirq_done_fn(rq);
 }
-#endif
 
 static void __blk_mq_complete_request(struct request *rq)
 {
@@ -573,27 +537,19 @@ static void __blk_mq_complete_request(struct request *rq)
 		return;
 	}
 
-	cpu = get_cpu_light();
+	cpu = get_cpu();
 	if (!test_bit(QUEUE_FLAG_SAME_FORCE, &rq->q->queue_flags))
 		shared = cpus_share_cache(cpu, ctx->cpu);
 
 	if (cpu != ctx->cpu && !shared && cpu_online(ctx->cpu)) {
-#ifdef CONFIG_PREEMPT_RT_FULL
-		/*
-		 * We could force QUEUE_FLAG_SAME_FORCE then we would not get in
-		 * here. But we could try to invoke it one the CPU like this.
-		 */
-		schedule_work_on(ctx->cpu, &rq->work);
-#else
 		rq->csd.func = __blk_mq_complete_request_remote;
 		rq->csd.info = rq;
 		rq->csd.flags = 0;
 		smp_call_function_single_async(ctx->cpu, &rq->csd);
-#endif
 	} else {
 		rq->q->softirq_done_fn(rq);
 	}
-	put_cpu_light();
+	put_cpu();
 }
 
 /**
@@ -680,6 +636,7 @@ static void __blk_mq_requeue_request(struct request *rq)
 
 	trace_block_rq_requeue(q, rq);
 	wbt_requeue(q->rq_wb, &rq->issue_stat);
+	blk_mq_sched_requeue_request(rq);
 
 	if (test_and_clear_bit(REQ_ATOM_STARTED, &rq->atomic_flags)) {
 		if (q->dma_drain_size && blk_rq_bytes(rq))
@@ -690,9 +647,6 @@ static void __blk_mq_requeue_request(struct request *rq)
 void blk_mq_requeue_request(struct request *rq, bool kick_requeue_list)
 {
 	__blk_mq_requeue_request(rq);
-
-	/* this request will be re-inserted to io scheduler queue */
-	blk_mq_sched_requeue_request(rq);
 
 	BUG_ON(blk_queued_rq(rq));
 	blk_mq_add_to_requeue_list(rq, true, kick_requeue_list);
@@ -1185,27 +1139,9 @@ static void __blk_mq_run_hw_queue(struct blk_mq_hw_ctx *hctx)
 	/*
 	 * We should be running this queue from one of the CPUs that
 	 * are mapped to it.
-	 *
-	 * There are at least two related races now between setting
-	 * hctx->next_cpu from blk_mq_hctx_next_cpu() and running
-	 * __blk_mq_run_hw_queue():
-	 *
-	 * - hctx->next_cpu is found offline in blk_mq_hctx_next_cpu(),
-	 *   but later it becomes online, then this warning is harmless
-	 *   at all
-	 *
-	 * - hctx->next_cpu is found online in blk_mq_hctx_next_cpu(),
-	 *   but later it becomes offline, then the warning can't be
-	 *   triggered, and we depend on blk-mq timeout handler to
-	 *   handle dispatched requests to this hctx
 	 */
-	if (!cpumask_test_cpu(raw_smp_processor_id(), hctx->cpumask) &&
-		cpu_online(hctx->next_cpu)) {
-		printk(KERN_WARNING "run queue from wrong CPU %d, hctx %s\n",
-			raw_smp_processor_id(),
-			cpumask_empty(hctx->cpumask) ? "inactive": "active");
-		dump_stack();
-	}
+	WARN_ON(!cpumask_test_cpu(raw_smp_processor_id(), hctx->cpumask) &&
+		cpu_online(hctx->next_cpu));
 
 	/*
 	 * We can't run the queue inline with ints disabled. Ensure that
@@ -1261,14 +1197,14 @@ static void __blk_mq_delay_run_hw_queue(struct blk_mq_hw_ctx *hctx, bool async,
 		return;
 
 	if (!async && !(hctx->flags & BLK_MQ_F_BLOCKING)) {
-		int cpu = get_cpu_light();
+		int cpu = get_cpu();
 		if (cpumask_test_cpu(cpu, hctx->cpumask)) {
 			__blk_mq_run_hw_queue(hctx);
-			put_cpu_light();
+			put_cpu();
 			return;
 		}
 
-		put_cpu_light();
+		put_cpu();
 	}
 
 	kblockd_schedule_delayed_work_on(blk_mq_hctx_next_cpu(hctx),
@@ -1535,7 +1471,7 @@ void blk_mq_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 		BUG_ON(!rq->q);
 		if (rq->mq_ctx != this_ctx) {
 			if (this_ctx) {
-				trace_block_unplug(this_q, depth, !from_schedule);
+				trace_block_unplug(this_q, depth, from_schedule);
 				blk_mq_sched_insert_requests(this_q, this_ctx,
 								&ctx_list,
 								from_schedule);
@@ -1555,7 +1491,7 @@ void blk_mq_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 	 * on 'ctx_list'. Do those.
 	 */
 	if (this_ctx) {
-		trace_block_unplug(this_q, depth, !from_schedule);
+		trace_block_unplug(this_q, depth, from_schedule);
 		blk_mq_sched_insert_requests(this_q, this_ctx, &ctx_list,
 						from_schedule);
 	}
@@ -1988,8 +1924,7 @@ static void blk_mq_exit_hctx(struct request_queue *q,
 {
 	blk_mq_debugfs_unregister_hctx(hctx);
 
-	if (blk_mq_hw_queue_mapped(hctx))
-		blk_mq_tag_idle(hctx);
+	blk_mq_tag_idle(hctx);
 
 	if (set->ops->exit_request)
 		set->ops->exit_request(set, hctx->fq->flush_rq, hctx_idx);
@@ -2275,6 +2210,7 @@ static void blk_mq_del_queue_tag_set(struct request_queue *q)
 
 	mutex_lock(&set->tag_list_lock);
 	list_del_rcu(&q->tag_set_list);
+	INIT_LIST_HEAD(&q->tag_set_list);
 	if (list_is_singular(&set->tag_list)) {
 		/* just transitioned to unshared */
 		set->flags &= ~BLK_MQ_F_TAG_SHARED;
@@ -2282,8 +2218,8 @@ static void blk_mq_del_queue_tag_set(struct request_queue *q)
 		blk_mq_update_tag_set_depth(set, false);
 	}
 	mutex_unlock(&set->tag_list_lock);
+
 	synchronize_rcu();
-	INIT_LIST_HEAD(&q->tag_set_list);
 }
 
 static void blk_mq_add_queue_tag_set(struct blk_mq_tag_set *set,
@@ -2374,9 +2310,6 @@ static void blk_mq_realloc_hw_ctxs(struct blk_mq_tag_set *set,
 	struct blk_mq_hw_ctx **hctxs = q->queue_hw_ctx;
 
 	blk_mq_sysfs_unregister(q);
-
-	/* protect against switching io scheduler  */
-	mutex_lock(&q->sysfs_lock);
 	for (i = 0; i < set->nr_hw_queues; i++) {
 		int node;
 
@@ -2421,7 +2354,6 @@ static void blk_mq_realloc_hw_ctxs(struct blk_mq_tag_set *set,
 		}
 	}
 	q->nr_hw_queues = i;
-	mutex_unlock(&q->sysfs_lock);
 	blk_mq_sysfs_register(q);
 }
 
@@ -2592,27 +2524,9 @@ static int blk_mq_alloc_rq_maps(struct blk_mq_tag_set *set)
 
 static int blk_mq_update_queue_map(struct blk_mq_tag_set *set)
 {
-	if (set->ops->map_queues) {
-		int cpu;
-		/*
-		 * transport .map_queues is usually done in the following
-		 * way:
-		 *
-		 * for (queue = 0; queue < set->nr_hw_queues; queue++) {
-		 * 	mask = get_cpu_mask(queue)
-		 * 	for_each_cpu(cpu, mask)
-		 * 		set->mq_map[cpu] = queue;
-		 * }
-		 *
-		 * When we need to remap, the table has to be cleared for
-		 * killing stale mapping since one CPU may not be mapped
-		 * to any hw queue.
-		 */
-		for_each_possible_cpu(cpu)
-			set->mq_map[cpu] = 0;
-
+	if (set->ops->map_queues)
 		return set->ops->map_queues(set);
-	} else
+	else
 		return blk_mq_map_queues(set);
 }
 
@@ -2761,10 +2675,6 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 
 	list_for_each_entry(q, &set->tag_list, tag_set_list)
 		blk_mq_freeze_queue(q);
-	/*
-	 * Sync with blk_mq_queue_tag_busy_iter.
-	 */
-	synchronize_rcu();
 
 	set->nr_hw_queues = nr_hw_queues;
 	blk_mq_update_queue_map(set);
@@ -2890,9 +2800,10 @@ static bool blk_mq_poll_hybrid_sleep(struct request_queue *q,
 	kt = nsecs;
 
 	mode = HRTIMER_MODE_REL;
-	hrtimer_init_sleeper_on_stack(&hs, CLOCK_MONOTONIC, mode, current);
+	hrtimer_init_on_stack(&hs.timer, CLOCK_MONOTONIC, mode);
 	hrtimer_set_expires(&hs.timer, kt);
 
+	hrtimer_init_sleeper(&hs, current);
 	do {
 		if (test_bit(REQ_ATOM_COMPLETE, &rq->atomic_flags))
 			break;

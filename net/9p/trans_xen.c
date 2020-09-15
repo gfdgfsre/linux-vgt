@@ -38,6 +38,7 @@
 
 #include <linux/module.h>
 #include <linux/spinlock.h>
+#include <linux/rwlock.h>
 #include <net/9p/9p.h>
 #include <net/9p/client.h>
 #include <net/9p/transport.h>
@@ -93,9 +94,6 @@ static int p9_xen_cancel(struct p9_client *client, struct p9_req_t *req)
 static int p9_xen_create(struct p9_client *client, const char *addr, char *args)
 {
 	struct xen_9pfs_front_priv *priv;
-
-	if (addr == NULL)
-		return -EINVAL;
 
 	read_lock(&xen_9pfs_lock);
 	list_for_each_entry(priv, &xen_9pfs_devs, list) {
@@ -158,8 +156,8 @@ static int p9_xen_request(struct p9_client *client, struct p9_req_t *p9_req)
 	ring = &priv->rings[num];
 
 again:
-	while (wait_event_killable(ring->wq,
-				   p9_xen_write_todo(ring, size)) != 0)
+	while (wait_event_interruptible(ring->wq,
+					p9_xen_write_todo(ring, size)) != 0)
 		;
 
 	spin_lock_irqsave(&ring->lock, flags);
@@ -391,8 +389,8 @@ static int xen_9pfs_front_probe(struct xenbus_device *dev,
 	unsigned int max_rings, max_ring_order, len = 0;
 
 	versions = xenbus_read(XBT_NIL, dev->otherend, "versions", &len);
-	if (IS_ERR(versions))
-		return PTR_ERR(versions);
+	if (!len)
+		return -EINVAL;
 	if (strcmp(versions, "1")) {
 		kfree(versions);
 		return -EINVAL;
@@ -529,19 +527,13 @@ static struct xenbus_driver xen_9pfs_front_driver = {
 
 static int p9_trans_xen_init(void)
 {
-	int rc;
-
 	if (!xen_domain())
 		return -ENODEV;
 
 	pr_info("Initialising Xen transport for 9pfs\n");
 
 	v9fs_register_trans(&p9_xen_trans);
-	rc = xenbus_register_frontend(&xen_9pfs_front_driver);
-	if (rc)
-		v9fs_unregister_trans(&p9_xen_trans);
-
-	return rc;
+	return xenbus_register_frontend(&xen_9pfs_front_driver);
 }
 module_init(p9_trans_xen_init);
 

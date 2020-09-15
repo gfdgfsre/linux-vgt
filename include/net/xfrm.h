@@ -217,7 +217,7 @@ struct xfrm_state {
 	struct xfrm_stats	stats;
 
 	struct xfrm_lifetime_cur curlft;
-	struct hrtimer		mtimer;
+	struct tasklet_hrtimer	mtimer;
 
 	struct xfrm_state_offload xso;
 
@@ -323,6 +323,7 @@ int xfrm_policy_register_afinfo(const struct xfrm_policy_afinfo *afinfo, int fam
 void xfrm_policy_unregister_afinfo(const struct xfrm_policy_afinfo *afinfo);
 void km_policy_notify(struct xfrm_policy *xp, int dir,
 		      const struct km_event *c);
+void xfrm_policy_cache_flush(void);
 void km_state_notify(struct xfrm_state *x, const struct km_event *c);
 
 struct xfrm_tmpl;
@@ -1366,23 +1367,6 @@ static inline int xfrm_state_kern(const struct xfrm_state *x)
 	return atomic_read(&x->tunnel_users);
 }
 
-static inline bool xfrm_id_proto_valid(u8 proto)
-{
-	switch (proto) {
-	case IPPROTO_AH:
-	case IPPROTO_ESP:
-	case IPPROTO_COMP:
-#if IS_ENABLED(CONFIG_IPV6)
-	case IPPROTO_ROUTING:
-	case IPPROTO_DSTOPTS:
-#endif
-		return true;
-	default:
-		return false;
-	}
-}
-
-/* IPSEC_PROTO_ANY only matches 3 IPsec protocols, 0 could match all. */
 static inline int xfrm_id_proto_match(u8 proto, u8 userproto)
 {
 	return (!userproto || proto == userproto ||
@@ -1586,9 +1570,6 @@ int xfrm_init_state(struct xfrm_state *x);
 int xfrm_prepare_input(struct xfrm_state *x, struct sk_buff *skb);
 int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type);
 int xfrm_input_resume(struct sk_buff *skb, int nexthdr);
-int xfrm_trans_queue(struct sk_buff *skb,
-		     int (*finish)(struct net *, struct sock *,
-				   struct sk_buff *));
 int xfrm_output_resume(struct sk_buff *skb, int err);
 int xfrm_output(struct sock *sk, struct sk_buff *skb);
 int xfrm_inner_extract_output(struct xfrm_state *x, struct sk_buff *skb);

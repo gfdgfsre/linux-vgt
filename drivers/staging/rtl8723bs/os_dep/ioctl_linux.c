@@ -2383,7 +2383,7 @@ static int rtw_wx_read32(struct net_device *dev,
 exit:
 	kfree(ptmp);
 
-	return ret;
+	return 0;
 }
 
 static int rtw_wx_write32(struct net_device *dev,
@@ -3495,7 +3495,7 @@ static int wpa_supplicant_ioctl(struct net_device *dev, struct iw_point *p)
 
 	/* down(&ieee->wx_sem); */
 
-	if (!p->pointer || p->length != sizeof(struct ieee_param)) {
+	if (p->length < sizeof(struct ieee_param) || !p->pointer) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -4340,7 +4340,7 @@ static int rtw_hostapd_ioctl(struct net_device *dev, struct iw_point *p)
 
 
 	/* if (p->length < sizeof(struct ieee_param) || !p->pointer) { */
-	if (!p->pointer || p->length != sizeof(*param)) {
+	if (!p->pointer) {
 		ret = -EINVAL;
 		goto out;
 	}

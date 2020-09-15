@@ -108,8 +108,7 @@ static void kcov_put(struct kcov *kcov)
 
 void kcov_task_init(struct task_struct *t)
 {
-	WRITE_ONCE(t->kcov_mode, KCOV_MODE_DISABLED);
-	barrier();
+	t->kcov_mode = KCOV_MODE_DISABLED;
 	t->kcov_size = 0;
 	t->kcov_area = NULL;
 	t->kcov = NULL;
@@ -226,9 +225,9 @@ static int kcov_ioctl_locked(struct kcov *kcov, unsigned int cmd,
 		if (unused != 0 || kcov->mode == KCOV_MODE_DISABLED ||
 		    kcov->area == NULL)
 			return -EINVAL;
-		t = current;
-		if (kcov->t != NULL || t->kcov != NULL)
+		if (kcov->t != NULL)
 			return -EBUSY;
+		t = current;
 		/* Cache in task struct for performance. */
 		t->kcov_size = kcov->size;
 		t->kcov_area = kcov->area;

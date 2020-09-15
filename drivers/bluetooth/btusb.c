@@ -21,10 +21,8 @@
  *
  */
 
-#include <linux/dmi.h>
 #include <linux/module.h>
 #include <linux/usb.h>
-#include <linux/usb/quirks.h>
 #include <linux/firmware.h>
 #include <linux/of_device.h>
 #include <linux/of_irq.h>
@@ -274,12 +272,9 @@ static const struct usb_device_id blacklist_table[] = {
 	{ USB_DEVICE(0x0cf3, 0xe301), .driver_info = BTUSB_QCA_ROME },
 	{ USB_DEVICE(0x0cf3, 0xe360), .driver_info = BTUSB_QCA_ROME },
 	{ USB_DEVICE(0x0489, 0xe092), .driver_info = BTUSB_QCA_ROME },
-	{ USB_DEVICE(0x0489, 0xe09f), .driver_info = BTUSB_QCA_ROME },
 	{ USB_DEVICE(0x0489, 0xe0a2), .driver_info = BTUSB_QCA_ROME },
 	{ USB_DEVICE(0x04ca, 0x3011), .driver_info = BTUSB_QCA_ROME },
-	{ USB_DEVICE(0x04ca, 0x3015), .driver_info = BTUSB_QCA_ROME },
 	{ USB_DEVICE(0x04ca, 0x3016), .driver_info = BTUSB_QCA_ROME },
-	{ USB_DEVICE(0x04ca, 0x301a), .driver_info = BTUSB_QCA_ROME },
 
 	/* Broadcom BCM2035 */
 	{ USB_DEVICE(0x0a5c, 0x2009), .driver_info = BTUSB_BCM92035 },
@@ -371,13 +366,6 @@ static const struct usb_device_id blacklist_table[] = {
 	{ USB_DEVICE(0x13d3, 0x3459), .driver_info = BTUSB_REALTEK },
 	{ USB_DEVICE(0x13d3, 0x3494), .driver_info = BTUSB_REALTEK },
 
-	/* Additional Realtek 8723BU Bluetooth devices */
-	{ USB_DEVICE(0x7392, 0xa611), .driver_info = BTUSB_REALTEK },
-
-	/* Additional Realtek 8723DE Bluetooth devices */
-	{ USB_DEVICE(0x0bda, 0xb009), .driver_info = BTUSB_REALTEK },
-	{ USB_DEVICE(0x2ff8, 0xb011), .driver_info = BTUSB_REALTEK },
-
 	/* Additional Realtek 8821AE Bluetooth devices */
 	{ USB_DEVICE(0x0b05, 0x17dc), .driver_info = BTUSB_REALTEK },
 	{ USB_DEVICE(0x13d3, 0x3414), .driver_info = BTUSB_REALTEK },
@@ -385,38 +373,10 @@ static const struct usb_device_id blacklist_table[] = {
 	{ USB_DEVICE(0x13d3, 0x3461), .driver_info = BTUSB_REALTEK },
 	{ USB_DEVICE(0x13d3, 0x3462), .driver_info = BTUSB_REALTEK },
 
-	/* Additional Realtek 8822BE Bluetooth devices */
-	{ USB_DEVICE(0x0b05, 0x185c), .driver_info = BTUSB_REALTEK },
-
-	/* Additional Realtek 8822CE Bluetooth devices */
-	{ USB_DEVICE(0x04ca, 0x4005), .driver_info = BTUSB_REALTEK },
-
 	/* Silicon Wave based devices */
 	{ USB_DEVICE(0x0c10, 0x0000), .driver_info = BTUSB_SWAVE },
 
 	{ }	/* Terminating entry */
-};
-
-/* The Bluetooth USB module build into some devices needs to be reset on resume,
- * this is a problem with the platform (likely shutting off all power) not with
- * the module itself. So we use a DMI list to match known broken platforms.
- */
-static const struct dmi_system_id btusb_needs_reset_resume_table[] = {
-	{
-		/* Dell OptiPlex 3060 (QCA ROME device 0cf3:e007) */
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "OptiPlex 3060"),
-		},
-	},
-	{
-		/* Dell XPS 9360 (QCA ROME device 0cf3:e300) */
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "XPS 13 9360"),
-		},
-	},
-	{}
 };
 
 #define BTUSB_MAX_ISOC_FRAMES	10
@@ -431,8 +391,9 @@ static const struct dmi_system_id btusb_needs_reset_resume_table[] = {
 #define BTUSB_FIRMWARE_LOADED	7
 #define BTUSB_FIRMWARE_FAILED	8
 #define BTUSB_BOOTING		9
-#define BTUSB_DIAG_RUNNING	10
-#define BTUSB_OOB_WAKE_ENABLED	11
+#define BTUSB_RESET_RESUME	10
+#define BTUSB_DIAG_RUNNING	11
+#define BTUSB_OOB_WAKE_ENABLED	12
 
 struct btusb_data {
 	struct hci_dev       *hdev;
@@ -1123,10 +1084,14 @@ static int btusb_open(struct hci_dev *hdev)
 	if (data->setup_on_usb) {
 		err = data->setup_on_usb(hdev);
 		if (err < 0)
-			goto setup_fail;
+			return err;
 	}
 
 	data->intf->needs_remote_wakeup = 1;
+	/* device specific wakeup source enabled and required for USB
+	 * remote wakeup while host is suspended
+	 */
+	device_wakeup_enable(&data->udev->dev);
 
 	if (test_and_set_bit(BTUSB_INTR_RUNNING, &data->flags))
 		goto done;
@@ -1155,7 +1120,6 @@ done:
 
 failed:
 	clear_bit(BTUSB_INTR_RUNNING, &data->flags);
-setup_fail:
 	usb_autopm_put_interface(data->intf);
 	return err;
 }
@@ -1191,6 +1155,7 @@ static int btusb_close(struct hci_dev *hdev)
 		goto failed;
 
 	data->intf->needs_remote_wakeup = 0;
+	device_wakeup_disable(&data->udev->dev);
 	usb_autopm_put_interface(data->intf);
 
 failed:
@@ -2892,7 +2857,6 @@ static int btusb_config_oob_wake(struct hci_dev *hdev)
 		return 0;
 	}
 
-	irq_set_status_flags(irq, IRQ_NOAUTOEN);
 	ret = devm_request_irq(&hdev->dev, irq, btusb_oob_wake_handler,
 			       0, "OOB Wake-on-BT", data);
 	if (ret) {
@@ -2907,16 +2871,11 @@ static int btusb_config_oob_wake(struct hci_dev *hdev)
 	}
 
 	data->oob_wake_irq = irq;
+	disable_irq(irq);
 	bt_dev_info(hdev, "OOB Wake-on-BT configured at IRQ %u", irq);
 	return 0;
 }
 #endif
-
-static void btusb_check_needs_reset_resume(struct usb_interface *intf)
-{
-	if (dmi_check_system(btusb_needs_reset_resume_table))
-		interface_to_usbdev(intf)->quirks |= USB_QUIRK_RESET_RESUME;
-}
 
 static int btusb_probe(struct usb_interface *intf,
 		       const struct usb_device_id *id)
@@ -3139,7 +3098,12 @@ static int btusb_probe(struct usb_interface *intf,
 	if (id->driver_info & BTUSB_QCA_ROME) {
 		data->setup_on_usb = btusb_setup_qca;
 		hdev->set_bdaddr = btusb_set_bdaddr_ath3012;
-		btusb_check_needs_reset_resume(intf);
+
+		/* QCA Rome devices lose their updated firmware over suspend,
+		 * but the USB hub doesn't notice any status change.
+		 * Explicitly request a device reset on resume.
+		 */
+		set_bit(BTUSB_RESET_RESUME, &data->flags);
 	}
 
 #ifdef CONFIG_BT_HCIBTUSB_RTL
@@ -3150,7 +3114,7 @@ static int btusb_probe(struct usb_interface *intf,
 		 * but the USB hub doesn't notice any status change.
 		 * Explicitly request a device reset on resume.
 		 */
-		interface_to_usbdev(intf)->quirks |= USB_QUIRK_RESET_RESUME;
+		set_bit(BTUSB_RESET_RESUME, &data->flags);
 	}
 #endif
 
@@ -3314,6 +3278,14 @@ static int btusb_suspend(struct usb_interface *intf, pm_message_t message)
 		enable_irq_wake(data->oob_wake_irq);
 		enable_irq(data->oob_wake_irq);
 	}
+
+	/* Optionally request a device reset on resume, but only when
+	 * wakeups are disabled. If wakeups are enabled we assume the
+	 * device will stay powered up throughout suspend.
+	 */
+	if (test_bit(BTUSB_RESET_RESUME, &data->flags) &&
+	    !device_may_wakeup(&data->udev->dev))
+		data->udev->reset_resume = 1;
 
 	return 0;
 }

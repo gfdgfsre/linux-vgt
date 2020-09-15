@@ -2486,15 +2486,6 @@ int ocfs2_inode_lock_with_page(struct inode *inode,
 	ret = ocfs2_inode_lock_full(inode, ret_bh, ex, OCFS2_LOCK_NONBLOCK);
 	if (ret == -EAGAIN) {
 		unlock_page(page);
-		/*
-		 * If we can't get inode lock immediately, we should not return
-		 * directly here, since this will lead to a softlockup problem.
-		 * The method is to get a blocking lock and immediately unlock
-		 * before returning, this can avoid CPU resource waste due to
-		 * lots of retries, and benefits fairness in getting lock.
-		 */
-		if (ocfs2_inode_lock(inode, ret_bh, ex) == 0)
-			ocfs2_inode_unlock(inode, ex);
 		ret = AOP_TRUNCATED_PAGE;
 	}
 
@@ -3422,7 +3413,7 @@ static int ocfs2_downconvert_lock(struct ocfs2_super *osb,
 	 * we can recover correctly from node failure. Otherwise, we may get
 	 * invalid LVB in LKB, but without DLM_SBF_VALNOTVALID being set.
 	 */
-	if (ocfs2_userspace_stack(osb) &&
+	if (!ocfs2_is_o2cb_active() &&
 	    lockres->l_ops->flags & LOCK_TYPE_USES_LVB)
 		lvb = 1;
 

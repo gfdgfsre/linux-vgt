@@ -110,7 +110,6 @@
  * ->i_mmap_rwsem
  *   ->tasklist_lock            (memory_failure, collect_procs_ao)
  */
-DECLARE_LOCAL_IRQ_LOCK(shadow_nodes_lock);
 
 static int page_cache_tree_insert(struct address_space *mapping,
 				  struct page *page, void **shadowp)
@@ -134,10 +133,8 @@ static int page_cache_tree_insert(struct address_space *mapping,
 		if (shadowp)
 			*shadowp = p;
 	}
-	local_lock(shadow_nodes_lock);
 	__radix_tree_replace(&mapping->page_tree, node, slot, page,
-			     __workingset_update_node, mapping);
-	local_unlock(shadow_nodes_lock);
+			     workingset_update_node, mapping);
 	mapping->nrpages++;
 	return 0;
 }
@@ -154,7 +151,6 @@ static void page_cache_tree_delete(struct address_space *mapping,
 	VM_BUG_ON_PAGE(PageTail(page), page);
 	VM_BUG_ON_PAGE(nr != 1 && shadow, page);
 
-	local_lock(shadow_nodes_lock);
 	for (i = 0; i < nr; i++) {
 		struct radix_tree_node *node;
 		void **slot;
@@ -166,9 +162,8 @@ static void page_cache_tree_delete(struct address_space *mapping,
 
 		radix_tree_clear_tags(&mapping->page_tree, node, slot);
 		__radix_tree_replace(&mapping->page_tree, node, slot, shadow,
-				     __workingset_update_node, mapping);
+				     workingset_update_node, mapping);
 	}
-	local_unlock(shadow_nodes_lock);
 
 	if (shadow) {
 		mapping->nrexceptional += nr;
@@ -343,8 +338,7 @@ int __filemap_fdatawrite_range(struct address_space *mapping, loff_t start,
 		.range_end = end,
 	};
 
-	if (!mapping_cap_writeback_dirty(mapping) ||
-	    !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
+	if (!mapping_cap_writeback_dirty(mapping))
 		return 0;
 
 	wbc_attach_fdatawrite_inode(&wbc, mapping->host);
@@ -468,28 +462,6 @@ int filemap_fdatawait_range(struct address_space *mapping, loff_t start_byte,
 	return filemap_check_errors(mapping);
 }
 EXPORT_SYMBOL(filemap_fdatawait_range);
-
-/**
- * filemap_fdatawait_range_keep_errors - wait for writeback to complete
- * @mapping:		address space structure to wait for
- * @start_byte:		offset in bytes where the range starts
- * @end_byte:		offset in bytes where the range ends (inclusive)
- *
- * Walk the list of under-writeback pages of the given address space in the
- * given range and wait for all of them.  Unlike filemap_fdatawait_range(),
- * this function does not clear error status of the address space.
- *
- * Use this function if callers don't handle errors themselves.  Expected
- * call sites are system-wide / filesystem-wide data flushers: e.g. sync(2),
- * fsfreeze(8)
- */
-int filemap_fdatawait_range_keep_errors(struct address_space *mapping,
-		loff_t start_byte, loff_t end_byte)
-{
-	__filemap_fdatawait_range(mapping, start_byte, end_byte);
-	return filemap_check_and_keep_errors(mapping);
-}
-EXPORT_SYMBOL(filemap_fdatawait_range_keep_errors);
 
 /**
  * file_fdatawait_range - wait for writeback to complete
@@ -716,7 +688,7 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
 	VM_BUG_ON_PAGE(!PageLocked(new), new);
 	VM_BUG_ON_PAGE(new->mapping, new);
 
-	error = radix_tree_preload(gfp_mask & GFP_RECLAIM_MASK);
+	error = radix_tree_preload(gfp_mask & ~__GFP_HIGHMEM);
 	if (!error) {
 		struct address_space *mapping = old->mapping;
 		void (*freepage)(struct page *);
@@ -772,7 +744,7 @@ static int __add_to_page_cache_locked(struct page *page,
 			return error;
 	}
 
-	error = radix_tree_maybe_preload(gfp_mask & GFP_RECLAIM_MASK);
+	error = radix_tree_maybe_preload(gfp_mask & ~__GFP_HIGHMEM);
 	if (error) {
 		if (!huge)
 			mem_cgroup_cancel_charge(page, memcg, false);
@@ -1514,7 +1486,8 @@ no_page:
 		if (fgp_flags & FGP_ACCESSED)
 			__SetPageReferenced(page);
 
-		err = add_to_page_cache_lru(page, mapping, offset, gfp_mask);
+		err = add_to_page_cache_lru(page, mapping, offset,
+				gfp_mask & GFP_RECLAIM_MASK);
 		if (unlikely(err)) {
 			put_page(page);
 			page = NULL;
@@ -2302,7 +2275,7 @@ static int page_cache_read(struct file *file, pgoff_t offset, gfp_t gfp_mask)
 		if (!page)
 			return -ENOMEM;
 
-		ret = add_to_page_cache_lru(page, mapping, offset, gfp_mask);
+		ret = add_to_page_cache_lru(page, mapping, offset, gfp_mask & GFP_KERNEL);
 		if (ret == 0)
 			ret = mapping->a_ops->readpage(file, page);
 		else if (ret == -EEXIST)

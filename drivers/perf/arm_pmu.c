@@ -483,13 +483,7 @@ static int armpmu_filter_match(struct perf_event *event)
 {
 	struct arm_pmu *armpmu = to_arm_pmu(event->pmu);
 	unsigned int cpu = smp_processor_id();
-	int ret;
-
-	ret = cpumask_test_cpu(cpu, &armpmu->supported_cpus);
-	if (ret && armpmu->filter_match)
-		return armpmu->filter_match(event);
-
-	return ret;
+	return cpumask_test_cpu(cpu, &armpmu->supported_cpus);
 }
 
 static ssize_t armpmu_cpumask_show(struct device *dev,
@@ -751,8 +745,8 @@ static int cpu_pm_pmu_notify(struct notifier_block *b, unsigned long cmd,
 		cpu_pm_pmu_setup(armpmu, cmd);
 		break;
 	case CPU_PM_EXIT:
-	case CPU_PM_ENTER_FAILED:
 		cpu_pm_pmu_setup(armpmu, cmd);
+	case CPU_PM_ENTER_FAILED:
 		armpmu->start(armpmu);
 		break;
 	default:

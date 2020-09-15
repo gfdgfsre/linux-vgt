@@ -89,7 +89,6 @@
 #include <linux/magic.h>
 #include <linux/slab.h>
 #include <linux/xattr.h>
-#include <linux/nospec.h>
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -539,10 +538,7 @@ static int sockfs_setattr(struct dentry *dentry, struct iattr *iattr)
 	if (!err && (iattr->ia_valid & ATTR_UID)) {
 		struct socket *sock = SOCKET_I(d_inode(dentry));
 
-		if (sock->sk)
-			sock->sk->sk_uid = iattr->ia_uid;
-		else
-			err = -ENOENT;
+		sock->sk->sk_uid = iattr->ia_uid;
 	}
 
 	return err;
@@ -572,6 +568,7 @@ struct socket *sock_alloc(void)
 
 	sock = SOCKET_I(inode);
 
+	kmemcheck_annotate_bitfield(sock, type);
 	inode->i_ino = get_next_ino();
 	inode->i_mode = S_IFSOCK | S_IRWXUGO;
 	inode->i_uid = current_fsuid();
@@ -592,17 +589,12 @@ EXPORT_SYMBOL(sock_alloc);
  *	an inode not a file.
  */
 
-static void __sock_release(struct socket *sock, struct inode *inode)
+void sock_release(struct socket *sock)
 {
 	if (sock->ops) {
 		struct module *owner = sock->ops->owner;
 
-		if (inode)
-			inode_lock(inode);
 		sock->ops->release(sock);
-		sock->sk = NULL;
-		if (inode)
-			inode_unlock(inode);
 		sock->ops = NULL;
 		module_put(owner);
 	}
@@ -616,11 +608,6 @@ static void __sock_release(struct socket *sock, struct inode *inode)
 		return;
 	}
 	sock->file = NULL;
-}
-
-void sock_release(struct socket *sock)
-{
-	__sock_release(sock, NULL);
 }
 EXPORT_SYMBOL(sock_release);
 
@@ -891,7 +878,7 @@ static ssize_t sock_read_iter(struct kiocb *iocb, struct iov_iter *to)
 			     .msg_iocb = iocb};
 	ssize_t res;
 
-	if (file->f_flags & O_NONBLOCK || (iocb->ki_flags & IOCB_NOWAIT))
+	if (file->f_flags & O_NONBLOCK)
 		msg.msg_flags = MSG_DONTWAIT;
 
 	if (iocb->ki_pos != 0)
@@ -916,7 +903,7 @@ static ssize_t sock_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (iocb->ki_pos != 0)
 		return -ESPIPE;
 
-	if (file->f_flags & O_NONBLOCK || (iocb->ki_flags & IOCB_NOWAIT))
+	if (file->f_flags & O_NONBLOCK)
 		msg.msg_flags = MSG_DONTWAIT;
 
 	if (sock->type == SOCK_SEQPACKET)
@@ -1136,7 +1123,7 @@ static int sock_mmap(struct file *file, struct vm_area_struct *vma)
 
 static int sock_close(struct inode *inode, struct file *filp)
 {
-	__sock_release(SOCKET_I(inode), inode);
+	sock_release(SOCKET_I(inode));
 	return 0;
 }
 
@@ -2445,7 +2432,6 @@ SYSCALL_DEFINE2(socketcall, int, call, unsigned long __user *, args)
 
 	if (call < 1 || call > SYS_SENDMMSG)
 		return -EINVAL;
-	call = array_index_nospec(call, SYS_SENDMMSG + 1);
 
 	len = nargs[call];
 	if (len > sizeof(a))
@@ -2871,14 +2857,9 @@ static int ethtool_ioctl(struct net *net, struct compat_ifreq __user *ifr32)
 		    copy_in_user(&rxnfc->fs.ring_cookie,
 				 &compat_rxnfc->fs.ring_cookie,
 				 (void __user *)(&rxnfc->fs.location + 1) -
-				 (void __user *)&rxnfc->fs.ring_cookie))
-			return -EFAULT;
-		if (ethcmd == ETHTOOL_GRXCLSRLALL) {
-			if (put_user(rule_cnt, &rxnfc->rule_cnt))
-				return -EFAULT;
-		} else if (copy_in_user(&rxnfc->rule_cnt,
-					&compat_rxnfc->rule_cnt,
-					sizeof(rxnfc->rule_cnt)))
+				 (void __user *)&rxnfc->fs.ring_cookie) ||
+		    copy_in_user(&rxnfc->rule_cnt, &compat_rxnfc->rule_cnt,
+				 sizeof(rxnfc->rule_cnt)))
 			return -EFAULT;
 	}
 
@@ -3267,7 +3248,6 @@ static int compat_sock_ioctl_trans(struct file *file, struct socket *sock,
 	case SIOCSARP:
 	case SIOCGARP:
 	case SIOCDARP:
-	case SIOCOUTQNSD:
 	case SIOCATMARK:
 		return sock_do_ioctl(net, sock, cmd, arg);
 	}

@@ -8,7 +8,6 @@
 #include <linux/ipv6.h>
 #include <linux/mpls.h>
 #include <linux/netconf.h>
-#include <linux/nospec.h>
 #include <linux/vmalloc.h>
 #include <linux/percpu.h>
 #include <net/ip.h>
@@ -587,15 +586,16 @@ static struct net_device *inet6_fib_lookup_dev(struct net *net,
 	struct net_device *dev;
 	struct dst_entry *dst;
 	struct flowi6 fl6;
+	int err;
 
 	if (!ipv6_stub)
 		return ERR_PTR(-EAFNOSUPPORT);
 
 	memset(&fl6, 0, sizeof(fl6));
 	memcpy(&fl6.daddr, addr, sizeof(struct in6_addr));
-	dst = ipv6_stub->ipv6_dst_lookup_flow(net, NULL, &fl6, NULL);
-	if (IS_ERR(dst))
-		return ERR_CAST(dst);
+	err = ipv6_stub->ipv6_dst_lookup(net, NULL, &dst, &fl6);
+	if (err)
+		return ERR_PTR(err);
 
 	dev = dst->dev;
 	dev_hold(dev);
@@ -904,27 +904,24 @@ errout:
 	return err;
 }
 
-static bool mpls_label_ok(struct net *net, unsigned int *index,
+static bool mpls_label_ok(struct net *net, unsigned int index,
 			  struct netlink_ext_ack *extack)
 {
-	bool is_ok = true;
-
 	/* Reserved labels may not be set */
-	if (*index < MPLS_LABEL_FIRST_UNRESERVED) {
+	if (index < MPLS_LABEL_FIRST_UNRESERVED) {
 		NL_SET_ERR_MSG(extack,
 			       "Invalid label - must be MPLS_LABEL_FIRST_UNRESERVED or higher");
-		is_ok = false;
+		return false;
 	}
 
 	/* The full 20 bit range may not be supported. */
-	if (is_ok && *index >= net->mpls.platform_labels) {
+	if (index >= net->mpls.platform_labels) {
 		NL_SET_ERR_MSG(extack,
 			       "Label >= configured maximum in platform_labels");
-		is_ok = false;
+		return false;
 	}
 
-	*index = array_index_nospec(*index, net->mpls.platform_labels);
-	return is_ok;
+	return true;
 }
 
 static int mpls_route_add(struct mpls_route_config *cfg,
@@ -947,7 +944,7 @@ static int mpls_route_add(struct mpls_route_config *cfg,
 		index = find_free_label(net);
 	}
 
-	if (!mpls_label_ok(net, &index, extack))
+	if (!mpls_label_ok(net, index, extack))
 		goto errout;
 
 	/* Append makes no sense with mpls */
@@ -1024,7 +1021,7 @@ static int mpls_route_del(struct mpls_route_config *cfg,
 
 	index = cfg->rc_label;
 
-	if (!mpls_label_ok(net, &index, extack))
+	if (!mpls_label_ok(net, index, extack))
 		goto errout;
 
 	mpls_route_update(net, index, NULL, &cfg->rc_nlinfo);
@@ -1782,13 +1779,10 @@ static int rtm_to_route_config(struct sk_buff *skb,
 				goto errout;
 
 			if (!mpls_label_ok(cfg->rc_nlinfo.nl_net,
-					   &cfg->rc_label, extack))
+					   cfg->rc_label, extack))
 				goto errout;
 			break;
 		}
-		case RTA_GATEWAY:
-			NL_SET_ERR_MSG(extack, "MPLS does not support RTA_GATEWAY attribute");
-			goto errout;
 		case RTA_VIA:
 		{
 			if (nla_get_via(nla, &cfg->rc_via_alen,
@@ -2112,7 +2106,7 @@ static int mpls_getroute(struct sk_buff *in_skb, struct nlmsghdr *in_nlh,
 			goto errout;
 		}
 
-		if (!mpls_label_ok(net, &in_label, extack)) {
+		if (!mpls_label_ok(net, in_label, extack)) {
 			err = -EINVAL;
 			goto errout;
 		}

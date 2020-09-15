@@ -196,22 +196,30 @@ static int pfkey_release(struct socket *sock)
 	return 0;
 }
 
-static int pfkey_broadcast_one(struct sk_buff *skb, gfp_t allocation,
-			       struct sock *sk)
+static int pfkey_broadcast_one(struct sk_buff *skb, struct sk_buff **skb2,
+			       gfp_t allocation, struct sock *sk)
 {
 	int err = -ENOBUFS;
 
-	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf)
-		return err;
-
-	skb = skb_clone(skb, allocation);
-
-	if (skb) {
-		skb_set_owner_r(skb, sk);
-		skb_queue_tail(&sk->sk_receive_queue, skb);
-		sk->sk_data_ready(sk);
-		err = 0;
+	sock_hold(sk);
+	if (*skb2 == NULL) {
+		if (refcount_read(&skb->users) != 1) {
+			*skb2 = skb_clone(skb, allocation);
+		} else {
+			*skb2 = skb;
+			refcount_inc(&skb->users);
+		}
 	}
+	if (*skb2 != NULL) {
+		if (atomic_read(&sk->sk_rmem_alloc) <= sk->sk_rcvbuf) {
+			skb_set_owner_r(*skb2, sk);
+			skb_queue_tail(&sk->sk_receive_queue, *skb2);
+			sk->sk_data_ready(sk);
+			*skb2 = NULL;
+			err = 0;
+		}
+	}
+	sock_put(sk);
 	return err;
 }
 
@@ -226,6 +234,7 @@ static int pfkey_broadcast(struct sk_buff *skb, gfp_t allocation,
 {
 	struct netns_pfkey *net_pfkey = net_generic(net, pfkey_net_id);
 	struct sock *sk;
+	struct sk_buff *skb2 = NULL;
 	int err = -ESRCH;
 
 	/* XXX Do we need something like netlink_overrun?  I think
@@ -244,7 +253,7 @@ static int pfkey_broadcast(struct sk_buff *skb, gfp_t allocation,
 		 * socket.
 		 */
 		if (pfk->promisc)
-			pfkey_broadcast_one(skb, GFP_ATOMIC, sk);
+			pfkey_broadcast_one(skb, &skb2, GFP_ATOMIC, sk);
 
 		/* the exact target will be processed later */
 		if (sk == one_sk)
@@ -259,7 +268,7 @@ static int pfkey_broadcast(struct sk_buff *skb, gfp_t allocation,
 				continue;
 		}
 
-		err2 = pfkey_broadcast_one(skb, GFP_ATOMIC, sk);
+		err2 = pfkey_broadcast_one(skb, &skb2, GFP_ATOMIC, sk);
 
 		/* Error is cleared after successful sending to at least one
 		 * registered KM */
@@ -269,8 +278,9 @@ static int pfkey_broadcast(struct sk_buff *skb, gfp_t allocation,
 	rcu_read_unlock();
 
 	if (one_sk != NULL)
-		err = pfkey_broadcast_one(skb, allocation, one_sk);
+		err = pfkey_broadcast_one(skb, &skb2, allocation, one_sk);
 
+	kfree_skb(skb2);
 	kfree_skb(skb);
 	return err;
 }
@@ -391,11 +401,6 @@ static int verify_address_len(const void *p)
 #endif
 	int len;
 
-	if (sp->sadb_address_len <
-	    DIV_ROUND_UP(sizeof(*sp) + offsetofend(typeof(*addr), sa_family),
-			 sizeof(uint64_t)))
-		return -EINVAL;
-
 	switch (addr->sa_family) {
 	case AF_INET:
 		len = DIV_ROUND_UP(sizeof(*sp) + sizeof(*sin), sizeof(uint64_t));
@@ -423,24 +428,6 @@ static int verify_address_len(const void *p)
 		 */
 		return -EINVAL;
 	}
-
-	return 0;
-}
-
-static inline int sadb_key_len(const struct sadb_key *key)
-{
-	int key_bytes = DIV_ROUND_UP(key->sadb_key_bits, 8);
-
-	return DIV_ROUND_UP(sizeof(struct sadb_key) + key_bytes,
-			    sizeof(uint64_t));
-}
-
-static int verify_key_len(const void *p)
-{
-	const struct sadb_key *key = p;
-
-	if (sadb_key_len(key) > key->sadb_key_len)
-		return -EINVAL;
 
 	return 0;
 }
@@ -524,9 +511,6 @@ static int parse_exthdrs(struct sk_buff *skb, const struct sadb_msg *hdr, void *
 		uint16_t ext_type;
 		int ext_len;
 
-		if (len < sizeof(*ehdr))
-			return -EINVAL;
-
 		ext_len  = ehdr->sadb_ext_len;
 		ext_len *= sizeof(uint64_t);
 		ext_type = ehdr->sadb_ext_type;
@@ -541,25 +525,16 @@ static int parse_exthdrs(struct sk_buff *skb, const struct sadb_msg *hdr, void *
 				return -EINVAL;
 			if (ext_hdrs[ext_type-1] != NULL)
 				return -EINVAL;
-			switch (ext_type) {
-			case SADB_EXT_ADDRESS_SRC:
-			case SADB_EXT_ADDRESS_DST:
-			case SADB_EXT_ADDRESS_PROXY:
-			case SADB_X_EXT_NAT_T_OA:
+			if (ext_type == SADB_EXT_ADDRESS_SRC ||
+			    ext_type == SADB_EXT_ADDRESS_DST ||
+			    ext_type == SADB_EXT_ADDRESS_PROXY ||
+			    ext_type == SADB_X_EXT_NAT_T_OA) {
 				if (verify_address_len(p))
 					return -EINVAL;
-				break;
-			case SADB_X_EXT_SEC_CTX:
+			}
+			if (ext_type == SADB_X_EXT_SEC_CTX) {
 				if (verify_sec_ctx_len(p))
 					return -EINVAL;
-				break;
-			case SADB_EXT_KEY_AUTH:
-			case SADB_EXT_KEY_ENCRYPT:
-				if (verify_key_len(p))
-					return -EINVAL;
-				break;
-			default:
-				break;
 			}
 			ext_hdrs[ext_type-1] = (void *) p;
 		}
@@ -1121,12 +1096,14 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct net *net,
 	key = ext_hdrs[SADB_EXT_KEY_AUTH - 1];
 	if (key != NULL &&
 	    sa->sadb_sa_auth != SADB_X_AALG_NULL &&
-	    key->sadb_key_bits == 0)
+	    ((key->sadb_key_bits+7) / 8 == 0 ||
+	     (key->sadb_key_bits+7) / 8 > key->sadb_key_len * sizeof(uint64_t)))
 		return ERR_PTR(-EINVAL);
 	key = ext_hdrs[SADB_EXT_KEY_ENCRYPT-1];
 	if (key != NULL &&
 	    sa->sadb_sa_encrypt != SADB_EALG_NULL &&
-	    key->sadb_key_bits == 0)
+	    ((key->sadb_key_bits+7) / 8 == 0 ||
+	     (key->sadb_key_bits+7) / 8 > key->sadb_key_len * sizeof(uint64_t)))
 		return ERR_PTR(-EINVAL);
 
 	x = xfrm_state_alloc(net);
@@ -1951,10 +1928,8 @@ parse_ipsecrequest(struct xfrm_policy *xp, struct sadb_x_ipsecrequest *rq)
 
 	if (rq->sadb_x_ipsecrequest_mode == 0)
 		return -EINVAL;
-	if (!xfrm_id_proto_valid(rq->sadb_x_ipsecrequest_proto))
-		return -EINVAL;
 
-	t->id.proto = rq->sadb_x_ipsecrequest_proto;
+	t->id.proto = rq->sadb_x_ipsecrequest_proto; /* XXX check proto */
 	if ((mode = pfkey_mode_to_xfrm(rq->sadb_x_ipsecrequest_mode)) < 0)
 		return -EINVAL;
 	t->mode = mode;
@@ -2440,10 +2415,8 @@ static int key_pol_get_resp(struct sock *sk, struct xfrm_policy *xp, const struc
 		goto out;
 	}
 	err = pfkey_xfrm_policy2msg(out_skb, xp, dir);
-	if (err < 0) {
-		kfree_skb(out_skb);
+	if (err < 0)
 		goto out;
-	}
 
 	out_hdr = (struct sadb_msg *) out_skb->data;
 	out_hdr->sadb_msg_version = hdr->sadb_msg_version;
@@ -2694,10 +2667,8 @@ static int dump_sp(struct xfrm_policy *xp, int dir, int count, void *ptr)
 		return PTR_ERR(out_skb);
 
 	err = pfkey_xfrm_policy2msg(out_skb, xp, dir);
-	if (err < 0) {
-		kfree_skb(out_skb);
+	if (err < 0)
 		return err;
-	}
 
 	out_hdr = (struct sadb_msg *) out_skb->data;
 	out_hdr->sadb_msg_version = pfk->dump.msg_version;

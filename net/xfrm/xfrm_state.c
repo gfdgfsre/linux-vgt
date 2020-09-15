@@ -313,14 +313,13 @@ retry:
 	if ((type && !try_module_get(type->owner)))
 		type = NULL;
 
-	rcu_read_unlock();
-
 	if (!type && try_load) {
 		request_module("xfrm-offload-%d-%d", family, proto);
 		try_load = 0;
 		goto retry;
 	}
 
+	rcu_read_unlock();
 	return type;
 }
 
@@ -427,7 +426,7 @@ static void xfrm_put_mode(struct xfrm_mode *mode)
 
 static void xfrm_state_gc_destroy(struct xfrm_state *x)
 {
-	hrtimer_cancel(&x->mtimer);
+	tasklet_hrtimer_cancel(&x->mtimer);
 	del_timer_sync(&x->rtimer);
 	kfree(x->aead);
 	kfree(x->aalg);
@@ -449,8 +448,6 @@ static void xfrm_state_gc_destroy(struct xfrm_state *x)
 		x->type->destructor(x);
 		xfrm_put_type(x->type);
 	}
-	if (x->xfrag.page)
-		put_page(x->xfrag.page);
 	xfrm_dev_state_free(x);
 	security_xfrm_state_free(x);
 	kfree(x);
@@ -474,8 +471,8 @@ static void xfrm_state_gc_task(struct work_struct *work)
 
 static enum hrtimer_restart xfrm_timer_handler(struct hrtimer *me)
 {
-	struct xfrm_state *x = container_of(me, struct xfrm_state, mtimer);
-	enum hrtimer_restart ret = HRTIMER_NORESTART;
+	struct tasklet_hrtimer *thr = container_of(me, struct tasklet_hrtimer, timer);
+	struct xfrm_state *x = container_of(thr, struct xfrm_state, mtimer);
 	unsigned long now = get_seconds();
 	long next = LONG_MAX;
 	int warn = 0;
@@ -539,8 +536,7 @@ static enum hrtimer_restart xfrm_timer_handler(struct hrtimer *me)
 		km_state_expired(x, 0, 0);
 resched:
 	if (next != LONG_MAX) {
-		hrtimer_forward_now(&x->mtimer, ktime_set(next, 0));
-		ret = HRTIMER_RESTART;
+		tasklet_hrtimer_start(&x->mtimer, ktime_set(next, 0), HRTIMER_MODE_REL);
 	}
 
 	goto out;
@@ -557,7 +553,7 @@ expired:
 
 out:
 	spin_unlock(&x->lock);
-	return ret;
+	return HRTIMER_NORESTART;
 }
 
 static void xfrm_replay_timer_handler(unsigned long data);
@@ -576,8 +572,8 @@ struct xfrm_state *xfrm_state_alloc(struct net *net)
 		INIT_HLIST_NODE(&x->bydst);
 		INIT_HLIST_NODE(&x->bysrc);
 		INIT_HLIST_NODE(&x->byspi);
-		hrtimer_init(&x->mtimer, CLOCK_BOOTTIME, HRTIMER_MODE_ABS_SOFT);
-		x->mtimer.function = xfrm_timer_handler;
+		tasklet_hrtimer_init(&x->mtimer, xfrm_timer_handler,
+					CLOCK_BOOTTIME, HRTIMER_MODE_ABS);
 		setup_timer(&x->rtimer, xfrm_replay_timer_handler,
 				(unsigned long)x);
 		x->curlft.add_time = get_seconds();
@@ -738,9 +734,10 @@ restart:
 	}
 out:
 	spin_unlock_bh(&net->xfrm.xfrm_state_lock);
-	if (cnt)
+	if (cnt) {
 		err = 0;
-
+		xfrm_policy_cache_flush();
+	}
 	return err;
 }
 EXPORT_SYMBOL(xfrm_state_flush);
@@ -791,7 +788,7 @@ void xfrm_sad_getinfo(struct net *net, struct xfrmk_sadinfo *si)
 {
 	spin_lock_bh(&net->xfrm.xfrm_state_lock);
 	si->sadcnt = net->xfrm.state_num;
-	si->sadhcnt = net->xfrm.state_hmask + 1;
+	si->sadhcnt = net->xfrm.state_hmask;
 	si->sadhmcnt = xfrm_state_hashmax;
 	spin_unlock_bh(&net->xfrm.xfrm_state_lock);
 }
@@ -1033,9 +1030,7 @@ found:
 				hlist_add_head_rcu(&x->byspi, net->xfrm.state_byspi + h);
 			}
 			x->lft.hard_add_expires_seconds = net->xfrm.sysctl_acq_expires;
-			hrtimer_start(&x->mtimer,
-				      ktime_set(net->xfrm.sysctl_acq_expires, 0),
-				      HRTIMER_MODE_REL_SOFT);
+			tasklet_hrtimer_start(&x->mtimer, ktime_set(net->xfrm.sysctl_acq_expires, 0), HRTIMER_MODE_REL);
 			net->xfrm.state_num++;
 			xfrm_hash_grow_check(net, x->bydst.next != NULL);
 			spin_unlock_bh(&net->xfrm.xfrm_state_lock);
@@ -1146,7 +1141,7 @@ static void __xfrm_state_insert(struct xfrm_state *x)
 		hlist_add_head_rcu(&x->byspi, net->xfrm.state_byspi + h);
 	}
 
-	hrtimer_start(&x->mtimer, ktime_set(1, 0), HRTIMER_MODE_REL_SOFT);
+	tasklet_hrtimer_start(&x->mtimer, ktime_set(1, 0), HRTIMER_MODE_REL);
 	if (x->replay_maxage)
 		mod_timer(&x->rtimer, jiffies + x->replay_maxage);
 
@@ -1250,9 +1245,7 @@ static struct xfrm_state *__find_acq_core(struct net *net,
 		x->mark.m = m->m;
 		x->lft.hard_add_expires_seconds = net->xfrm.sysctl_acq_expires;
 		xfrm_state_hold(x);
-		hrtimer_start(&x->mtimer,
-			      ktime_set(net->xfrm.sysctl_acq_expires, 0),
-			      HRTIMER_MODE_REL_SOFT);
+		tasklet_hrtimer_start(&x->mtimer, ktime_set(net->xfrm.sysctl_acq_expires, 0), HRTIMER_MODE_REL);
 		list_add(&x->km.all, &net->xfrm.state_all);
 		hlist_add_head_rcu(&x->bydst, net->xfrm.state_bydst + h);
 		h = xfrm_src_hash(net, daddr, saddr, family);
@@ -1351,7 +1344,6 @@ static struct xfrm_state *xfrm_state_clone(struct xfrm_state *orig,
 
 	if (orig->aead) {
 		x->aead = xfrm_algo_aead_clone(orig->aead);
-		x->geniv = orig->geniv;
 		if (!x->aead)
 			goto error;
 	}
@@ -1552,8 +1544,7 @@ out:
 		memcpy(&x1->lft, &x->lft, sizeof(x1->lft));
 		x1->km.dying = 0;
 
-		hrtimer_start(&x1->mtimer, ktime_set(1, 0),
-			      HRTIMER_MODE_REL_SOFT);
+		tasklet_hrtimer_start(&x1->mtimer, ktime_set(1, 0), HRTIMER_MODE_REL);
 		if (x1->curlft.use_time)
 			xfrm_state_check_expire(x1);
 
@@ -1577,7 +1568,7 @@ int xfrm_state_check_expire(struct xfrm_state *x)
 	if (x->curlft.bytes >= x->lft.hard_byte_limit ||
 	    x->curlft.packets >= x->lft.hard_packet_limit) {
 		x->km.state = XFRM_STATE_EXPIRED;
-		hrtimer_start(&x->mtimer, 0, HRTIMER_MODE_REL_SOFT);
+		tasklet_hrtimer_start(&x->mtimer, 0, HRTIMER_MODE_REL);
 		return -EINVAL;
 	}
 
@@ -2058,18 +2049,6 @@ int xfrm_user_policy(struct sock *sk, int optname, u8 __user *optval, int optlen
 	struct xfrm_mgr *km;
 	struct xfrm_policy *pol = NULL;
 
-#ifdef CONFIG_COMPAT
-	if (in_compat_syscall())
-		return -EOPNOTSUPP;
-#endif
-
-	if (!optval && !optlen) {
-		xfrm_sk_policy_insert(sk, XFRM_POLICY_IN, NULL);
-		xfrm_sk_policy_insert(sk, XFRM_POLICY_OUT, NULL);
-		__sk_dst_reset(sk);
-		return 0;
-	}
-
 	if (optlen <= 0 || optlen > PAGE_SIZE)
 		return -EMSGSIZE;
 
@@ -2338,7 +2317,7 @@ void xfrm_state_fini(struct net *net)
 	unsigned int sz;
 
 	flush_work(&net->xfrm.state_hash_work);
-	xfrm_state_flush(net, 0, false);
+	xfrm_state_flush(net, IPSEC_PROTO_ANY, false);
 	flush_work(&xfrm_state_gc_work);
 
 	WARN_ON(!list_empty(&net->xfrm.state_all));

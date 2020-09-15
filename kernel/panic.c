@@ -14,7 +14,6 @@
 #include <linux/kmsg_dump.h>
 #include <linux/kallsyms.h>
 #include <linux/notifier.h>
-#include <linux/vt_kern.h>
 #include <linux/module.h>
 #include <linux/random.h>
 #include <linux/ftrace.h>
@@ -146,7 +145,6 @@ void panic(const char *fmt, ...)
 	 * after setting panic_cpu) from invoking panic() again.
 	 */
 	local_irq_disable();
-	preempt_disable_notrace();
 
 	/*
 	 * It's possible to come here directly from a panic-assertion and
@@ -232,10 +230,7 @@ void panic(const char *fmt, ...)
 	if (_crash_kexec_post_notifiers)
 		__crash_kexec(NULL);
 
-#ifdef CONFIG_VT
-	unblank_screen();
-#endif
-	console_unblank();
+	bust_spinlocks(0);
 
 	/*
 	 * We may have ended up stopping the CPU holding the lock (in
@@ -487,11 +482,9 @@ static u64 oops_id;
 
 static int init_oops_id(void)
 {
-#ifndef CONFIG_PREEMPT_RT_FULL
 	if (!oops_id)
 		get_random_bytes(&oops_id, sizeof(oops_id));
 	else
-#endif
 		oops_id++;
 
 	return 0;

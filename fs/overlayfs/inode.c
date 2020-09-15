@@ -14,7 +14,6 @@
 #include <linux/posix_acl.h>
 #include <linux/ratelimit.h>
 #include "overlayfs.h"
-#include "ovl_entry.h"
 
 int ovl_setattr(struct dentry *dentry, struct iattr *attr)
 {
@@ -265,8 +264,7 @@ static bool ovl_can_list(const char *s)
 		return true;
 
 	/* Never list trusted.overlay, list other trusted for superuser only */
-	return !ovl_is_private_xattr(s) &&
-	       ns_capable_noaudit(&init_user_ns, CAP_SYS_ADMIN);
+	return !ovl_is_private_xattr(s) && capable(CAP_SYS_ADMIN);
 }
 
 ssize_t ovl_listxattr(struct dentry *dentry, char *list, size_t size)
@@ -581,16 +579,6 @@ static int ovl_inode_set(struct inode *inode, void *data)
 static bool ovl_verify_inode(struct inode *inode, struct dentry *lowerdentry,
 			     struct dentry *upperdentry)
 {
-	if (S_ISDIR(inode->i_mode)) {
-		/* Real lower dir moved to upper layer under us? */
-		if (!lowerdentry && ovl_inode_lower(inode))
-			return false;
-
-		/* Lookup of an uncovered redirect origin? */
-		if (!upperdentry && ovl_inode_upper(inode))
-			return false;
-	}
-
 	/*
 	 * Allow non-NULL lower inode in ovl_inode even if lowerdentry is NULL.
 	 * This happens when finding a copied up overlay inode for a renamed
@@ -610,63 +598,33 @@ static bool ovl_verify_inode(struct inode *inode, struct dentry *lowerdentry,
 	return true;
 }
 
-/*
- * Does overlay inode need to be hashed by lower inode?
- */
-static bool ovl_hash_bylower(struct super_block *sb, struct dentry *upper,
-			     struct dentry *lower, struct dentry *index)
-{
-	struct ovl_fs *ofs = sb->s_fs_info;
-
-	/* No, if pure upper */
-	if (!lower)
-		return false;
-
-	/* Yes, if already indexed */
-	if (index)
-		return true;
-
-	/* Yes, if won't be copied up */
-	if (!ofs->upper_mnt)
-		return true;
-
-	/* No, if lower hardlink is or will be broken on copy up */
-	if ((upper || !ovl_indexdir(sb)) &&
-	    !d_is_dir(lower) && d_inode(lower)->i_nlink > 1)
-		return false;
-
-	/* No, if non-indexed upper with NFS export */
-	if (sb->s_export_op && upper)
-		return false;
-
-	/* Otherwise, hash by lower inode for fsnotify */
-	return true;
-}
-
 struct inode *ovl_get_inode(struct dentry *dentry, struct dentry *upperdentry,
 			    struct dentry *index)
 {
-	struct super_block *sb = dentry->d_sb;
 	struct dentry *lowerdentry = ovl_dentry_lower(dentry);
 	struct inode *realinode = upperdentry ? d_inode(upperdentry) : NULL;
 	struct inode *inode;
-	bool bylower = ovl_hash_bylower(sb, upperdentry, lowerdentry, index);
-	bool is_dir;
+	/* Already indexed or could be indexed on copy up? */
+	bool indexed = (index || (ovl_indexdir(dentry->d_sb) && !upperdentry));
+
+	if (WARN_ON(upperdentry && indexed && !lowerdentry))
+		return ERR_PTR(-EIO);
 
 	if (!realinode)
 		realinode = d_inode(lowerdentry);
 
 	/*
 	 * Copy up origin (lower) may exist for non-indexed upper, but we must
-	 * not use lower as hash key if this is a broken hardlink.
+	 * not use lower as hash key in that case.
+	 * Hash inodes that are or could be indexed by origin inode and
+	 * non-indexed upper inodes that could be hard linked by upper inode.
 	 */
-	is_dir = S_ISDIR(realinode->i_mode);
-	if (upperdentry || bylower) {
-		struct inode *key = d_inode(bylower ? lowerdentry :
+	if (!S_ISDIR(realinode->i_mode) && (upperdentry || indexed)) {
+		struct inode *key = d_inode(indexed ? lowerdentry :
 						      upperdentry);
-		unsigned int nlink = is_dir ? 1 : realinode->i_nlink;
+		unsigned int nlink;
 
-		inode = iget5_locked(sb, (unsigned long) key,
+		inode = iget5_locked(dentry->d_sb, (unsigned long) key,
 				     ovl_inode_test, ovl_inode_set, key);
 		if (!inode)
 			goto out_nomem;
@@ -685,13 +643,11 @@ struct inode *ovl_get_inode(struct dentry *dentry, struct dentry *upperdentry,
 			goto out;
 		}
 
-		/* Recalculate nlink for non-dir due to indexing */
-		if (!is_dir)
-			nlink = ovl_get_nlink(lowerdentry, upperdentry, nlink);
+		nlink = ovl_get_nlink(lowerdentry, upperdentry,
+				      realinode->i_nlink);
 		set_nlink(inode, nlink);
 	} else {
-		/* Lower hardlink that will be broken on copy up */
-		inode = new_inode(sb);
+		inode = new_inode(dentry->d_sb);
 		if (!inode)
 			goto out_nomem;
 	}

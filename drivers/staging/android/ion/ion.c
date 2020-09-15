@@ -131,11 +131,8 @@ err2:
 
 void ion_buffer_destroy(struct ion_buffer *buffer)
 {
-	if (buffer->kmap_cnt > 0) {
-		pr_warn_once("%s: buffer still mapped in the kernel\n",
-			     __func__);
+	if (WARN_ON(buffer->kmap_cnt > 0))
 		buffer->heap->ops->unmap_kernel(buffer->heap, buffer);
-	}
 	buffer->heap->ops->free(buffer);
 	kfree(buffer);
 }
@@ -257,10 +254,10 @@ static void ion_dma_buf_detatch(struct dma_buf *dmabuf,
 	struct ion_dma_buf_attachment *a = attachment->priv;
 	struct ion_buffer *buffer = dmabuf->priv;
 
+	free_duped_table(a->table);
 	mutex_lock(&buffer->lock);
 	list_del(&a->list);
 	mutex_unlock(&buffer->lock);
-	free_duped_table(a->table);
 
 	kfree(a);
 }
@@ -351,7 +348,7 @@ static int ion_dma_buf_begin_cpu_access(struct dma_buf *dmabuf,
 	mutex_lock(&buffer->lock);
 	list_for_each_entry(a, &buffer->attachments, list) {
 		dma_sync_sg_for_cpu(a->dev, a->table->sgl, a->table->nents,
-				    direction);
+				    DMA_BIDIRECTIONAL);
 	}
 	mutex_unlock(&buffer->lock);
 
@@ -373,7 +370,7 @@ static int ion_dma_buf_end_cpu_access(struct dma_buf *dmabuf,
 	mutex_lock(&buffer->lock);
 	list_for_each_entry(a, &buffer->attachments, list) {
 		dma_sync_sg_for_device(a->dev, a->table->sgl, a->table->nents,
-				       direction);
+				       DMA_BIDIRECTIONAL);
 	}
 	mutex_unlock(&buffer->lock);
 

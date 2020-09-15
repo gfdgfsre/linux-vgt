@@ -833,10 +833,10 @@ static struct fc_exch *fc_exch_em_alloc(struct fc_lport *lport,
 	}
 	memset(ep, 0, sizeof(*ep));
 
-	cpu = get_cpu_light();
+	cpu = get_cpu();
 	pool = per_cpu_ptr(mp->pool, cpu);
 	spin_lock_bh(&pool->lock);
-	put_cpu_light();
+	put_cpu();
 
 	/* peek cache of free slot */
 	if (pool->left != FC_XID_UNKNOWN) {
@@ -2603,7 +2603,7 @@ void fc_exch_recv(struct fc_lport *lport, struct fc_frame *fp)
 
 	/* lport lock ? */
 	if (!lport || lport->state == LPORT_ST_DISABLED) {
-		FC_LIBFC_DBG("Receiving frames for an lport that "
+		FC_LPORT_DBG(lport, "Receiving frames for an lport that "
 			     "has not been initialized correctly\n");
 		fc_frame_free(fp);
 		return;

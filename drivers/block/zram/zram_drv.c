@@ -291,14 +291,13 @@ static void reset_bdev(struct zram *zram)
 static ssize_t backing_dev_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	struct file *file;
 	struct zram *zram = dev_to_zram(dev);
+	struct file *file = zram->backing_dev;
 	char *p;
 	ssize_t ret;
 
 	down_read(&zram->init_lock);
-	file = zram->backing_dev;
-	if (!file) {
+	if (!zram_wb_enabled(zram)) {
 		memcpy(buf, "none\n", 5);
 		up_read(&zram->init_lock);
 		return 5;
@@ -322,7 +321,6 @@ static ssize_t backing_dev_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
 	char *file_name;
-	size_t sz;
 	struct file *backing_dev = NULL;
 	struct inode *inode;
 	struct address_space *mapping;
@@ -343,11 +341,7 @@ static ssize_t backing_dev_store(struct device *dev,
 		goto out;
 	}
 
-	strlcpy(file_name, buf, PATH_MAX);
-	/* ignore trailing newline */
-	sz = strlen(file_name);
-	if (sz > 0 && file_name[sz - 1] == '\n')
-		file_name[sz - 1] = 0x00;
+	strlcpy(file_name, buf, len);
 
 	backing_dev = filp_open(file_name, O_RDWR|O_LARGEFILE, 0);
 	if (IS_ERR(backing_dev)) {
@@ -367,10 +361,8 @@ static ssize_t backing_dev_store(struct device *dev,
 
 	bdev = bdgrab(I_BDEV(inode));
 	err = blkdev_get(bdev, FMODE_READ | FMODE_WRITE | FMODE_EXCL, zram);
-	if (err < 0) {
-		bdev = NULL;
+	if (err < 0)
 		goto out;
-	}
 
 	nr_pages = i_size_read(inode) >> PAGE_SHIFT;
 	bitmap_sz = BITS_TO_LONGS(nr_pages) * sizeof(long);
@@ -489,18 +481,18 @@ struct zram_work {
 	struct zram *zram;
 	unsigned long entry;
 	struct bio *bio;
-	struct bio_vec bvec;
 };
 
 #if PAGE_SIZE != 4096
 static void zram_sync_read(struct work_struct *work)
 {
+	struct bio_vec bvec;
 	struct zram_work *zw = container_of(work, struct zram_work, work);
 	struct zram *zram = zw->zram;
 	unsigned long entry = zw->entry;
 	struct bio *bio = zw->bio;
 
-	read_from_bdev_async(zram, &zw->bvec, entry, bio);
+	read_from_bdev_async(zram, &bvec, entry, bio);
 }
 
 /*
@@ -513,7 +505,6 @@ static int read_from_bdev_sync(struct zram *zram, struct bio_vec *bvec,
 {
 	struct zram_work work;
 
-	work.bvec = *bvec;
 	work.zram = zram;
 	work.entry = entry;
 	work.bio = bio;
@@ -765,30 +756,6 @@ static DEVICE_ATTR_RO(io_stat);
 static DEVICE_ATTR_RO(mm_stat);
 static DEVICE_ATTR_RO(debug_stat);
 
-#ifdef CONFIG_PREEMPT_RT_BASE
-static void zram_meta_init_table_locks(struct zram *zram, size_t num_pages)
-{
-	size_t index;
-
-	for (index = 0; index < num_pages; index++)
-		spin_lock_init(&zram->table[index].lock);
-}
-
-static void zram_slot_lock(struct zram *zram, u32 index)
-{
-	spin_lock(&zram->table[index].lock);
-	__set_bit(ZRAM_ACCESS, &zram->table[index].value);
-}
-
-static void zram_slot_unlock(struct zram *zram, u32 index)
-{
-	__clear_bit(ZRAM_ACCESS, &zram->table[index].value);
-	spin_unlock(&zram->table[index].lock);
-}
-
-#else
-static void zram_meta_init_table_locks(struct zram *zram, size_t num_pages) { }
-
 static void zram_slot_lock(struct zram *zram, u32 index)
 {
 	bit_spin_lock(ZRAM_ACCESS, &zram->table[index].value);
@@ -798,7 +765,6 @@ static void zram_slot_unlock(struct zram *zram, u32 index)
 {
 	bit_spin_unlock(ZRAM_ACCESS, &zram->table[index].value);
 }
-#endif
 
 static void zram_meta_free(struct zram *zram, u64 disksize)
 {
@@ -828,7 +794,6 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
 		return false;
 	}
 
-	zram_meta_init_table_locks(zram, num_pages);
 	return true;
 }
 
@@ -880,7 +845,6 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 	unsigned long handle;
 	unsigned int size;
 	void *src, *dst;
-	struct zcomp_strm *zstrm;
 
 	if (zram_wb_enabled(zram)) {
 		zram_slot_lock(zram, index);
@@ -915,7 +879,6 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 
 	size = zram_get_obj_size(zram, index);
 
-	zstrm = zcomp_stream_get(zram->comp);
 	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
 	if (size == PAGE_SIZE) {
 		dst = kmap_atomic(page);
@@ -923,13 +886,14 @@ static int __zram_bvec_read(struct zram *zram, struct page *page, u32 index,
 		kunmap_atomic(dst);
 		ret = 0;
 	} else {
+		struct zcomp_strm *zstrm = zcomp_stream_get(zram->comp);
 
 		dst = kmap_atomic(page);
 		ret = zcomp_decompress(zstrm, src, size, dst);
 		kunmap_atomic(dst);
+		zcomp_stream_put(zram->comp);
 	}
 	zs_unmap_object(zram->mem_pool, handle);
-	zcomp_stream_put(zram->comp);
 	zram_slot_unlock(zram, index);
 
 	/* Should NEVER happen. Return bio error if it does. */
@@ -1522,11 +1486,6 @@ static const struct attribute_group zram_disk_attr_group = {
 	.attrs = zram_disk_attrs,
 };
 
-static const struct attribute_group *zram_disk_attr_groups[] = {
-	&zram_disk_attr_group,
-	NULL,
-};
-
 /*
  * Allocate and initialize new zram device. the function returns
  * '>= 0' device_id upon success, and negative value otherwise.
@@ -1604,14 +1563,23 @@ static int zram_add(void)
 	if (ZRAM_LOGICAL_BLOCK_SIZE == PAGE_SIZE)
 		blk_queue_max_write_zeroes_sectors(zram->disk->queue, UINT_MAX);
 
-	disk_to_dev(zram->disk)->groups = zram_disk_attr_groups;
 	add_disk(zram->disk);
 
+	ret = sysfs_create_group(&disk_to_dev(zram->disk)->kobj,
+				&zram_disk_attr_group);
+	if (ret < 0) {
+		pr_err("Error creating sysfs group for device %d\n",
+				device_id);
+		goto out_free_disk;
+	}
 	strlcpy(zram->compressor, default_compressor, sizeof(zram->compressor));
 
 	pr_info("Added device: %s\n", zram->disk->disk_name);
 	return device_id;
 
+out_free_disk:
+	del_gendisk(zram->disk);
+	put_disk(zram->disk);
 out_free_queue:
 	blk_cleanup_queue(queue);
 out_free_idr:
@@ -1638,6 +1606,16 @@ static int zram_remove(struct zram *zram)
 
 	zram->claim = true;
 	mutex_unlock(&bdev->bd_mutex);
+
+	/*
+	 * Remove sysfs first, so no one will perform a disksize
+	 * store while we destroy the devices. This also helps during
+	 * hot_remove -- zram_reset_device() is the last holder of
+	 * ->init_lock, no later/concurrent disksize_store() or any
+	 * other sysfs handlers are possible.
+	 */
+	sysfs_remove_group(&disk_to_dev(zram->disk)->kobj,
+			&zram_disk_attr_group);
 
 	/* Make sure all the pending I/O are finished */
 	fsync_bdev(bdev);
@@ -1675,8 +1653,7 @@ static ssize_t hot_add_show(struct class *class,
 		return ret;
 	return scnprintf(buf, PAGE_SIZE, "%d\n", ret);
 }
-static struct class_attribute class_attr_hot_add =
-	__ATTR(hot_add, 0400, hot_add_show, NULL);
+static CLASS_ATTR_RO(hot_add);
 
 static ssize_t hot_remove_store(struct class *class,
 			struct class_attribute *attr,

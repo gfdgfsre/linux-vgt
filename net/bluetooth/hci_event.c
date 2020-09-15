@@ -3775,7 +3775,6 @@ static void hci_sync_conn_complete_evt(struct hci_dev *hdev,
 	case 0x11:	/* Unsupported Feature or Parameter Value */
 	case 0x1c:	/* SCO interval rejected */
 	case 0x1a:	/* Unsupported Remote Feature */
-	case 0x1e:	/* Invalid LMP Parameters */
 	case 0x1f:	/* Unspecified error */
 	case 0x20:	/* Unsupported LMP Parameter value */
 		if (conn->out) {
@@ -4647,8 +4646,7 @@ static void hci_le_conn_update_complete_evt(struct hci_dev *hdev,
 /* This function requires the caller holds hdev->lock */
 static struct hci_conn *check_pending_le_conn(struct hci_dev *hdev,
 					      bdaddr_t *addr,
-					      u8 addr_type, u8 adv_type,
-					      bdaddr_t *direct_rpa)
+					      u8 addr_type, u8 adv_type)
 {
 	struct hci_conn *conn;
 	struct hci_conn_params *params;
@@ -4699,8 +4697,7 @@ static struct hci_conn *check_pending_le_conn(struct hci_dev *hdev,
 	}
 
 	conn = hci_connect_le(hdev, addr, addr_type, BT_SECURITY_LOW,
-			      HCI_LE_AUTOCONN_TIMEOUT, HCI_ROLE_MASTER,
-			      direct_rpa);
+			      HCI_LE_AUTOCONN_TIMEOUT, HCI_ROLE_MASTER);
 	if (!IS_ERR(conn)) {
 		/* If HCI_AUTO_CONN_EXPLICIT is set, conn is already owned
 		 * by higher layer that tried to connect, if no then
@@ -4810,13 +4807,8 @@ static void process_adv_report(struct hci_dev *hdev, u8 type, bdaddr_t *bdaddr,
 		bdaddr_type = irk->addr_type;
 	}
 
-	/* Check if we have been requested to connect to this device.
-	 *
-	 * direct_addr is set only for directed advertising reports (it is NULL
-	 * for advertising reports) and is already verified to be RPA above.
-	 */
-	conn = check_pending_le_conn(hdev, bdaddr, bdaddr_type, type,
-								direct_addr);
+	/* Check if we have been requested to connect to this device */
+	conn = check_pending_le_conn(hdev, bdaddr, bdaddr_type, type);
 	if (conn && type == LE_ADV_IND) {
 		/* Store report for later inclusion by
 		 * mgmt_device_connected
@@ -5212,12 +5204,6 @@ static bool hci_get_cmd_complete(struct hci_dev *hdev, u16 opcode,
 			return false;
 		return true;
 	}
-
-	/* Check if request ended in Command Status - no way to retreive
-	 * any extra parameters in this case.
-	 */
-	if (hdr->evt == HCI_EV_CMD_STATUS)
-		return false;
 
 	if (hdr->evt != HCI_EV_CMD_COMPLETE) {
 		BT_DBG("Last event is not cmd complete (0x%2.2x)", hdr->evt);

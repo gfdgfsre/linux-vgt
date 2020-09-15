@@ -449,7 +449,7 @@ static int gs_usb_set_bittiming(struct net_device *netdev)
 		dev_err(netdev->dev.parent, "Couldn't set bittimings (err=%d)",
 			rc);
 
-	return (rc > 0) ? 0 : rc;
+	return rc;
 }
 
 static void gs_usb_xmit_callback(struct urb *urb)
@@ -631,7 +631,6 @@ static int gs_can_open(struct net_device *netdev)
 					   rc);
 
 				usb_unanchor_urb(urb);
-				usb_free_urb(urb);
 				break;
 			}
 
@@ -926,7 +925,7 @@ static int gs_usb_probe(struct usb_interface *intf,
 			     GS_USB_BREQ_HOST_FORMAT,
 			     USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_INTERFACE,
 			     1,
-			     intf->cur_altsetting->desc.bInterfaceNumber,
+			     intf->altsetting[0].desc.bInterfaceNumber,
 			     hconf,
 			     sizeof(*hconf),
 			     1000);
@@ -949,7 +948,7 @@ static int gs_usb_probe(struct usb_interface *intf,
 			     GS_USB_BREQ_DEVICE_CONFIG,
 			     USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_INTERFACE,
 			     1,
-			     intf->cur_altsetting->desc.bInterfaceNumber,
+			     intf->altsetting[0].desc.bInterfaceNumber,
 			     dconf,
 			     sizeof(*dconf),
 			     1000);

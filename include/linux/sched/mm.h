@@ -43,17 +43,6 @@ static inline void mmdrop(struct mm_struct *mm)
 		__mmdrop(mm);
 }
 
-#ifdef CONFIG_PREEMPT_RT_BASE
-extern void __mmdrop_delayed(struct rcu_head *rhp);
-static inline void mmdrop_delayed(struct mm_struct *mm)
-{
-	if (atomic_dec_and_test(&mm->mm_count))
-		call_rcu(&mm->delayed_drop, __mmdrop_delayed);
-}
-#else
-# define mmdrop_delayed(mm)	mmdrop(mm)
-#endif
-
 static inline void mmdrop_async_fn(struct work_struct *work)
 {
 	struct mm_struct *mm = container_of(work, struct mm_struct, async_put_work);
@@ -66,31 +55,6 @@ static inline void mmdrop_async(struct mm_struct *mm)
 		INIT_WORK(&mm->async_put_work, mmdrop_async_fn);
 		schedule_work(&mm->async_put_work);
 	}
-}
-
-/*
- * This has to be called after a get_task_mm()/mmget_not_zero()
- * followed by taking the mmap_sem for writing before modifying the
- * vmas or anything the coredump pretends not to change from under it.
- *
- * It also has to be called when mmgrab() is used in the context of
- * the process, but then the mm_count refcount is transferred outside
- * the context of the process to run down_write() on that pinned mm.
- *
- * NOTE: find_extend_vma() called from GUP context is the only place
- * that can modify the "mm" (notably the vm_start/end) under mmap_sem
- * for reading and outside the context of the process, so it is also
- * the only case that holds the mmap_sem for reading that must call
- * this function. Generally if the mmap_sem is hold for reading
- * there's no need of this check after get_task_mm()/mmget_not_zero().
- *
- * This function can be obsoleted and the check can be removed, after
- * the coredump code will hold the mmap_sem for writing before
- * invoking the ->core_dump methods.
- */
-static inline bool mmget_still_valid(struct mm_struct *mm)
-{
-	return likely(!mm->core_state);
 }
 
 /**
@@ -136,10 +100,8 @@ extern struct mm_struct *get_task_mm(struct task_struct *task);
  * succeeds.
  */
 extern struct mm_struct *mm_access(struct task_struct *task, unsigned int mode);
-/* Remove the current tasks stale references to the old mm_struct on exit() */
-extern void exit_mm_release(struct task_struct *, struct mm_struct *);
-/* Remove the current tasks stale references to the old mm_struct on exec() */
-extern void exec_mm_release(struct task_struct *, struct mm_struct *);
+/* Remove the current tasks stale references to the old mm_struct */
+extern void mm_release(struct task_struct *, struct mm_struct *);
 
 #ifdef CONFIG_MEMCG
 extern void mm_update_next_owner(struct mm_struct *mm);

@@ -575,7 +575,8 @@ static void __tun_detach(struct tun_file *tfile, bool clean)
 			    tun->dev->reg_state == NETREG_REGISTERED)
 				unregister_netdevice(tun->dev);
 		}
-		skb_array_cleanup(&tfile->tx_array);
+		if (tun)
+			skb_array_cleanup(&tfile->tx_array);
 		sock_put(&tfile->sk);
 	}
 }
@@ -630,8 +631,7 @@ static void tun_detach_all(struct net_device *dev)
 		module_put(THIS_MODULE);
 }
 
-static int tun_attach(struct tun_struct *tun, struct file *file,
-		      bool skip_filter, bool publish_tun)
+static int tun_attach(struct tun_struct *tun, struct file *file, bool skip_filter)
 {
 	struct tun_file *tfile = file->private_data;
 	struct net_device *dev = tun->dev;
@@ -666,15 +666,14 @@ static int tun_attach(struct tun_struct *tun, struct file *file,
 	}
 
 	if (!tfile->detached &&
-	    skb_array_resize(&tfile->tx_array, dev->tx_queue_len, GFP_KERNEL)) {
+	    skb_array_init(&tfile->tx_array, dev->tx_queue_len, GFP_KERNEL)) {
 		err = -ENOMEM;
 		goto out;
 	}
 
 	tfile->queue_index = tun->numqueues;
 	tfile->socket.sk->sk_shutdown &= ~RCV_SHUTDOWN;
-	if (publish_tun)
-		rcu_assign_pointer(tfile->tun, tun);
+	rcu_assign_pointer(tfile->tun, tun);
 	rcu_assign_pointer(tun->tfiles[tun->numqueues], tfile);
 	tun->numqueues++;
 
@@ -833,7 +832,17 @@ static void tun_net_uninit(struct net_device *dev)
 /* Net device open. */
 static int tun_net_open(struct net_device *dev)
 {
+	struct tun_struct *tun = netdev_priv(dev);
+	int i;
+
 	netif_tx_start_all_queues(dev);
+
+	for (i = 0; i < tun->numqueues; i++) {
+		struct tun_file *tfile;
+
+		tfile = rtnl_dereference(tun->tfiles[i]);
+		tfile->socket.sk->sk_write_space(tfile->socket.sk);
+	}
 
 	return 0;
 }
@@ -1134,13 +1143,6 @@ static void tun_net_init(struct net_device *dev)
 	dev->max_mtu = MAX_MTU - dev->hard_header_len;
 }
 
-static bool tun_sock_writeable(struct tun_struct *tun, struct tun_file *tfile)
-{
-	struct sock *sk = tfile->socket.sk;
-
-	return (tun->dev->flags & IFF_UP) && sock_writeable(sk);
-}
-
 /* Character device part */
 
 /* Poll */
@@ -1163,14 +1165,10 @@ static unsigned int tun_chr_poll(struct file *file, poll_table *wait)
 	if (!skb_array_empty(&tfile->tx_array))
 		mask |= POLLIN | POLLRDNORM;
 
-	/* Make sure SOCKWQ_ASYNC_NOSPACE is set if not writable to
-	 * guarantee EPOLLOUT to be raised by either here or
-	 * tun_sock_write_space(). Then process could get notification
-	 * after it writes to a down device and meets -EIO.
-	 */
-	if (tun_sock_writeable(tun, tfile) ||
-	    (!test_and_set_bit(SOCKWQ_ASYNC_NOSPACE, &sk->sk_socket->flags) &&
-	     tun_sock_writeable(tun, tfile)))
+	if (tun->dev->flags & IFF_UP &&
+	    (sock_writeable(sk) ||
+	     (!test_and_set_bit(SOCKWQ_ASYNC_NOSPACE, &sk->sk_socket->flags) &&
+	      sock_writeable(sk))))
 		mask |= POLLOUT | POLLWRNORM;
 
 	if (tun->dev->reg_state != NETREG_REGISTERED)
@@ -1217,7 +1215,6 @@ static void tun_rx_batched(struct tun_struct *tun, struct tun_file *tfile,
 
 	if (!rx_batched || (!more && skb_queue_empty(queue))) {
 		local_bh_disable();
-		skb_record_rx_queue(skb, tfile->queue_index);
 		netif_receive_skb(skb);
 		local_bh_enable();
 		return;
@@ -1237,11 +1234,8 @@ static void tun_rx_batched(struct tun_struct *tun, struct tun_file *tfile,
 		struct sk_buff *nskb;
 
 		local_bh_disable();
-		while ((nskb = __skb_dequeue(&process_queue))) {
-			skb_record_rx_queue(nskb, tfile->queue_index);
+		while ((nskb = __skb_dequeue(&process_queue)))
 			netif_receive_skb(nskb);
-		}
-		skb_record_rx_queue(skb, tfile->queue_index);
 		netif_receive_skb(skb);
 		local_bh_enable();
 	}
@@ -1312,7 +1306,6 @@ static struct sk_buff *tun_build_skb(struct tun_struct *tun,
 	else
 		*skb_xdp = 0;
 
-	local_bh_disable();
 	rcu_read_lock();
 	xdp_prog = rcu_dereference(tun->xdp_prog);
 	if (xdp_prog && !*skb_xdp) {
@@ -1331,11 +1324,8 @@ static struct sk_buff *tun_build_skb(struct tun_struct *tun,
 			get_page(alloc_frag->page);
 			alloc_frag->offset += buflen;
 			err = xdp_do_redirect(tun->dev, &xdp, xdp_prog);
-			xdp_do_flush_map();
 			if (err)
 				goto err_redirect;
-			rcu_read_unlock();
-			local_bh_enable();
 			return NULL;
 		case XDP_TX:
 			xdp_xmit = true;
@@ -1357,26 +1347,22 @@ static struct sk_buff *tun_build_skb(struct tun_struct *tun,
 	skb = build_skb(buf, buflen);
 	if (!skb) {
 		rcu_read_unlock();
-		local_bh_enable();
 		return ERR_PTR(-ENOMEM);
 	}
 
 	skb_reserve(skb, pad - delta);
 	skb_put(skb, len + delta);
-	skb_set_owner_w(skb, tfile->socket.sk);
 	get_page(alloc_frag->page);
 	alloc_frag->offset += buflen;
 
 	if (xdp_xmit) {
 		skb->dev = tun->dev;
 		generic_xdp_tx(skb, xdp_prog);
-		rcu_read_unlock();
-		local_bh_enable();
+		rcu_read_lock();
 		return NULL;
 	}
 
 	rcu_read_unlock();
-	local_bh_enable();
 
 	return skb;
 
@@ -1384,7 +1370,6 @@ err_redirect:
 	put_page(alloc_frag->page);
 err_xdp:
 	rcu_read_unlock();
-	local_bh_enable();
 	this_cpu_inc(tun->pcpu_stats->rx_dropped);
 	return NULL;
 }
@@ -1406,6 +1391,9 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	int err;
 	u32 rxhash;
 	int skb_xdp = 1;
+
+	if (!(tun->dev->flags & IFF_UP))
+		return -EIO;
 
 	if (!(tun->flags & IFF_NO_PI)) {
 		if (len < sizeof(pi))
@@ -1494,11 +1482,9 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 			err = skb_copy_datagram_from_iter(skb, 0, from, len);
 
 		if (err) {
-			err = -EFAULT;
-drop:
 			this_cpu_inc(tun->pcpu_stats->rx_dropped);
 			kfree_skb(skb);
-			return err;
+			return -EFAULT;
 		}
 	}
 
@@ -1553,36 +1539,24 @@ drop:
 		struct bpf_prog *xdp_prog;
 		int ret;
 
-		local_bh_disable();
 		rcu_read_lock();
 		xdp_prog = rcu_dereference(tun->xdp_prog);
 		if (xdp_prog) {
 			ret = do_xdp_generic(xdp_prog, skb);
 			if (ret != XDP_PASS) {
 				rcu_read_unlock();
-				local_bh_enable();
 				return total_len;
 			}
 		}
 		rcu_read_unlock();
-		local_bh_enable();
 	}
 
 	rxhash = __skb_get_hash_symmetric(skb);
-
-	rcu_read_lock();
-	if (unlikely(!(tun->dev->flags & IFF_UP))) {
-		err = -EIO;
-		rcu_read_unlock();
-		goto drop;
-	}
-
 #ifndef CONFIG_4KSTACKS
 	tun_rx_batched(tun, tfile, skb, more);
 #else
 	netif_rx_ni(skb);
 #endif
-	rcu_read_unlock();
 
 	stats = get_cpu_ptr(tun->pcpu_stats);
 	u64_stats_update_begin(&stats->syncp);
@@ -1654,8 +1628,7 @@ static ssize_t tun_put_user(struct tun_struct *tun,
 			return -EINVAL;
 
 		if (virtio_net_hdr_from_skb(skb, &gso,
-					    tun_is_little_endian(tun), true,
-					    vlan_hlen)) {
+					    tun_is_little_endian(tun), true)) {
 			struct skb_shared_info *sinfo = skb_shinfo(skb);
 			pr_err("unexpected GSO type: "
 			       "0x%x, gso_size %d, hdr_len %d\n",
@@ -1726,9 +1699,9 @@ static struct sk_buff *tun_ring_recv(struct tun_file *tfile, int noblock,
 	}
 
 	add_wait_queue(&tfile->wq.wait, &wait);
+	current->state = TASK_INTERRUPTIBLE;
 
 	while (1) {
-		set_current_state(TASK_INTERRUPTIBLE);
 		skb = skb_array_consume(&tfile->tx_array);
 		if (skb)
 			break;
@@ -1744,7 +1717,7 @@ static struct sk_buff *tun_ring_recv(struct tun_file *tfile, int noblock,
 		schedule();
 	}
 
-	__set_current_state(TASK_RUNNING);
+	current->state = TASK_RUNNING;
 	remove_wait_queue(&tfile->wq.wait, &wait);
 
 out:
@@ -1761,11 +1734,8 @@ static ssize_t tun_do_read(struct tun_struct *tun, struct tun_file *tfile,
 
 	tun_debug(KERN_INFO, tun, "tun_do_read\n");
 
-	if (!iov_iter_count(to)) {
-		if (skb)
-			kfree_skb(skb);
+	if (!iov_iter_count(to))
 		return 0;
-	}
 
 	if (!skb) {
 		/* Read frames from ring */
@@ -1830,9 +1800,7 @@ static void tun_setup(struct net_device *dev)
 static int tun_validate(struct nlattr *tb[], struct nlattr *data[],
 			struct netlink_ext_ack *extack)
 {
-	NL_SET_ERR_MSG(extack,
-		       "tun/tap creation via rtnetlink is not supported.");
-	return -EOPNOTSUPP;
+	return -EINVAL;
 }
 
 static struct rtnl_link_ops tun_link_ops __read_mostly = {
@@ -1883,37 +1851,28 @@ static int tun_recvmsg(struct socket *sock, struct msghdr *m, size_t total_len,
 {
 	struct tun_file *tfile = container_of(sock, struct tun_file, socket);
 	struct tun_struct *tun = __tun_get(tfile);
-	struct sk_buff *skb = m->msg_control;
 	int ret;
 
-	if (!tun) {
-		ret = -EBADFD;
-		goto out_free_skb;
-	}
+	if (!tun)
+		return -EBADFD;
 
 	if (flags & ~(MSG_DONTWAIT|MSG_TRUNC|MSG_ERRQUEUE)) {
 		ret = -EINVAL;
-		goto out_put_tun;
+		goto out;
 	}
 	if (flags & MSG_ERRQUEUE) {
 		ret = sock_recv_errqueue(sock->sk, m, total_len,
 					 SOL_PACKET, TUN_TX_TIMESTAMP);
 		goto out;
 	}
-	ret = tun_do_read(tun, tfile, &m->msg_iter, flags & MSG_DONTWAIT, skb);
+	ret = tun_do_read(tun, tfile, &m->msg_iter, flags & MSG_DONTWAIT,
+			  m->msg_control);
 	if (ret > (ssize_t)total_len) {
 		m->msg_flags |= MSG_TRUNC;
 		ret = flags & MSG_TRUNC ? ret : total_len;
 	}
 out:
 	tun_put(tun);
-	return ret;
-
-out_put_tun:
-	tun_put(tun);
-out_free_skb:
-	if (skb)
-		kfree_skb(skb);
 	return ret;
 }
 
@@ -2024,7 +1983,7 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 		if (err < 0)
 			return err;
 
-		err = tun_attach(tun, file, ifr->ifr_flags & IFF_NOFILTER, true);
+		err = tun_attach(tun, file, ifr->ifr_flags & IFF_NOFILTER);
 		if (err < 0)
 			return err;
 
@@ -2113,17 +2072,13 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 				       NETIF_F_HW_VLAN_STAG_TX);
 
 		INIT_LIST_HEAD(&tun->disabled);
-		err = tun_attach(tun, file, false, false);
+		err = tun_attach(tun, file, false);
 		if (err < 0)
 			goto err_free_flow;
 
 		err = register_netdevice(tun->dev);
 		if (err < 0)
 			goto err_detach;
-		/* free_netdev() won't check refcnt, to aovid race
-		 * with dev_put() we need publish tun after registration.
-		 */
-		rcu_assign_pointer(tfile->tun, tun);
 	}
 
 	netif_carrier_on(tun->dev);
@@ -2189,8 +2144,6 @@ static int set_offload(struct tun_struct *tun, unsigned long arg)
 				features |= NETIF_F_TSO6;
 			arg &= ~(TUN_F_TSO4|TUN_F_TSO6);
 		}
-
-		arg &= ~TUN_F_UFO;
 	}
 
 	/* This gives the user a way to test for new features in future by
@@ -2269,7 +2222,7 @@ static int tun_set_queue(struct file *file, struct ifreq *ifr)
 		ret = security_tun_dev_attach_queue(tun->security);
 		if (ret < 0)
 			goto unlock;
-		ret = tun_attach(tun, file, false, true);
+		ret = tun_attach(tun, file, false);
 	} else if (ifr->ifr_flags & IFF_DETACH_QUEUE) {
 		tun = rtnl_dereference(tfile->tun);
 		if (!tun || !(tun->flags & IFF_MULTI_QUEUE) || tfile->detached)
@@ -2636,11 +2589,6 @@ static int tun_chr_open(struct inode *inode, struct file * file)
 					    &tun_proto, 0);
 	if (!tfile)
 		return -ENOMEM;
-	if (skb_array_init(&tfile->tx_array, 0, GFP_KERNEL)) {
-		sk_free(&tfile->sk);
-		return -ENOMEM;
-	}
-
 	RCU_INIT_POINTER(tfile->tun, NULL);
 	tfile->flags = 0;
 	tfile->ifindex = 0;
@@ -2834,7 +2782,6 @@ static int tun_device_event(struct notifier_block *unused,
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct tun_struct *tun = netdev_priv(dev);
-	int i;
 
 	if (dev->rtnl_link_ops != &tun_link_ops)
 		return NOTIFY_DONE;
@@ -2843,14 +2790,6 @@ static int tun_device_event(struct notifier_block *unused,
 	case NETDEV_CHANGE_TX_QUEUE_LEN:
 		if (tun_queue_resize(tun))
 			return NOTIFY_BAD;
-		break;
-	case NETDEV_UP:
-		for (i = 0; i < tun->numqueues; i++) {
-			struct tun_file *tfile;
-
-			tfile = rtnl_dereference(tun->tfiles[i]);
-			tfile->socket.sk->sk_write_space(tfile->socket.sk);
-		}
 		break;
 	default:
 		break;

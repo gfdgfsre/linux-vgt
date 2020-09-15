@@ -99,7 +99,7 @@ static inline bool has_acpi_companion(struct device *dev)
 static inline void acpi_preset_companion(struct device *dev,
 					 struct acpi_device *parent, u64 addr)
 {
-	ACPI_COMPANION_SET(dev, acpi_find_child_device(parent, addr, false));
+	ACPI_COMPANION_SET(dev, acpi_find_child_device(parent, addr, NULL));
 }
 
 static inline const char *acpi_dev_name(struct acpi_device *adev)
@@ -324,10 +324,7 @@ void acpi_set_irq_model(enum acpi_irq_model_id model,
 #ifdef CONFIG_X86_IO_APIC
 extern int acpi_get_override_irq(u32 gsi, int *trigger, int *polarity);
 #else
-static inline int acpi_get_override_irq(u32 gsi, int *trigger, int *polarity)
-{
-	return -1;
-}
+#define acpi_get_override_irq(gsi, trigger, polarity) (-1)
 #endif
 /*
  * This function undoes the effect of one call to acpi_register_gsi().
@@ -443,9 +440,6 @@ int acpi_check_resource_conflict(const struct resource *res);
 
 int acpi_check_region(resource_size_t start, resource_size_t n,
 		      const char *name);
-
-acpi_status acpi_release_memory(acpi_handle handle, struct resource *res,
-				u32 level);
 
 int acpi_resources_are_enforced(void);
 

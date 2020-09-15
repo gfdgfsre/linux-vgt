@@ -171,9 +171,7 @@ static int emac_mdio_probe(struct net_device *dev)
 		return -ENODEV;
 	}
 
-	/* mask with MAC supported features */
-	phydev->supported &= PHY_BASIC_FEATURES;
-	phydev->advertising = phydev->supported;
+	phy_set_max_speed(phydev, SPEED_100);
 
 	db->link = 0;
 	db->speed = 0;
@@ -433,7 +431,7 @@ static void emac_timeout(struct net_device *dev)
 /* Hardware start transmission.
  * Send a packet to media from the upper layer.
  */
-static netdev_tx_t emac_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static int emac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct emac_board_info *db = netdev_priv(dev);
 	unsigned long channel;
@@ -441,7 +439,7 @@ static netdev_tx_t emac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	channel = db->tx_fifo_stat & 3;
 	if (channel == 3)
-		return NETDEV_TX_BUSY;
+		return 1;
 
 	channel = (channel == 1 ? 1 : 0);
 

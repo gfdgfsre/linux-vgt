@@ -49,7 +49,6 @@
 #include <linux/sched.h>
 #include <linux/semaphore.h>
 #include <linux/slab.h>
-#include <linux/nospec.h>
 
 #include <linux/uaccess.h>
 
@@ -230,16 +229,7 @@ static void recv_handler(struct ib_mad_agent *agent,
 	packet->mad.hdr.status	   = 0;
 	packet->mad.hdr.length	   = hdr_size(file) + mad_recv_wc->mad_len;
 	packet->mad.hdr.qpn	   = cpu_to_be32(mad_recv_wc->wc->src_qp);
-	/*
-	 * On OPA devices it is okay to lose the upper 16 bits of LID as this
-	 * information is obtained elsewhere. Mask off the upper 16 bits.
-	 */
-	if (agent->device->port_immutable[agent->port_num].core_cap_flags &
-	    RDMA_CORE_PORT_INTEL_OPA)
-		packet->mad.hdr.lid = ib_lid_be16(0xFFFF &
-						  mad_recv_wc->wc->slid);
-	else
-		packet->mad.hdr.lid = ib_lid_be16(mad_recv_wc->wc->slid);
+	packet->mad.hdr.lid	   = ib_lid_be16(mad_recv_wc->wc->slid);
 	packet->mad.hdr.sl	   = mad_recv_wc->wc->sl;
 	packet->mad.hdr.path_bits  = mad_recv_wc->wc->dlid_path_bits;
 	packet->mad.hdr.pkey_index = mad_recv_wc->wc->pkey_index;
@@ -501,7 +491,7 @@ static ssize_t ib_umad_write(struct file *filp, const char __user *buf,
 	}
 
 	memset(&ah_attr, 0, sizeof ah_attr);
-	ah_attr.type = rdma_ah_find_type(agent->device,
+	ah_attr.type = rdma_ah_find_type(file->port->ib_dev,
 					 file->port->port_num);
 	rdma_ah_set_dlid(&ah_attr, be16_to_cpu(packet->mad.hdr.lid));
 	rdma_ah_set_sl(&ah_attr, packet->mad.hdr.sl);
@@ -857,14 +847,11 @@ static int ib_umad_unreg_agent(struct ib_umad_file *file, u32 __user *arg)
 
 	if (get_user(id, arg))
 		return -EFAULT;
-	if (id >= IB_UMAD_MAX_AGENTS)
-		return -EINVAL;
 
 	mutex_lock(&file->port->file_mutex);
 	mutex_lock(&file->mutex);
 
-	id = array_index_nospec(id, IB_UMAD_MAX_AGENTS);
-	if (!__get_agent(file, id)) {
+	if (id >= IB_UMAD_MAX_AGENTS || !__get_agent(file, id)) {
 		ret = -EINVAL;
 		goto out;
 	}

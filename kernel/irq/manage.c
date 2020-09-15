@@ -24,7 +24,6 @@
 #include "internals.h"
 
 #ifdef CONFIG_IRQ_FORCED_THREADING
-# ifndef CONFIG_PREEMPT_RT_BASE
 __read_mostly bool force_irqthreads;
 
 static int __init setup_forced_irqthreads(char *arg)
@@ -33,7 +32,6 @@ static int __init setup_forced_irqthreads(char *arg)
 	return 0;
 }
 early_param("threadirqs", setup_forced_irqthreads);
-# endif
 #endif
 
 static void __synchronize_hardirq(struct irq_desc *desc)
@@ -226,15 +224,7 @@ int irq_set_affinity_locked(struct irq_data *data, const struct cpumask *mask,
 
 	if (desc->affinity_notify) {
 		kref_get(&desc->affinity_notify->kref);
-#ifdef CONFIG_PREEMPT_RT_BASE
-		if (!kthread_schedule_work(&desc->affinity_notify->work)) {
-#else
-		if (!schedule_work(&desc->affinity_notify->work)) {
-#endif
-			/* Work was already scheduled, drop our extra ref */
-			kref_put(&desc->affinity_notify->kref,
-				 desc->affinity_notify->release);
-		}
+		schedule_work(&desc->affinity_notify->work);
 	}
 	irqd_set(data, IRQD_AFFINITY_SET);
 
@@ -272,8 +262,10 @@ int irq_set_affinity_hint(unsigned int irq, const struct cpumask *m)
 }
 EXPORT_SYMBOL_GPL(irq_set_affinity_hint);
 
-static void _irq_affinity_notify(struct irq_affinity_notify *notify)
+static void irq_affinity_notify(struct work_struct *work)
 {
+	struct irq_affinity_notify *notify =
+		container_of(work, struct irq_affinity_notify, work);
 	struct irq_desc *desc = irq_to_desc(notify->irq);
 	cpumask_var_t cpumask;
 	unsigned long flags;
@@ -294,25 +286,6 @@ static void _irq_affinity_notify(struct irq_affinity_notify *notify)
 out:
 	kref_put(&notify->kref, notify->release);
 }
-
-#ifdef CONFIG_PREEMPT_RT_BASE
-
-static void irq_affinity_notify(struct kthread_work *work)
-{
-	struct irq_affinity_notify *notify =
-		container_of(work, struct irq_affinity_notify, work);
-	_irq_affinity_notify(notify);
-}
-
-#else
-
-static void irq_affinity_notify(struct work_struct *work)
-{
-	struct irq_affinity_notify *notify =
-		container_of(work, struct irq_affinity_notify, work);
-	_irq_affinity_notify(notify);
-}
-#endif
 
 /**
  *	irq_set_affinity_notifier - control notification of IRQ affinity changes
@@ -342,11 +315,7 @@ irq_set_affinity_notifier(unsigned int irq, struct irq_affinity_notify *notify)
 	if (notify) {
 		notify->irq = irq;
 		kref_init(&notify->kref);
-#ifdef CONFIG_PREEMPT_RT_BASE
-		kthread_init_work(&notify->work, irq_affinity_notify);
-#else
 		INIT_WORK(&notify->work, irq_affinity_notify);
-#endif
 	}
 
 	raw_spin_lock_irqsave(&desc->lock, flags);
@@ -354,17 +323,8 @@ irq_set_affinity_notifier(unsigned int irq, struct irq_affinity_notify *notify)
 	desc->affinity_notify = notify;
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 
-	if (old_notify) {
-#ifdef CONFIG_PREEMPT_RT_BASE
-		if (kthread_cancel_work_sync(&old_notify->work)) {
-#else
-		if (cancel_work_sync(&old_notify->work)) {
-#endif
-			/* Pending work had a ref, put that one too */
-			kref_put(&old_notify->kref, old_notify->release);
-		}
+	if (old_notify)
 		kref_put(&old_notify->kref, old_notify->release);
-	}
 
 	return 0;
 }
@@ -400,9 +360,6 @@ int irq_setup_affinity(struct irq_desc *desc)
 	}
 
 	cpumask_and(&mask, cpu_online_mask, set);
-	if (cpumask_empty(&mask))
-		cpumask_copy(&mask, cpu_online_mask);
-
 	if (node != NUMA_NO_NODE) {
 		const struct cpumask *nodemask = cpumask_of_node(node);
 
@@ -420,9 +377,23 @@ int irq_setup_affinity(struct irq_desc *desc)
 {
 	return irq_select_affinity(irq_desc_get_irq(desc));
 }
-#endif /* CONFIG_AUTO_IRQ_AFFINITY */
-#endif /* CONFIG_SMP */
+#endif
 
+/*
+ * Called when a bogus affinity is set via /proc/irq
+ */
+int irq_select_affinity_usr(unsigned int irq)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+	unsigned long flags;
+	int ret;
+
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	ret = irq_setup_affinity(desc);
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return ret;
+}
+#endif
 
 /**
  *	irq_set_vcpu_affinity - Set vcpu affinity for the interrupt
@@ -911,19 +882,8 @@ irq_forced_thread_fn(struct irq_desc *desc, struct irqaction *action)
 
 	local_bh_disable();
 	ret = action->thread_fn(action->irq, action->dev_id);
-	if (ret == IRQ_HANDLED)
-		atomic_inc(&desc->threads_handled);
-
 	irq_finalize_oneshot(desc, action);
-	/*
-	 * Interrupts which have real time requirements can be set up
-	 * to avoid softirq processing in the thread handler. This is
-	 * safe as these interrupts do not raise soft interrupts.
-	 */
-	if (irq_settings_no_softirq_call(desc))
-		_local_bh_enable();
-	else
-		local_bh_enable();
+	local_bh_enable();
 	return ret;
 }
 
@@ -938,9 +898,6 @@ static irqreturn_t irq_thread_fn(struct irq_desc *desc,
 	irqreturn_t ret;
 
 	ret = action->thread_fn(action->irq, action->dev_id);
-	if (ret == IRQ_HANDLED)
-		atomic_inc(&desc->threads_handled);
-
 	irq_finalize_oneshot(desc, action);
 	return ret;
 }
@@ -1018,15 +975,11 @@ static int irq_thread(void *data)
 		irq_thread_check_affinity(desc, action);
 
 		action_ret = handler_fn(desc, action);
+		if (action_ret == IRQ_HANDLED)
+			atomic_inc(&desc->threads_handled);
 		if (action_ret == IRQ_WAKE_THREAD)
 			irq_wake_secondary(desc, action);
 
-#ifdef CONFIG_PREEMPT_RT_FULL
-		migrate_disable();
-		add_interrupt_randomness(action->irq, 0,
-				 desc->random_ip ^ (unsigned long) action);
-		migrate_enable();
-#endif
 		wake_threads_waitq(desc);
 	}
 
@@ -1077,13 +1030,6 @@ static int irq_setup_forced_threading(struct irqaction *new)
 	if (new->flags & (IRQF_NO_THREAD | IRQF_PERCPU | IRQF_ONESHOT))
 		return 0;
 
-	/*
-	 * No further action required for interrupts which are requested as
-	 * threaded interrupts already
-	 */
-	if (new->handler == irq_default_primary_handler)
-		return 0;
-
 	new->flags |= IRQF_ONESHOT;
 
 	/*
@@ -1091,7 +1037,7 @@ static int irq_setup_forced_threading(struct irqaction *new)
 	 * thread handler. We force thread them as well by creating a
 	 * secondary action.
 	 */
-	if (new->handler && new->thread_fn) {
+	if (new->handler != irq_default_primary_handler && new->thread_fn) {
 		/* Allocate the secondary action */
 		new->secondary = kzalloc(sizeof(struct irqaction), GFP_KERNEL);
 		if (!new->secondary)
@@ -1299,18 +1245,7 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 		 * set the trigger type must match. Also all must
 		 * agree on ONESHOT.
 		 */
-		unsigned int oldtype;
-
-		/*
-		 * If nobody did set the configuration before, inherit
-		 * the one provided by the requester.
-		 */
-		if (irqd_trigger_type_was_set(&desc->irq_data)) {
-			oldtype = irqd_get_trigger_type(&desc->irq_data);
-		} else {
-			oldtype = new->flags & IRQF_TRIGGER_MASK;
-			irqd_set_trigger_type(&desc->irq_data, oldtype);
-		}
+		unsigned int oldtype = irqd_get_trigger_type(&desc->irq_data);
 
 		if (!((old->flags & new->flags) & IRQF_SHARED) ||
 		    (oldtype != (new->flags & IRQF_TRIGGER_MASK)) ||
@@ -1424,9 +1359,6 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 			irq_settings_set_no_balancing(desc);
 			irqd_set(&desc->irq_data, IRQD_NO_BALANCING);
 		}
-
-		if (new->flags & IRQF_NO_SOFTIRQ_CALL)
-			irq_settings_set_no_softirq_call(desc);
 
 		if (irq_settings_can_autoenable(desc)) {
 			irq_startup(desc, IRQ_RESEND, IRQ_START_COND);
@@ -2209,7 +2141,7 @@ EXPORT_SYMBOL_GPL(irq_get_irqchip_state);
  *	This call sets the internal irqchip state of an interrupt,
  *	depending on the value of @which.
  *
- *	This function should be called with migration disabled if the
+ *	This function should be called with preemption disabled if the
  *	interrupt controller has per-cpu registers.
  */
 int irq_set_irqchip_state(unsigned int irq, enum irqchip_irq_state which,

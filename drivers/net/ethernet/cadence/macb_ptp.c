@@ -115,10 +115,7 @@ static int gem_tsu_incr_set(struct macb *bp, struct tsu_incr *incr_spec)
 	 * to take effect.
 	 */
 	spin_lock_irqsave(&bp->tsu_clk_lock, flags);
-	/* RegBit[15:0] = Subns[23:8]; RegBit[31:24] = Subns[7:0] */
-	gem_writel(bp, TISUBN, GEM_BF(SUBNSINCRL, incr_spec->sub_ns) |
-		   GEM_BF(SUBNSINCRH, (incr_spec->sub_ns >>
-			  GEM_SUBNSINCRL_SIZE)));
+	gem_writel(bp, TISUBN, GEM_BF(SUBNSINCR, incr_spec->sub_ns));
 	gem_writel(bp, TI, GEM_BF(NSINCR, incr_spec->ns));
 	spin_unlock_irqrestore(&bp->tsu_clk_lock, flags);
 
@@ -173,7 +170,10 @@ static int gem_ptp_adjtime(struct ptp_clock_info *ptp, s64 delta)
 
 	if (delta > TSU_NSEC_MAX_VAL) {
 		gem_tsu_get_time(&bp->ptp_clock_info, &now);
-		now = timespec64_add(now, then);
+		if (sign)
+			now = timespec64_sub(now, then);
+		else
+			now = timespec64_add(now, then);
 
 		gem_tsu_set_time(&bp->ptp_clock_info,
 				 (const struct timespec64 *)&now);

@@ -703,7 +703,7 @@ static loff_t udf_check_vsd(struct super_block *sb)
 	else
 		sectorsize = sb->s_blocksize;
 
-	sector += (((loff_t)sbi->s_session) << sb->s_blocksize_bits);
+	sector += (sbi->s_session << sb->s_blocksize_bits);
 
 	udf_debug("Starting at sector %u (%ld byte sectors)\n",
 		  (unsigned int)(sector >> sb->s_blocksize_bits),
@@ -922,20 +922,16 @@ static int udf_load_pvoldesc(struct super_block *sb, sector_t block)
 	}
 
 	ret = udf_dstrCS0toUTF8(outstr, 31, pvoldesc->volIdent, 32);
-	if (ret < 0) {
-		strcpy(UDF_SB(sb)->s_volume_ident, "InvalidName");
-		pr_warn("incorrect volume identification, setting to "
-			"'InvalidName'\n");
-	} else {
-		strncpy(UDF_SB(sb)->s_volume_ident, outstr, ret);
-	}
+	if (ret < 0)
+		goto out_bh;
+
+	strncpy(UDF_SB(sb)->s_volume_ident, outstr, ret);
 	udf_debug("volIdent[] = '%s'\n", UDF_SB(sb)->s_volume_ident);
 
 	ret = udf_dstrCS0toUTF8(outstr, 127, pvoldesc->volSetIdent, 128);
-	if (ret < 0) {
-		ret = 0;
+	if (ret < 0)
 		goto out_bh;
-	}
+
 	outstr[ret] = 0;
 	udf_debug("volSetIdent[] = '%s'\n", outstr);
 
@@ -2095,9 +2091,8 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 	bool lvid_open = false;
 
 	uopt.flags = (1 << UDF_FLAG_USE_AD_IN_ICB) | (1 << UDF_FLAG_STRICT);
-	/* By default we'll use overflow[ug]id when UDF inode [ug]id == -1 */
-	uopt.uid = make_kuid(current_user_ns(), overflowuid);
-	uopt.gid = make_kgid(current_user_ns(), overflowgid);
+	uopt.uid = INVALID_UID;
+	uopt.gid = INVALID_GID;
 	uopt.umask = 0;
 	uopt.fmode = UDF_INVALID_MODE;
 	uopt.dmode = UDF_INVALID_MODE;
@@ -2467,29 +2462,17 @@ static unsigned int udf_count_free_table(struct super_block *sb,
 static unsigned int udf_count_free(struct super_block *sb)
 {
 	unsigned int accum = 0;
-	struct udf_sb_info *sbi = UDF_SB(sb);
+	struct udf_sb_info *sbi;
 	struct udf_part_map *map;
-	unsigned int part = sbi->s_partition;
-	int ptype = sbi->s_partmaps[part].s_partition_type;
 
-	if (ptype == UDF_METADATA_MAP25) {
-		part = sbi->s_partmaps[part].s_type_specific.s_metadata.
-							s_phys_partition_ref;
-	} else if (ptype == UDF_VIRTUAL_MAP15 || ptype == UDF_VIRTUAL_MAP20) {
-		/*
-		 * Filesystems with VAT are append-only and we cannot write to
- 		 * them. Let's just report 0 here.
-		 */
-		return 0;
-	}
-
+	sbi = UDF_SB(sb);
 	if (sbi->s_lvid_bh) {
 		struct logicalVolIntegrityDesc *lvid =
 			(struct logicalVolIntegrityDesc *)
 			sbi->s_lvid_bh->b_data;
-		if (le32_to_cpu(lvid->numOfPartitions) > part) {
+		if (le32_to_cpu(lvid->numOfPartitions) > sbi->s_partition) {
 			accum = le32_to_cpu(
-					lvid->freeSpaceTable[part]);
+					lvid->freeSpaceTable[sbi->s_partition]);
 			if (accum == 0xFFFFFFFF)
 				accum = 0;
 		}
@@ -2498,7 +2481,7 @@ static unsigned int udf_count_free(struct super_block *sb)
 	if (accum)
 		return accum;
 
-	map = &sbi->s_partmaps[part];
+	map = &sbi->s_partmaps[sbi->s_partition];
 	if (map->s_partition_flags & UDF_PART_FLAG_UNALLOC_BITMAP) {
 		accum += udf_count_free_bitmap(sb,
 					       map->s_uspace.s_bitmap);

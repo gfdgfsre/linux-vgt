@@ -66,10 +66,8 @@ extern int rcu_expedited; /* from sysctl */
 module_param(rcu_expedited, int, 0);
 extern int rcu_normal; /* from sysctl */
 module_param(rcu_normal, int, 0);
-static int rcu_normal_after_boot = IS_ENABLED(CONFIG_PREEMPT_RT_FULL);
-#ifndef CONFIG_PREEMPT_RT_FULL
+static int rcu_normal_after_boot;
 module_param(rcu_normal_after_boot, int, 0);
-#endif
 #endif /* #ifndef CONFIG_TINY_RCU */
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
@@ -335,7 +333,6 @@ int rcu_read_lock_held(void)
 }
 EXPORT_SYMBOL_GPL(rcu_read_lock_held);
 
-#ifndef CONFIG_PREEMPT_RT_FULL
 /**
  * rcu_read_lock_bh_held() - might we be in RCU-bh read-side critical section?
  *
@@ -362,7 +359,6 @@ int rcu_read_lock_bh_held(void)
 	return in_softirq() || irqs_disabled();
 }
 EXPORT_SYMBOL_GPL(rcu_read_lock_bh_held);
-#endif
 
 #endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
@@ -425,13 +421,11 @@ void init_rcu_head(struct rcu_head *head)
 {
 	debug_object_init(head, &rcuhead_debug_descr);
 }
-EXPORT_SYMBOL_GPL(init_rcu_head);
 
 void destroy_rcu_head(struct rcu_head *head)
 {
 	debug_object_free(head, &rcuhead_debug_descr);
 }
-EXPORT_SYMBOL_GPL(destroy_rcu_head);
 
 static bool rcuhead_is_static_object(void *addr)
 {

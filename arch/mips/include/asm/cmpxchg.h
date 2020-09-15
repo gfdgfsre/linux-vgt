@@ -73,8 +73,8 @@ extern unsigned long __xchg_called_with_bad_pointer(void)
 extern unsigned long __xchg_small(volatile void *ptr, unsigned long val,
 				  unsigned int size);
 
-static __always_inline
-unsigned long __xchg(volatile void *ptr, unsigned long x, int size)
+static inline unsigned long __xchg(volatile void *ptr, unsigned long x,
+				   int size)
 {
 	switch (size) {
 	case 1:
@@ -146,9 +146,8 @@ unsigned long __xchg(volatile void *ptr, unsigned long x, int size)
 extern unsigned long __cmpxchg_small(volatile void *ptr, unsigned long old,
 				     unsigned long new, unsigned int size);
 
-static __always_inline
-unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
-			unsigned long new, unsigned int size)
+static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
+				      unsigned long new, unsigned int size)
 {
 	switch (size) {
 	case 1:
@@ -205,9 +204,7 @@ unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 #else
 #include <asm-generic/cmpxchg-local.h>
 #define cmpxchg64_local(ptr, o, n) __cmpxchg64_local_generic((ptr), (o), (n))
-#ifndef CONFIG_SMP
 #define cmpxchg64(ptr, o, n) cmpxchg64_local((ptr), (o), (n))
-#endif
 #endif
 
 #undef __scbeqz

@@ -114,6 +114,8 @@ static bool __target_check_io_state(struct se_cmd *se_cmd,
 {
 	struct se_session *sess = se_cmd->se_sess;
 
+	assert_spin_locked(&sess->sess_cmd_lock);
+	WARN_ON_ONCE(!irqs_disabled());
 	/*
 	 * If command already reached CMD_T_COMPLETE state within
 	 * target_complete_cmd() or CMD_T_FABRIC_STOP due to shutdown,
@@ -130,15 +132,6 @@ static bool __target_check_io_state(struct se_cmd *se_cmd,
 			" fabric stop, skipping\n", se_cmd->tag);
 		spin_unlock(&se_cmd->t_state_lock);
 		return false;
-	}
-	if (se_cmd->transport_state & CMD_T_PRE_EXECUTE) {
-		if (se_cmd->scsi_status) {
-			pr_debug("Attempted to abort io tag: %llu early failure"
-				 " status: 0x%02x\n", se_cmd->tag,
-				 se_cmd->scsi_status);
-			spin_unlock(&se_cmd->t_state_lock);
-			return false;
-		}
 	}
 	if (sess->sess_tearing_down || se_cmd->cmd_wait_set) {
 		pr_debug("Attempted to abort io tag: %llu already shutdown,"
@@ -224,8 +217,7 @@ static void core_tmr_drain_tmr_list(
 	 * LUN_RESET tmr..
 	 */
 	spin_lock_irqsave(&dev->se_tmr_lock, flags);
-	if (tmr)
-		list_del_init(&tmr->tmr_list);
+	list_del_init(&tmr->tmr_list);
 	list_for_each_entry_safe(tmr_p, tmr_pp, &dev->dev_tmr_list, tmr_list) {
 		cmd = tmr_p->task_cmd;
 		if (!cmd) {

@@ -867,7 +867,6 @@ static bool i915_get_crtc_scanoutpos(struct drm_device *dev, unsigned int pipe,
 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
 
 	/* preempt_disable_rt() should go right here in PREEMPT_RT patchset. */
-	preempt_disable_rt();
 
 	/* Get optional system timestamp before query. */
 	if (stime)
@@ -919,7 +918,6 @@ static bool i915_get_crtc_scanoutpos(struct drm_device *dev, unsigned int pipe,
 		*etime = ktime_get();
 
 	/* preempt_enable_rt() should go right here in PREEMPT_RT patchset. */
-	preempt_enable_rt();
 
 	spin_unlock_irqrestore(&dev_priv->uncore.lock, irqflags);
 
@@ -1788,38 +1786,10 @@ static void valleyview_pipestat_irq_handler(struct drm_i915_private *dev_priv,
 
 static u32 i9xx_hpd_irq_ack(struct drm_i915_private *dev_priv)
 {
-	u32 hotplug_status = 0, hotplug_status_mask;
-	int i;
+	u32 hotplug_status = I915_READ(PORT_HOTPLUG_STAT);
 
-	if (IS_G4X(dev_priv) ||
-	    IS_VALLEYVIEW(dev_priv) || IS_CHERRYVIEW(dev_priv))
-		hotplug_status_mask = HOTPLUG_INT_STATUS_G4X |
-			DP_AUX_CHANNEL_MASK_INT_STATUS_G4X;
-	else
-		hotplug_status_mask = HOTPLUG_INT_STATUS_I915;
-
-	/*
-	 * We absolutely have to clear all the pending interrupt
-	 * bits in PORT_HOTPLUG_STAT. Otherwise the ISR port
-	 * interrupt bit won't have an edge, and the i965/g4x
-	 * edge triggered IIR will not notice that an interrupt
-	 * is still pending. We can't use PORT_HOTPLUG_EN to
-	 * guarantee the edge as the act of toggling the enable
-	 * bits can itself generate a new hotplug interrupt :(
-	 */
-	for (i = 0; i < 10; i++) {
-		u32 tmp = I915_READ(PORT_HOTPLUG_STAT) & hotplug_status_mask;
-
-		if (tmp == 0)
-			return hotplug_status;
-
-		hotplug_status |= tmp;
+	if (hotplug_status)
 		I915_WRITE(PORT_HOTPLUG_STAT, hotplug_status);
-	}
-
-	WARN_ONCE(1,
-		  "PORT_HOTPLUG_STAT did not clear (0x%08x)\n",
-		  I915_READ(PORT_HOTPLUG_STAT));
 
 	return hotplug_status;
 }

@@ -51,7 +51,6 @@ static int sg_version_num = 30536;	/* 2 digits for each component */
 #include <linux/atomic.h>
 #include <linux/ratelimit.h>
 #include <linux/uio.h>
-#include <linux/cred.h> /* for sg_check_file_access() */
 
 #include "scsi.h"
 #include <scsi/scsi_dbg.h>
@@ -210,33 +209,6 @@ static void sg_device_destroy(struct kref *kref);
 #define sg_printk(prefix, sdp, fmt, a...) \
 	sdev_prefix_printk(prefix, (sdp)->device,		\
 			   (sdp)->disk->disk_name, fmt, ##a)
-
-/*
- * The SCSI interfaces that use read() and write() as an asynchronous variant of
- * ioctl(..., SG_IO, ...) are fundamentally unsafe, since there are lots of ways
- * to trigger read() and write() calls from various contexts with elevated
- * privileges. This can lead to kernel memory corruption (e.g. if these
- * interfaces are called through splice()) and privilege escalation inside
- * userspace (e.g. if a process with access to such a device passes a file
- * descriptor to a SUID binary as stdin/stdout/stderr).
- *
- * This function provides protection for the legacy API by restricting the
- * calling context.
- */
-static int sg_check_file_access(struct file *filp, const char *caller)
-{
-	if (filp->f_cred != current_real_cred()) {
-		pr_err_once("%s: process %d (%s) changed security contexts after opening file descriptor, this is not allowed.\n",
-			caller, task_tgid_vnr(current), current->comm);
-		return -EPERM;
-	}
-	if (uaccess_kernel()) {
-		pr_err_once("%s: process %d (%s) called from kernel context, this is not allowed.\n",
-			caller, task_tgid_vnr(current), current->comm);
-		return -EACCES;
-	}
-	return 0;
-}
 
 static int sg_allow_access(struct file *filp, unsigned char *cmd)
 {
@@ -421,14 +393,6 @@ sg_read(struct file *filp, char __user *buf, size_t count, loff_t * ppos)
 	sg_io_hdr_t *hp;
 	struct sg_header *old_hdr = NULL;
 	int retval = 0;
-
-	/*
-	 * This could cause a response to be stranded. Close the associated
-	 * file descriptor to free up any resources being held.
-	 */
-	retval = sg_check_file_access(filp, __func__);
-	if (retval)
-		return retval;
 
 	if ((!(sfp = (Sg_fd *) filp->private_data)) || (!(sdp = sfp->parentdp)))
 		return -ENXIO;
@@ -617,11 +581,9 @@ sg_write(struct file *filp, const char __user *buf, size_t count, loff_t * ppos)
 	struct sg_header old_hdr;
 	sg_io_hdr_t *hp;
 	unsigned char cmnd[SG_MAX_CDB_SIZE];
-	int retval;
 
-	retval = sg_check_file_access(filp, __func__);
-	if (retval)
-		return retval;
+	if (unlikely(uaccess_kernel()))
+		return -EINVAL;
 
 	if ((!(sfp = (Sg_fd *) filp->private_data)) || (!(sdp = sfp->parentdp)))
 		return -ENXIO;
@@ -695,10 +657,8 @@ sg_write(struct file *filp, const char __user *buf, size_t count, loff_t * ppos)
 	hp->flags = input_size;	/* structure abuse ... */
 	hp->pack_id = old_hdr.pack_id;
 	hp->usr_ptr = NULL;
-	if (__copy_from_user(cmnd, buf, cmd_size)) {
-		sg_remove_request(sfp, srp);
+	if (__copy_from_user(cmnd, buf, cmd_size))
 		return -EFAULT;
-	}
 	/*
 	 * SG_DXFER_TO_FROM_DEV is functionally equivalent to SG_DXFER_FROM_DEV,
 	 * but is is possible that the app intended SG_DXFER_TO_DEV, because there
@@ -811,10 +771,8 @@ sg_common_write(Sg_fd * sfp, Sg_request * srp,
 			"sg_common_write:  scsi opcode=0x%02x, cmd_size=%d\n",
 			(int) cmnd[0], (int) hp->cmd_len));
 
-	if (hp->dxfer_len >= SZ_256M) {
-		sg_remove_request(sfp, srp);
+	if (hp->dxfer_len >= SZ_256M)
 		return -EINVAL;
-	}
 
 	k = sg_start_req(srp, cmnd);
 	if (k) {
@@ -1936,7 +1894,7 @@ retry:
 		num = (rem_sz > scatter_elem_sz_prev) ?
 			scatter_elem_sz_prev : rem_sz;
 
-		schp->pages[k] = alloc_pages(gfp_mask | __GFP_ZERO, order);
+		schp->pages[k] = alloc_pages(gfp_mask, order);
 		if (!schp->pages[k])
 			goto out;
 
@@ -2190,7 +2148,6 @@ sg_add_sfp(Sg_device * sdp)
 	write_lock_irqsave(&sdp->sfd_lock, iflags);
 	if (atomic_read(&sdp->detaching)) {
 		write_unlock_irqrestore(&sdp->sfd_lock, iflags);
-		kfree(sfp);
 		return ERR_PTR(-ENODEV);
 	}
 	list_add_tail(&sfp->sfd_siblings, &sdp->sfds);

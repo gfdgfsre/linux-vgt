@@ -242,7 +242,7 @@ static inline bool is_permission_fault(unsigned int esr, struct pt_regs *regs,
 	if (fsc_type == ESR_ELx_FSC_PERM)
 		return true;
 
-	if (addr < TASK_SIZE && system_uses_ttbr0_pan())
+	if (addr < USER_DS && system_uses_ttbr0_pan())
 		return fsc_type == ESR_ELx_FSC_FAULT &&
 			(regs->pstate & PSR_PAN_BIT);
 
@@ -400,7 +400,7 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	struct task_struct *tsk;
 	struct mm_struct *mm;
 	int fault, sig, code, major = 0;
-	unsigned long vm_flags = VM_READ | VM_WRITE | VM_EXEC;
+	unsigned long vm_flags = VM_READ | VM_WRITE;
 	unsigned int mm_flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	if (notify_page_fault(regs, esr))
@@ -426,7 +426,7 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 		mm_flags |= FAULT_FLAG_WRITE;
 	}
 
-	if (addr < TASK_SIZE && is_permission_fault(esr, regs, addr)) {
+	if (addr < USER_DS && is_permission_fault(esr, regs, addr)) {
 		/* regs->orig_addr_limit may be 0 if we entered from EL0 */
 		if (regs->orig_addr_limit == KERNEL_DS)
 			die("Accessing user space memory with fs=KERNEL_DS", regs, esr);
@@ -751,29 +751,6 @@ asmlinkage void __exception do_mem_abort(unsigned long addr, unsigned int esr,
 	arm64_notify_die("", regs, &info, esr);
 }
 
-asmlinkage void __exception do_el0_irq_bp_hardening(void)
-{
-	/* PC has already been checked in entry.S */
-	arm64_apply_bp_hardening();
-}
-
-asmlinkage void __exception do_el0_ia_bp_hardening(unsigned long addr,
-						   unsigned int esr,
-						   struct pt_regs *regs)
-{
-	/*
-	 * We've taken an instruction abort from userspace and not yet
-	 * re-enabled IRQs. If the address is a kernel address, apply
-	 * BP hardening prior to enabling IRQs and pre-emption.
-	 */
-	if (addr > TASK_SIZE)
-		arm64_apply_bp_hardening();
-
-	local_irq_enable();
-	do_mem_abort(addr, esr, regs);
-}
-
-
 /*
  * Handle stack alignment exceptions.
  */
@@ -783,12 +760,6 @@ asmlinkage void __exception do_sp_pc_abort(unsigned long addr,
 {
 	struct siginfo info;
 	struct task_struct *tsk = current;
-
-	if (user_mode(regs)) {
-		if (instruction_pointer(regs) > TASK_SIZE)
-			arm64_apply_bp_hardening();
-		local_irq_enable();
-	}
 
 	if (show_unhandled_signals && unhandled_signal(tsk, SIGBUS))
 		pr_info_ratelimited("%s[%d]: %s exception: pc=%p sp=%p\n",
@@ -834,12 +805,11 @@ void __init hook_debug_fault_code(int nr,
 	debug_fault_info[nr].name	= name;
 }
 
-asmlinkage int __exception do_debug_exception(unsigned long addr_if_watchpoint,
+asmlinkage int __exception do_debug_exception(unsigned long addr,
 					      unsigned int esr,
 					      struct pt_regs *regs)
 {
 	const struct fault_info *inf = debug_fault_info + DBG_ESR_EVT(esr);
-	unsigned long pc = instruction_pointer(regs);
 	struct siginfo info;
 	int rv;
 
@@ -850,19 +820,16 @@ asmlinkage int __exception do_debug_exception(unsigned long addr_if_watchpoint,
 	if (interrupts_enabled(regs))
 		trace_hardirqs_off();
 
-	if (user_mode(regs) && pc > TASK_SIZE)
-		arm64_apply_bp_hardening();
-
-	if (!inf->fn(addr_if_watchpoint, esr, regs)) {
+	if (!inf->fn(addr, esr, regs)) {
 		rv = 1;
 	} else {
 		pr_alert("Unhandled debug exception: %s (0x%08x) at 0x%016lx\n",
-			 inf->name, esr, pc);
+			 inf->name, esr, addr);
 
 		info.si_signo = inf->sig;
 		info.si_errno = 0;
 		info.si_code  = inf->code;
-		info.si_addr  = (void __user *)pc;
+		info.si_addr  = (void __user *)addr;
 		arm64_notify_die("", regs, &info, 0);
 		rv = 0;
 	}
@@ -875,7 +842,7 @@ asmlinkage int __exception do_debug_exception(unsigned long addr_if_watchpoint,
 NOKPROBE_SYMBOL(do_debug_exception);
 
 #ifdef CONFIG_ARM64_PAN
-void cpu_enable_pan(const struct arm64_cpu_capabilities *__unused)
+int cpu_enable_pan(void *__unused)
 {
 	/*
 	 * We modify PSTATE. This won't work from irq context as the PSTATE
@@ -885,5 +852,6 @@ void cpu_enable_pan(const struct arm64_cpu_capabilities *__unused)
 
 	config_sctlr_el1(SCTLR_EL1_SPAN, 0);
 	asm(SET_PSTATE_PAN(1));
+	return 0;
 }
 #endif /* CONFIG_ARM64_PAN */

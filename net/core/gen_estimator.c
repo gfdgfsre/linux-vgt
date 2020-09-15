@@ -46,7 +46,7 @@
 struct net_rate_estimator {
 	struct gnet_stats_basic_packed	*bstats;
 	spinlock_t		*stats_lock;
-	net_seqlock_t		*running;
+	seqcount_t		*running;
 	struct gnet_stats_basic_cpu __percpu *cpu_bstats;
 	u8			ewma_log;
 	u8			intvl_log; /* period : (250ms << intvl_log) */
@@ -66,7 +66,6 @@ struct net_rate_estimator {
 static void est_fetch_counters(struct net_rate_estimator *e,
 			       struct gnet_stats_basic_packed *b)
 {
-	memset(b, 0, sizeof(*b));
 	if (e->stats_lock)
 		spin_lock(e->stats_lock);
 
@@ -129,7 +128,7 @@ int gen_new_estimator(struct gnet_stats_basic_packed *bstats,
 		      struct gnet_stats_basic_cpu __percpu *cpu_bstats,
 		      struct net_rate_estimator __rcu **rate_est,
 		      spinlock_t *stats_lock,
-		      net_seqlock_t *running,
+		      seqcount_t *running,
 		      struct nlattr *opt)
 {
 	struct gnet_estimator *parm = nla_data(opt);
@@ -160,11 +159,7 @@ int gen_new_estimator(struct gnet_stats_basic_packed *bstats,
 	est->intvl_log = intvl_log;
 	est->cpu_bstats = cpu_bstats;
 
-	if (stats_lock)
-		local_bh_disable();
 	est_fetch_counters(est, &b);
-	if (stats_lock)
-		local_bh_enable();
 	est->last_bytes = b.bytes;
 	est->last_packets = b.packets;
 	old = rcu_dereference_protected(*rate_est, 1);
@@ -222,7 +217,7 @@ int gen_replace_estimator(struct gnet_stats_basic_packed *bstats,
 			  struct gnet_stats_basic_cpu __percpu *cpu_bstats,
 			  struct net_rate_estimator __rcu **rate_est,
 			  spinlock_t *stats_lock,
-			  net_seqlock_t *running, struct nlattr *opt)
+			  seqcount_t *running, struct nlattr *opt)
 {
 	return gen_new_estimator(bstats, cpu_bstats, rate_est,
 				 stats_lock, running, opt);

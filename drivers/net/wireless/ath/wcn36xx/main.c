@@ -384,18 +384,6 @@ static int wcn36xx_config(struct ieee80211_hw *hw, u32 changed)
 		}
 	}
 
-	if (changed & IEEE80211_CONF_CHANGE_PS) {
-		list_for_each_entry(tmp, &wcn->vif_list, list) {
-			vif = wcn36xx_priv_to_vif(tmp);
-			if (hw->conf.flags & IEEE80211_CONF_PS) {
-				if (vif->bss_conf.ps) /* ps allowed ? */
-					wcn36xx_pmc_enter_bmps_state(wcn, vif);
-			} else {
-				wcn36xx_pmc_exit_bmps_state(wcn, vif);
-			}
-		}
-	}
-
 	mutex_unlock(&wcn->conf_mutex);
 
 	return 0;
@@ -757,6 +745,17 @@ static void wcn36xx_bss_info_changed(struct ieee80211_hw *hw,
 			    bss_conf->dtim_period);
 
 		vif_priv->dtim_period = bss_conf->dtim_period;
+	}
+
+	if (changed & BSS_CHANGED_PS) {
+		wcn36xx_dbg(WCN36XX_DBG_MAC,
+			    "mac bss PS set %d\n",
+			    bss_conf->ps);
+		if (bss_conf->ps) {
+			wcn36xx_pmc_enter_bmps_state(wcn, vif);
+		} else {
+			wcn36xx_pmc_exit_bmps_state(wcn, vif);
+		}
 	}
 
 	if (changed & BSS_CHANGED_BSSID) {
@@ -1280,7 +1279,7 @@ static int wcn36xx_probe(struct platform_device *pdev)
 	if (addr && ret != ETH_ALEN) {
 		wcn36xx_err("invalid local-mac-address\n");
 		ret = -EINVAL;
-		goto out_destroy_ept;
+		goto out_wq;
 	} else if (addr) {
 		wcn36xx_info("mac address: %pM\n", addr);
 		SET_IEEE80211_PERM_ADDR(wcn->hw, addr);
@@ -1288,7 +1287,7 @@ static int wcn36xx_probe(struct platform_device *pdev)
 
 	ret = wcn36xx_platform_get_resources(wcn, pdev);
 	if (ret)
-		goto out_destroy_ept;
+		goto out_wq;
 
 	wcn36xx_init_ieee80211(wcn);
 	ret = ieee80211_register_hw(wcn->hw);
@@ -1300,8 +1299,6 @@ static int wcn36xx_probe(struct platform_device *pdev)
 out_unmap:
 	iounmap(wcn->ccu_base);
 	iounmap(wcn->dxe_base);
-out_destroy_ept:
-	rpmsg_destroy_ept(wcn->smd_channel);
 out_wq:
 	ieee80211_free_hw(hw);
 out_err:

@@ -59,7 +59,7 @@ int ovl_copy_xattr(struct dentry *old, struct dentry *new)
 {
 	ssize_t list_size, size, value_size = 0;
 	char *buf, *name, *value = NULL;
-	int error = 0;
+	int uninitialized_var(error);
 	size_t slen;
 
 	if (!(old->d_inode->i_opflags & IOP_XATTR) ||
@@ -157,7 +157,7 @@ static int ovl_copy_up_data(struct path *old, struct path *new, loff_t len)
 	}
 
 	/* Try to use clone_file_range to clone up within the same fs */
-	error = do_clone_file_range(old_file, 0, new_file, 0, len);
+	error = vfs_clone_file_range(old_file, 0, new_file, 0, len);
 	if (!error)
 		goto out;
 	/* Couldn't clone, so now we try to copy the data */

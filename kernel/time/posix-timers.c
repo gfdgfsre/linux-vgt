@@ -50,7 +50,6 @@
 #include <linux/export.h>
 #include <linux/hashtable.h>
 #include <linux/compat.h>
-#include <linux/nospec.h>
 
 #include "timekeeping.h"
 #include "posix-timers.h"
@@ -283,23 +282,16 @@ static __init int init_posix_timers(void)
 }
 __initcall(init_posix_timers);
 
-/*
- * The siginfo si_overrun field and the return value of timer_getoverrun(2)
- * are of type int. Clamp the overrun value to INT_MAX
- */
-static inline int timer_overrun_to_int(struct k_itimer *timr, int baseval)
-{
-	s64 sum = timr->it_overrun_last + (s64)baseval;
-
-	return sum > (s64)INT_MAX ? INT_MAX : (int)sum;
-}
-
 static void common_hrtimer_rearm(struct k_itimer *timr)
 {
 	struct hrtimer *timer = &timr->it.real.timer;
 
-	timr->it_overrun += hrtimer_forward(timer, timer->base->get_time(),
-					    timr->it_interval);
+	if (!timr->it_interval)
+		return;
+
+	timr->it_overrun += (unsigned int) hrtimer_forward(timer,
+						timer->base->get_time(),
+						timr->it_interval);
 	hrtimer_restart(timer);
 }
 
@@ -323,15 +315,15 @@ void posixtimer_rearm(struct siginfo *info)
 	if (!timr)
 		return;
 
-	if (timr->it_interval && timr->it_requeue_pending == info->si_sys_private) {
+	if (timr->it_requeue_pending == info->si_sys_private) {
 		timr->kclock->timer_rearm(timr);
 
 		timr->it_active = 1;
 		timr->it_overrun_last = timr->it_overrun;
-		timr->it_overrun = -1LL;
+		timr->it_overrun = -1;
 		++timr->it_requeue_pending;
 
-		info->si_overrun = timer_overrun_to_int(timr, info->si_overrun);
+		info->si_overrun += timr->it_overrun_last;
 	}
 
 	unlock_timer(timr, flags);
@@ -425,8 +417,9 @@ static enum hrtimer_restart posix_timer_fn(struct hrtimer *timer)
 					now = ktime_add(now, kj);
 			}
 #endif
-			timr->it_overrun += hrtimer_forward(timer, now,
-							    timr->it_interval);
+			timr->it_overrun += (unsigned int)
+				hrtimer_forward(timer, now,
+						timr->it_interval);
 			ret = HRTIMER_RESTART;
 			++timr->it_requeue_pending;
 			timr->it_active = 1;
@@ -440,25 +433,18 @@ static enum hrtimer_restart posix_timer_fn(struct hrtimer *timer)
 static struct pid *good_sigevent(sigevent_t * event)
 {
 	struct task_struct *rtn = current->group_leader;
-	int sig = event->sigev_signo;
 
-	switch (event->sigev_notify) {
-	case SIGEV_SIGNAL | SIGEV_THREAD_ID:
-		rtn = find_task_by_vpid(event->sigev_notify_thread_id);
-		if (!rtn || !same_thread_group(rtn, current))
-			return NULL;
-		/* FALLTHRU */
-	case SIGEV_SIGNAL:
-	case SIGEV_THREAD:
-		if (sig <= 0 || sig > SIGRTMAX ||
-		    sig_kernel_only(sig) || sig_kernel_coredump(sig))
-			return NULL;
-		/* FALLTHRU */
-	case SIGEV_NONE:
-		return task_pid(rtn);
-	default:
+	if ((event->sigev_notify & SIGEV_THREAD_ID ) &&
+		(!(rtn = find_task_by_vpid(event->sigev_notify_thread_id)) ||
+		 !same_thread_group(rtn, current) ||
+		 (event->sigev_notify & ~SIGEV_THREAD_ID) != SIGEV_SIGNAL))
 		return NULL;
-	}
+
+	if (((event->sigev_notify & ~SIGEV_THREAD_ID) != SIGEV_NONE) &&
+	    ((event->sigev_signo <= 0) || (event->sigev_signo > SIGRTMAX)))
+		return NULL;
+
+	return task_pid(rtn);
 }
 
 static struct k_itimer * alloc_posix_timer(void)
@@ -477,7 +463,7 @@ static struct k_itimer * alloc_posix_timer(void)
 
 static void k_itimer_rcu_free(struct rcu_head *head)
 {
-	struct k_itimer *tmr = container_of(head, struct k_itimer, rcu);
+	struct k_itimer *tmr = container_of(head, struct k_itimer, it.rcu);
 
 	kmem_cache_free(posix_timers_cache, tmr);
 }
@@ -494,7 +480,7 @@ static void release_posix_timer(struct k_itimer *tmr, int it_id_set)
 	}
 	put_pid(tmr->it_pid);
 	sigqueue_free(tmr->sigq);
-	call_rcu(&tmr->rcu, k_itimer_rcu_free);
+	call_rcu(&tmr->it.rcu, k_itimer_rcu_free);
 }
 
 static int common_timer_create(struct k_itimer *new_timer)
@@ -532,7 +518,7 @@ static int do_timer_create(clockid_t which_clock, struct sigevent *event,
 	new_timer->it_id = (timer_t) new_timer_id;
 	new_timer->it_clock = which_clock;
 	new_timer->kclock = kc;
-	new_timer->it_overrun = -1LL;
+	new_timer->it_overrun = -1;
 
 	if (event) {
 		rcu_read_lock();
@@ -653,11 +639,11 @@ static ktime_t common_hrtimer_remaining(struct k_itimer *timr, ktime_t now)
 	return __hrtimer_expires_remaining_adjusted(timer, now);
 }
 
-static s64 common_hrtimer_forward(struct k_itimer *timr, ktime_t now)
+static int common_hrtimer_forward(struct k_itimer *timr, ktime_t now)
 {
 	struct hrtimer *timer = &timr->it.real.timer;
 
-	return hrtimer_forward(timer, now, timr->it_interval);
+	return (int)hrtimer_forward(timer, now, timr->it_interval);
 }
 
 /*
@@ -683,7 +669,7 @@ void common_timer_get(struct k_itimer *timr, struct itimerspec64 *cur_setting)
 	struct timespec64 ts64;
 	bool sig_none;
 
-	sig_none = timr->it_sigev_notify == SIGEV_NONE;
+	sig_none = (timr->it_sigev_notify & ~SIGEV_THREAD_ID) == SIGEV_NONE;
 	iv = timr->it_interval;
 
 	/* interval timer ? */
@@ -797,7 +783,7 @@ SYSCALL_DEFINE1(timer_getoverrun, timer_t, timer_id)
 	if (!timr)
 		return -EINVAL;
 
-	overrun = timer_overrun_to_int(timr, 0);
+	overrun = timr->it_overrun_last;
 	unlock_timer(timr, flags);
 
 	return overrun;
@@ -831,22 +817,6 @@ static void common_hrtimer_arm(struct k_itimer *timr, ktime_t expires,
 
 	if (!sigev_none)
 		hrtimer_start_expires(timer, HRTIMER_MODE_ABS);
-}
-
-/*
- * Protected by RCU!
- */
-static void timer_wait_for_callback(const struct k_clock *kc, struct k_itimer *timr)
-{
-#ifdef CONFIG_PREEMPT_RT_FULL
-	if (kc->timer_arm == common_hrtimer_arm)
-		hrtimer_wait_for_timer(&timr->it.real.timer);
-	else if (kc == &alarm_clock)
-		hrtimer_wait_for_timer(&timr->it.alarm.alarmtimer.timer);
-	else
-		/* FIXME: Whacky hack for posix-cpu-timers */
-		schedule_timeout(1);
-#endif
 }
 
 static int common_hrtimer_try_to_cancel(struct k_itimer *timr)
@@ -886,7 +856,7 @@ int common_timer_set(struct k_itimer *timr, int flags,
 
 	timr->it_interval = timespec64_to_ktime(new_setting->it_interval);
 	expires = timespec64_to_ktime(new_setting->it_value);
-	sigev_none = timr->it_sigev_notify == SIGEV_NONE;
+	sigev_none = (timr->it_sigev_notify & ~SIGEV_THREAD_ID) == SIGEV_NONE;
 
 	kc->timer_arm(timr, expires, flags & TIMER_ABSTIME, sigev_none);
 	timr->it_active = !sigev_none;
@@ -913,7 +883,6 @@ retry:
 	if (!timr)
 		return -EINVAL;
 
-	rcu_read_lock();
 	kc = timr->kclock;
 	if (WARN_ON_ONCE(!kc || !kc->timer_set))
 		error = -EINVAL;
@@ -922,12 +891,9 @@ retry:
 
 	unlock_timer(timr, flag);
 	if (error == TIMER_RETRY) {
-		timer_wait_for_callback(kc, timr);
 		old_spec64 = NULL;	// We already got the old time...
-		rcu_read_unlock();
 		goto retry;
 	}
-	rcu_read_unlock();
 
 	return error;
 }
@@ -1009,15 +975,10 @@ retry_delete:
 	if (!timer)
 		return -EINVAL;
 
-	rcu_read_lock();
 	if (timer_delete_hook(timer) == TIMER_RETRY) {
 		unlock_timer(timer, flags);
-		timer_wait_for_callback(clockid_to_kclock(timer->it_clock),
-					timer);
-		rcu_read_unlock();
 		goto retry_delete;
 	}
-	rcu_read_unlock();
 
 	spin_lock(&current->sighand->siglock);
 	list_del(&timer->list);
@@ -1043,18 +1004,8 @@ static void itimer_delete(struct k_itimer *timer)
 retry_delete:
 	spin_lock_irqsave(&timer->it_lock, flags);
 
-	/* On RT we can race with a deletion */
-	if (!timer->it_signal) {
-		unlock_timer(timer, flags);
-		return;
-	}
-
 	if (timer_delete_hook(timer) == TIMER_RETRY) {
-		rcu_read_lock();
 		unlock_timer(timer, flags);
-		timer_wait_for_callback(clockid_to_kclock(timer->it_clock),
-					timer);
-		rcu_read_unlock();
 		goto retry_delete;
 	}
 	list_del(&timer->list);
@@ -1390,15 +1341,11 @@ static const struct k_clock * const posix_clocks[] = {
 
 static const struct k_clock *clockid_to_kclock(const clockid_t id)
 {
-	clockid_t idx = id;
-
-	if (id < 0) {
+	if (id < 0)
 		return (id & CLOCKFD_MASK) == CLOCKFD ?
 			&clock_posix_dynamic : &clock_posix_cpu;
-	}
 
-	if (id >= ARRAY_SIZE(posix_clocks))
+	if (id >= ARRAY_SIZE(posix_clocks) || !posix_clocks[id])
 		return NULL;
-
-	return posix_clocks[array_index_nospec(idx, ARRAY_SIZE(posix_clocks))];
+	return posix_clocks[id];
 }

@@ -697,7 +697,7 @@ int amdgpu_queue_mgr_fini(struct amdgpu_device *adev,
 			  struct amdgpu_queue_mgr *mgr);
 int amdgpu_queue_mgr_map(struct amdgpu_device *adev,
 			 struct amdgpu_queue_mgr *mgr,
-			 u32 hw_ip, u32 instance, u32 ring,
+			 int hw_ip, int instance, int ring,
 			 struct amdgpu_ring **out_ring);
 
 /*
@@ -1536,14 +1536,18 @@ struct amdgpu_device {
 	/* sdma */
 	struct amdgpu_sdma		sdma;
 
-	/* uvd */
-	struct amdgpu_uvd		uvd;
+	union {
+		struct {
+			/* uvd */
+			struct amdgpu_uvd		uvd;
 
-	/* vce */
-	struct amdgpu_vce		vce;
+			/* vce */
+			struct amdgpu_vce		vce;
+		};
 
-	/* vcn */
-	struct amdgpu_vcn		vcn;
+		/* vcn */
+		struct amdgpu_vcn		vcn;
+	};
 
 	/* firmwares */
 	struct amdgpu_firmware		firmware;

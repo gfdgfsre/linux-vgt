@@ -123,11 +123,7 @@ int cgroup_transfer_tasks(struct cgroup *to, struct cgroup *from)
 	 */
 	do {
 		css_task_iter_start(&from->self, 0, &it);
-
-		do {
-			task = css_task_iter_next(&it);
-		} while (task && (task->flags & PF_EXITING));
-
+		task = css_task_iter_next(&it);
 		if (task)
 			get_task_struct(task);
 		css_task_iter_end(&it);
@@ -501,7 +497,6 @@ static void *cgroup_pidlist_next(struct seq_file *s, void *v, loff_t *pos)
 	 */
 	p++;
 	if (p >= end) {
-		(*pos)++;
 		return NULL;
 	} else {
 		*pos = *p;
@@ -824,7 +819,7 @@ void cgroup1_release_agent(struct work_struct *work)
 
 	pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
 	agentbuf = kstrdup(cgrp->root->release_agent_path, GFP_KERNEL);
-	if (!pathbuf || !agentbuf || !strlen(agentbuf))
+	if (!pathbuf || !agentbuf)
 		goto out;
 
 	spin_lock_irq(&css_set_lock);

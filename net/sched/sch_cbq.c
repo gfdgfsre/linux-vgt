@@ -1131,26 +1131,6 @@ static const struct nla_policy cbq_policy[TCA_CBQ_MAX + 1] = {
 	[TCA_CBQ_POLICE]	= { .len = sizeof(struct tc_cbq_police) },
 };
 
-static int cbq_opt_parse(struct nlattr *tb[TCA_CBQ_MAX + 1], struct nlattr *opt)
-{
-	int err;
-
-	if (!opt)
-		return -EINVAL;
-
-	err = nla_parse_nested(tb, TCA_CBQ_MAX, opt, cbq_policy, NULL);
-	if (err < 0)
-		return err;
-
-	if (tb[TCA_CBQ_WRROPT]) {
-		const struct tc_cbq_wrropt *wrr = nla_data(tb[TCA_CBQ_WRROPT]);
-
-		if (wrr->priority > TC_CBQ_MAXPRIO)
-			err = -EINVAL;
-	}
-	return err;
-}
-
 static int cbq_init(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct cbq_sched_data *q = qdisc_priv(sch);
@@ -1162,7 +1142,10 @@ static int cbq_init(struct Qdisc *sch, struct nlattr *opt)
 	hrtimer_init(&q->delay_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED);
 	q->delay_timer.function = cbq_undelay;
 
-	err = cbq_opt_parse(tb, opt);
+	if (!opt)
+		return -EINVAL;
+
+	err = nla_parse_nested(tb, TCA_CBQ_MAX, opt, cbq_policy, NULL);
 	if (err < 0)
 		return err;
 
@@ -1174,13 +1157,9 @@ static int cbq_init(struct Qdisc *sch, struct nlattr *opt)
 	if ((q->link.R_tab = qdisc_get_rtab(r, tb[TCA_CBQ_RTAB])) == NULL)
 		return -EINVAL;
 
-	err = tcf_block_get(&q->link.block, &q->link.filter_list);
-	if (err)
-		goto put_rtab;
-
 	err = qdisc_class_hash_init(&q->clhash);
 	if (err < 0)
-		goto put_block;
+		goto put_rtab;
 
 	q->link.sibling = &q->link;
 	q->link.common.classid = sch->handle;
@@ -1213,9 +1192,6 @@ static int cbq_init(struct Qdisc *sch, struct nlattr *opt)
 
 	cbq_addprio(q, &q->link);
 	return 0;
-
-put_block:
-	tcf_block_put(q->link.block);
 
 put_rtab:
 	qdisc_put_rtab(q->link.R_tab);
@@ -1476,7 +1452,10 @@ cbq_change_class(struct Qdisc *sch, u32 classid, u32 parentid, struct nlattr **t
 	struct cbq_class *parent;
 	struct qdisc_rate_table *rtab = NULL;
 
-	err = cbq_opt_parse(tb, opt);
+	if (opt == NULL)
+		return -EINVAL;
+
+	err = nla_parse_nested(tb, TCA_CBQ_MAX, opt, cbq_policy, NULL);
 	if (err < 0)
 		return err;
 

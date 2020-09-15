@@ -19,7 +19,6 @@
 #include <linux/percpu-rwsem.h>
 #include <linux/workqueue.h>
 #include <linux/bpf-cgroup.h>
-#include <linux/swork.h>
 
 #ifdef CONFIG_CGROUPS
 
@@ -153,7 +152,6 @@ struct cgroup_subsys_state {
 	/* percpu_ref killing and RCU release */
 	struct rcu_head rcu_head;
 	struct work_struct destroy_work;
-	struct swork_event destroy_swork;
 
 	/*
 	 * PI: the parent css.	Placed here for cache proximity to following
@@ -203,7 +201,6 @@ struct css_set {
 	 */
 	struct list_head tasks;
 	struct list_head mg_tasks;
-	struct list_head dying_tasks;
 
 	/* all css_task_iters currently walking this cset */
 	struct list_head task_iters;
@@ -290,11 +287,6 @@ struct cgroup {
 	 * Dying cgroups are cgroups which were deleted by a user,
 	 * but are still existing because someone else is holding a reference.
 	 * max_descendants is a maximum allowed number of descent cgroups.
-	 *
-	 * nr_descendants and nr_dying_descendants are protected
-	 * by cgroup_mutex and css_set_lock. It's fine to read them holding
-	 * any of cgroup_mutex and css_set_lock; for writing both locks
-	 * should be held.
 	 */
 	int nr_descendants;
 	int nr_dying_descendants;
@@ -361,7 +353,6 @@ struct cgroup {
 	 * specific task are charged to the dom_cgrp.
 	 */
 	struct cgroup *dom_cgrp;
-	struct cgroup *old_dom_cgrp;		/* used while enabling threaded */
 
 	/*
 	 * list of pidlists, up to two for each namespace (one for procs, one
@@ -531,7 +522,7 @@ struct cgroup_subsys {
 	void (*cancel_fork)(struct task_struct *task);
 	void (*fork)(struct task_struct *task);
 	void (*exit)(struct task_struct *task);
-	void (*release)(struct task_struct *task);
+	void (*free)(struct task_struct *task);
 	void (*bind)(struct cgroup_subsys_state *root_css);
 
 	bool early_init:1;
@@ -683,9 +674,7 @@ struct sock_cgroup_data {
 	union {
 #ifdef __LITTLE_ENDIAN
 		struct {
-			u8	is_data : 1;
-			u8	no_refcnt : 1;
-			u8	unused : 6;
+			u8	is_data;
 			u8	padding;
 			u16	prioidx;
 			u32	classid;
@@ -695,9 +684,7 @@ struct sock_cgroup_data {
 			u32	classid;
 			u16	prioidx;
 			u8	padding;
-			u8	unused : 6;
-			u8	no_refcnt : 1;
-			u8	is_data : 1;
+			u8	is_data;
 		} __packed;
 #endif
 		u64		val;
@@ -709,13 +696,13 @@ struct sock_cgroup_data {
  * updaters and return part of the previous pointer as the prioidx or
  * classid.  Such races are short-lived and the result isn't critical.
  */
-static inline u16 sock_cgroup_prioidx(const struct sock_cgroup_data *skcd)
+static inline u16 sock_cgroup_prioidx(struct sock_cgroup_data *skcd)
 {
 	/* fallback to 1 which is always the ID of the root cgroup */
 	return (skcd->is_data & 1) ? skcd->prioidx : 1;
 }
 
-static inline u32 sock_cgroup_classid(const struct sock_cgroup_data *skcd)
+static inline u32 sock_cgroup_classid(struct sock_cgroup_data *skcd)
 {
 	/* fallback to 0 which is the unconfigured default classid */
 	return (skcd->is_data & 1) ? skcd->classid : 0;

@@ -68,6 +68,7 @@ int pin_config_get_for_pin(struct pinctrl_dev *pctldev, unsigned pin,
 
 	return ops->pin_config_get(pctldev, pin, config);
 }
+EXPORT_SYMBOL_GPL(pin_config_get_for_pin);
 
 int pin_config_group_get(const char *dev_name, const char *pin_group,
 			 unsigned long *config)

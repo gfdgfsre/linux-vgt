@@ -504,7 +504,6 @@ static bool rockchip_i2s_rd_reg(struct device *dev, unsigned int reg)
 	case I2S_INTCR:
 	case I2S_XFER:
 	case I2S_CLR:
-	case I2S_TXDR:
 	case I2S_RXDR:
 	case I2S_FIFOLR:
 	case I2S_INTSR:
@@ -519,9 +518,6 @@ static bool rockchip_i2s_volatile_reg(struct device *dev, unsigned int reg)
 	switch (reg) {
 	case I2S_INTSR:
 	case I2S_CLR:
-	case I2S_FIFOLR:
-	case I2S_TXDR:
-	case I2S_RXDR:
 		return true;
 	default:
 		return false;
@@ -531,8 +527,6 @@ static bool rockchip_i2s_volatile_reg(struct device *dev, unsigned int reg)
 static bool rockchip_i2s_precious_reg(struct device *dev, unsigned int reg)
 {
 	switch (reg) {
-	case I2S_RXDR:
-		return true;
 	default:
 		return false;
 	}
@@ -676,7 +670,7 @@ static int rockchip_i2s_probe(struct platform_device *pdev)
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
 	if (ret) {
 		dev_err(&pdev->dev, "Could not register PCM\n");
-		goto err_suspend;
+		return ret;
 	}
 
 	return 0;

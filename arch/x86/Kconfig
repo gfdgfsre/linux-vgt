@@ -56,7 +56,7 @@ config X86
 	select ARCH_HAS_KCOV			if X86_64
 	select ARCH_HAS_PMEM_API		if X86_64
 	# Causing hangs/crashes, see the commit that added this change for details.
-	select ARCH_HAS_REFCOUNT
+	select ARCH_HAS_REFCOUNT		if BROKEN
 	select ARCH_HAS_UACCESS_FLUSHCACHE	if X86_64
 	select ARCH_HAS_SET_MEMORY
 	select ARCH_HAS_SG_CHAIN
@@ -89,7 +89,6 @@ config X86
 	select GENERIC_CLOCKEVENTS_MIN_ADJUST
 	select GENERIC_CMOS_UPDATE
 	select GENERIC_CPU_AUTOPROBE
-	select GENERIC_CPU_VULNERABILITIES
 	select GENERIC_EARLY_IOREMAP
 	select GENERIC_FIND_FIRST_BIT
 	select GENERIC_IOMAP
@@ -109,8 +108,9 @@ config X86
 	select HAVE_ARCH_AUDITSYSCALL
 	select HAVE_ARCH_HUGE_VMAP		if X86_64 || X86_PAE
 	select HAVE_ARCH_JUMP_LABEL
-	select HAVE_ARCH_KASAN			if X86_64
+	select HAVE_ARCH_KASAN			if X86_64 && SPARSEMEM_VMEMMAP
 	select HAVE_ARCH_KGDB
+	select HAVE_ARCH_KMEMCHECK
 	select HAVE_ARCH_MMAP_RND_BITS		if MMU
 	select HAVE_ARCH_MMAP_RND_COMPAT_BITS	if MMU && COMPAT
 	select HAVE_ARCH_COMPAT_MMAP_BASES	if MMU && COMPAT
@@ -169,16 +169,13 @@ config X86
 	select HAVE_HARDLOCKUP_DETECTOR_PERF	if PERF_EVENTS && HAVE_PERF_EVENTS_NMI
 	select HAVE_PERF_REGS
 	select HAVE_PERF_USER_STACK_DUMP
-	select HAVE_PREEMPT_LAZY
 	select HAVE_RCU_TABLE_FREE
-	select HAVE_RCU_TABLE_INVALIDATE	if HAVE_RCU_TABLE_FREE
 	select HAVE_REGS_AND_STACK_ACCESS_API
-	select HAVE_RELIABLE_STACKTRACE		if X86_64 && UNWINDER_FRAME_POINTER && STACK_VALIDATION
+	select HAVE_RELIABLE_STACKTRACE		if X86_64 && FRAME_POINTER_UNWINDER && STACK_VALIDATION
 	select HAVE_STACK_VALIDATION		if X86_64
 	select HAVE_SYSCALL_TRACEPOINTS
 	select HAVE_UNSTABLE_SCHED_CLOCK
 	select HAVE_USER_RETURN_NOTIFIER
-	select HOTPLUG_SMT			if SMP
 	select IRQ_FORCED_THREADING
 	select PCI_LOCKLESS_CONFIG
 	select PERF_EVENTS
@@ -258,11 +255,8 @@ config ARCH_MAY_HAVE_PC_FDC
 	def_bool y
 	depends on ISA_DMA_API
 
-config RWSEM_GENERIC_SPINLOCK
-	def_bool PREEMPT_RT_FULL
-
 config RWSEM_XCHGADD_ALGORITHM
-	def_bool !RWSEM_GENERIC_SPINLOCK && !PREEMPT_RT_FULL
+	def_bool y
 
 config GENERIC_CALIBRATE_DELAY
 	def_bool y
@@ -309,6 +303,7 @@ config ARCH_SUPPORTS_DEBUG_PAGEALLOC
 config KASAN_SHADOW_OFFSET
 	hex
 	depends on KASAN
+	default 0xdff8000000000000 if X86_5LEVEL
 	default 0xdffffc0000000000
 
 config HAVE_INTEL_TXT
@@ -433,16 +428,6 @@ config X86_BIGSMP
 config GOLDFISH
        def_bool y
        depends on X86_GOLDFISH
-
-config RETPOLINE
-	bool "Avoid speculative indirect branches in kernel"
-	default y
-	select STACK_VALIDATION if HAVE_STACK_VALIDATION
-	help
-	  Compile kernel with the retpoline compiler options to guard against
-	  kernel-to-user data leaks by avoiding speculative indirect
-	  branches. Requires a compiler with -mindirect-branch=thunk-extern
-	  support for full protection. The kernel may run slower.
 
 config INTEL_RDT
 	bool "Intel Resource Director Technology support"
@@ -933,7 +918,7 @@ config IOMMU_HELPER
 config MAXSMP
 	bool "Enable Maximum number of SMP Processors and NUMA Nodes"
 	depends on X86_64 && SMP && DEBUG_KERNEL
-	select CPUMASK_OFFSTACK if !PREEMPT_RT_FULL
+	select CPUMASK_OFFSTACK
 	---help---
 	  Enable maximum number of CPUS and NUMA Nodes for this architecture.
 	  If unsure, say N.
@@ -941,8 +926,7 @@ config MAXSMP
 config NR_CPUS
 	int "Maximum number of CPUs" if SMP && !MAXSMP
 	range 2 8 if SMP && X86_32 && !X86_BIGSMP
-	range 2 64 if SMP && X86_32 && X86_BIGSMP
-	range 2 512 if SMP && !MAXSMP && !CPUMASK_OFFSTACK && X86_64
+	range 2 512 if SMP && !MAXSMP && !CPUMASK_OFFSTACK
 	range 2 8192 if SMP && !MAXSMP && CPUMASK_OFFSTACK && X86_64
 	default "1" if !SMP
 	default "8192" if MAXSMP
@@ -959,7 +943,13 @@ config NR_CPUS
 	  approximately eight kilobytes to the kernel image.
 
 config SCHED_SMT
-	def_bool y if SMP
+	bool "SMT (Hyperthreading) scheduler support"
+	depends on SMP
+	---help---
+	  SMT scheduler support improves the CPU scheduler's decision making
+	  when dealing with Intel Pentium 4 chips with HyperThreading at a
+	  cost of slightly increased overhead in some places. If unsure say
+	  N here.
 
 config SCHED_MC
 	def_bool y
@@ -1439,7 +1429,7 @@ config ARCH_DMA_ADDR_T_64BIT
 
 config X86_DIRECT_GBPAGES
 	def_bool y
-	depends on X86_64 && !DEBUG_PAGEALLOC
+	depends on X86_64 && !DEBUG_PAGEALLOC && !KMEMCHECK
 	---help---
 	  Certain kernel features effectively disable kernel
 	  linear 1 GB mappings (even if the CPU otherwise
@@ -1857,51 +1847,6 @@ config X86_INTEL_MEMORY_PROTECTION_KEYS
 
 	  If unsure, say y.
 
-choice
-	prompt "TSX enable mode"
-	depends on CPU_SUP_INTEL
-	default X86_INTEL_TSX_MODE_OFF
-	help
-	  Intel's TSX (Transactional Synchronization Extensions) feature
-	  allows to optimize locking protocols through lock elision which
-	  can lead to a noticeable performance boost.
-
-	  On the other hand it has been shown that TSX can be exploited
-	  to form side channel attacks (e.g. TAA) and chances are there
-	  will be more of those attacks discovered in the future.
-
-	  Therefore TSX is not enabled by default (aka tsx=off). An admin
-	  might override this decision by tsx=on the command line parameter.
-	  Even with TSX enabled, the kernel will attempt to enable the best
-	  possible TAA mitigation setting depending on the microcode available
-	  for the particular machine.
-
-	  This option allows to set the default tsx mode between tsx=on, =off
-	  and =auto. See Documentation/admin-guide/kernel-parameters.txt for more
-	  details.
-
-	  Say off if not sure, auto if TSX is in use but it should be used on safe
-	  platforms or on if TSX is in use and the security aspect of tsx is not
-	  relevant.
-
-config X86_INTEL_TSX_MODE_OFF
-	bool "off"
-	help
-	  TSX is disabled if possible - equals to tsx=off command line parameter.
-
-config X86_INTEL_TSX_MODE_ON
-	bool "on"
-	help
-	  TSX is always enabled on TSX capable HW - equals the tsx=on command
-	  line parameter.
-
-config X86_INTEL_TSX_MODE_AUTO
-	bool "auto"
-	help
-	  TSX is enabled on TSX capable HW that is believed to be safe against
-	  side channel attacks- equals the tsx=auto command line parameter.
-endchoice
-
 config EFI
 	bool "EFI runtime service support"
 	depends on ACPI
@@ -2188,8 +2133,14 @@ config RANDOMIZE_MEMORY_PHYSICAL_PADDING
 	   If unsure, leave at the default value.
 
 config HOTPLUG_CPU
-	def_bool y
+	bool "Support for hot-pluggable CPUs"
 	depends on SMP
+	---help---
+	  Say Y here to allow turning CPUs off and on. CPUs can be
+	  controlled through /sys/devices/system/cpu.
+	  ( Note: power management support will enable this option
+	    automatically on SMP systems. )
+	  Say N if you want to disable CPU hotplug.
 
 config BOOTPARAM_HOTPLUG_CPU0
 	bool "Set default setting of cpu0_hotpluggable"
@@ -2720,7 +2671,8 @@ config OLPC
 
 config OLPC_XO1_PM
 	bool "OLPC XO-1 Power Management"
-	depends on OLPC && MFD_CS5535=y && PM_SLEEP
+	depends on OLPC && MFD_CS5535 && PM_SLEEP
+	select MFD_CORE
 	---help---
 	  Add support for poweroff and suspend of the OLPC XO-1 laptop.
 

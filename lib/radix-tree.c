@@ -37,7 +37,7 @@
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/locallock.h>
+
 
 /* Number of nodes in fully populated tree of given height */
 static unsigned long height_to_maxnodes[RADIX_TREE_MAX_PATH + 1] __read_mostly;
@@ -86,7 +86,6 @@ struct radix_tree_preload {
 	struct radix_tree_node *nodes;
 };
 static DEFINE_PER_CPU(struct radix_tree_preload, radix_tree_preloads) = { 0, };
-static DEFINE_LOCAL_IRQ_LOCK(radix_tree_preloads_lock);
 
 static inline struct radix_tree_node *entry_to_node(void *ptr)
 {
@@ -405,13 +404,12 @@ radix_tree_node_alloc(gfp_t gfp_mask, struct radix_tree_node *parent,
 		 * succeed in getting a node here (and never reach
 		 * kmem_cache_alloc)
 		 */
-		rtp = &get_locked_var(radix_tree_preloads_lock, radix_tree_preloads);
+		rtp = this_cpu_ptr(&radix_tree_preloads);
 		if (rtp->nr) {
 			ret = rtp->nodes;
 			rtp->nodes = ret->parent;
 			rtp->nr--;
 		}
-		put_locked_var(radix_tree_preloads_lock, radix_tree_preloads);
 		/*
 		 * Update the allocation stack trace as this is more useful
 		 * for debugging.
@@ -477,14 +475,14 @@ static __must_check int __radix_tree_preload(gfp_t gfp_mask, unsigned nr)
 	 */
 	gfp_mask &= ~__GFP_ACCOUNT;
 
-	local_lock(radix_tree_preloads_lock);
+	preempt_disable();
 	rtp = this_cpu_ptr(&radix_tree_preloads);
 	while (rtp->nr < nr) {
-		local_unlock(radix_tree_preloads_lock);
+		preempt_enable();
 		node = kmem_cache_alloc(radix_tree_node_cachep, gfp_mask);
 		if (node == NULL)
 			goto out;
-		local_lock(radix_tree_preloads_lock);
+		preempt_disable();
 		rtp = this_cpu_ptr(&radix_tree_preloads);
 		if (rtp->nr < nr) {
 			node->parent = rtp->nodes;
@@ -526,7 +524,7 @@ int radix_tree_maybe_preload(gfp_t gfp_mask)
 	if (gfpflags_allow_blocking(gfp_mask))
 		return __radix_tree_preload(gfp_mask, RADIX_TREE_PRELOAD_SIZE);
 	/* Preloading doesn't help anything with this gfp mask, skip it */
-	local_lock(radix_tree_preloads_lock);
+	preempt_disable();
 	return 0;
 }
 EXPORT_SYMBOL(radix_tree_maybe_preload);
@@ -564,7 +562,7 @@ int radix_tree_maybe_preload_order(gfp_t gfp_mask, int order)
 
 	/* Preloading doesn't help anything with this gfp mask, skip it */
 	if (!gfpflags_allow_blocking(gfp_mask)) {
-		local_lock(radix_tree_preloads_lock);
+		preempt_disable();
 		return 0;
 	}
 
@@ -597,12 +595,6 @@ int radix_tree_maybe_preload_order(gfp_t gfp_mask, int order)
 
 	return __radix_tree_preload(gfp_mask, nr_nodes);
 }
-
-void radix_tree_preload_end(void)
-{
-	local_unlock(radix_tree_preloads_lock);
-}
-EXPORT_SYMBOL(radix_tree_preload_end);
 
 static unsigned radix_tree_load_root(const struct radix_tree_root *root,
 		struct radix_tree_node **nodep, unsigned long *maxindex)
@@ -1621,9 +1613,11 @@ static void set_iter_tags(struct radix_tree_iter *iter,
 static void __rcu **skip_siblings(struct radix_tree_node **nodep,
 			void __rcu **slot, struct radix_tree_iter *iter)
 {
+	void *sib = node_to_entry(slot - 1);
+
 	while (iter->index < iter->next_index) {
 		*nodep = rcu_dereference_raw(*slot);
-		if (*nodep && !is_sibling_entry(iter->node, *nodep))
+		if (*nodep && *nodep != sib)
 			return slot;
 		slot++;
 		iter->index = __radix_tree_iter_add(iter, 1);
@@ -1638,7 +1632,7 @@ void __rcu **__radix_tree_next_slot(void __rcu **slot,
 				struct radix_tree_iter *iter, unsigned flags)
 {
 	unsigned tag = flags & RADIX_TREE_ITER_TAG_MASK;
-	struct radix_tree_node *node;
+	struct radix_tree_node *node = rcu_dereference_raw(*slot);
 
 	slot = skip_siblings(&node, slot, iter);
 
@@ -2045,12 +2039,10 @@ void *radix_tree_delete_item(struct radix_tree_root *root,
 			     unsigned long index, void *item)
 {
 	struct radix_tree_node *node = NULL;
-	void __rcu **slot = NULL;
+	void __rcu **slot;
 	void *entry;
 
 	entry = __radix_tree_lookup(root, index, &node, &slot);
-	if (!slot)
-		return NULL;
 	if (!entry && (!is_idr(root) || node_tag_get(root, node, IDR_FREE,
 						get_slot_offset(node, slot))))
 		return NULL;
@@ -2113,15 +2105,9 @@ EXPORT_SYMBOL(radix_tree_tagged);
 void idr_preload(gfp_t gfp_mask)
 {
 	if (__radix_tree_preload(gfp_mask, IDR_PRELOAD_SIZE))
-		local_lock(radix_tree_preloads_lock);
+		preempt_disable();
 }
 EXPORT_SYMBOL(idr_preload);
-
-void idr_preload_end(void)
-{
-	local_unlock(radix_tree_preloads_lock);
-}
-EXPORT_SYMBOL(idr_preload_end);
 
 /**
  * ida_pre_get - reserve resources for ida allocation
@@ -2139,7 +2125,7 @@ int ida_pre_get(struct ida *ida, gfp_t gfp)
 	 * to return to the ida_pre_get() step.
 	 */
 	if (!__radix_tree_preload(gfp, IDA_PRELOAD_SIZE))
-		local_unlock(radix_tree_preloads_lock);
+		preempt_enable();
 
 	if (!this_cpu_read(ida_bitmap)) {
 		struct ida_bitmap *bitmap = kmalloc(sizeof(*bitmap), gfp);
@@ -2198,7 +2184,7 @@ void __rcu **idr_get_free_cmn(struct radix_tree_root *root,
 			offset = radix_tree_find_next_bit(node, IDR_FREE,
 							offset + 1);
 			start = next_index(start, node, offset);
-			if (start > max || start == 0)
+			if (start > max)
 				return ERR_PTR(-ENOSPC);
 			while (offset == RADIX_TREE_MAP_SIZE) {
 				offset = node->offset + 1;

@@ -895,7 +895,9 @@ fl_pnfs_update_layout(struct inode *ino,
 
 	lseg = pnfs_update_layout(ino, ctx, pos, count, iomode, strict_iomode,
 				  gfp_flags);
-	if (IS_ERR_OR_NULL(lseg))
+	if (!lseg)
+		lseg = ERR_PTR(-ENOMEM);
+	if (IS_ERR(lseg))
 		goto out;
 
 	lo = NFS_I(ino)->layout;
@@ -904,7 +906,7 @@ fl_pnfs_update_layout(struct inode *ino,
 	status = filelayout_check_deviceid(lo, fl, gfp_flags);
 	if (status) {
 		pnfs_put_lseg(lseg);
-		lseg = NULL;
+		lseg = ERR_PTR(status);
 	}
 out:
 	return lseg;

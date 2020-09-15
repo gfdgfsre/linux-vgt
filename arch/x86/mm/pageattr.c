@@ -298,11 +298,9 @@ static inline pgprot_t static_protections(pgprot_t prot, unsigned long address,
 
 	/*
 	 * The .rodata section needs to be read-only. Using the pfn
-	 * catches all aliases.  This also includes __ro_after_init,
-	 * so do not enforce until kernel_set_to_readonly is true.
+	 * catches all aliases.
 	 */
-	if (kernel_set_to_readonly &&
-	    within(pfn, __pa_symbol(__start_rodata) >> PAGE_SHIFT,
+	if (within(pfn, __pa_symbol(__start_rodata) >> PAGE_SHIFT,
 		   __pa_symbol(__end_rodata) >> PAGE_SHIFT))
 		pgprot_val(forbidden) |= _PAGE_RW;
 
@@ -662,17 +660,11 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
 
 	spin_lock(&pgd_lock);
 	/*
-	 * Keep preemption disabled after __flush_tlb_all() which expects not be
-	 * preempted during the flush of the local TLB.
-	 */
-	preempt_disable();
-	/*
 	 * Check for races, another CPU might have split this page
 	 * up for us already:
 	 */
 	tmp = _lookup_address_cpa(cpa, address, &level);
 	if (tmp != kpte) {
-		preempt_enable();
 		spin_unlock(&pgd_lock);
 		return 1;
 	}
@@ -702,7 +694,6 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
 		break;
 
 	default:
-		preempt_enable();
 		spin_unlock(&pgd_lock);
 		return 1;
 	}
@@ -750,7 +741,6 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
 	 * going on.
 	 */
 	__flush_tlb_all();
-	preempt_enable();
 	spin_unlock(&pgd_lock);
 
 	return 0;
@@ -763,7 +753,7 @@ static int split_large_page(struct cpa_data *cpa, pte_t *kpte,
 
 	if (!debug_pagealloc_enabled())
 		spin_unlock(&cpa_lock);
-	base = alloc_pages(GFP_KERNEL, 0);
+	base = alloc_pages(GFP_KERNEL | __GFP_NOTRACK, 0);
 	if (!debug_pagealloc_enabled())
 		spin_lock(&cpa_lock);
 	if (!base)
@@ -914,7 +904,7 @@ static void unmap_pud_range(p4d_t *p4d, unsigned long start, unsigned long end)
 
 static int alloc_pte_page(pmd_t *pmd)
 {
-	pte_t *pte = (pte_t *)get_zeroed_page(GFP_KERNEL);
+	pte_t *pte = (pte_t *)get_zeroed_page(GFP_KERNEL | __GFP_NOTRACK);
 	if (!pte)
 		return -1;
 
@@ -924,7 +914,7 @@ static int alloc_pte_page(pmd_t *pmd)
 
 static int alloc_pmd_page(pud_t *pud)
 {
-	pmd_t *pmd = (pmd_t *)get_zeroed_page(GFP_KERNEL);
+	pmd_t *pmd = (pmd_t *)get_zeroed_page(GFP_KERNEL | __GFP_NOTRACK);
 	if (!pmd)
 		return -1;
 
@@ -1014,8 +1004,8 @@ static long populate_pmd(struct cpa_data *cpa,
 
 		pmd = pmd_offset(pud, start);
 
-		set_pmd(pmd, pmd_mkhuge(pfn_pmd(cpa->pfn,
-					canon_pgprot(pmd_pgprot))));
+		set_pmd(pmd, __pmd(cpa->pfn << PAGE_SHIFT | _PAGE_PSE |
+				   massage_pgprot(pmd_pgprot)));
 
 		start	  += PMD_SIZE;
 		cpa->pfn  += PMD_SIZE >> PAGE_SHIFT;
@@ -1087,8 +1077,8 @@ static int populate_pud(struct cpa_data *cpa, unsigned long start, p4d_t *p4d,
 	 * Map everything starting from the Gb boundary, possibly with 1G pages
 	 */
 	while (boot_cpu_has(X86_FEATURE_GBPAGES) && end - start >= PUD_SIZE) {
-		set_pud(pud, pud_mkhuge(pfn_pud(cpa->pfn,
-				   canon_pgprot(pud_pgprot))));
+		set_pud(pud, __pud(cpa->pfn << PAGE_SHIFT | _PAGE_PSE |
+				   massage_pgprot(pud_pgprot)));
 
 		start	  += PUD_SIZE;
 		cpa->pfn  += PUD_SIZE >> PAGE_SHIFT;
@@ -1130,7 +1120,7 @@ static int populate_pgd(struct cpa_data *cpa, unsigned long addr)
 	pgd_entry = cpa->pgd + pgd_index(addr);
 
 	if (pgd_none(*pgd_entry)) {
-		p4d = (p4d_t *)get_zeroed_page(GFP_KERNEL);
+		p4d = (p4d_t *)get_zeroed_page(GFP_KERNEL | __GFP_NOTRACK);
 		if (!p4d)
 			return -1;
 
@@ -1142,7 +1132,7 @@ static int populate_pgd(struct cpa_data *cpa, unsigned long addr)
 	 */
 	p4d = p4d_offset(pgd_entry, addr);
 	if (p4d_none(*p4d)) {
-		pud = (pud_t *)get_zeroed_page(GFP_KERNEL);
+		pud = (pud_t *)get_zeroed_page(GFP_KERNEL | __GFP_NOTRACK);
 		if (!pud)
 			return -1;
 
@@ -2045,13 +2035,9 @@ void __kernel_map_pages(struct page *page, int numpages, int enable)
 
 	/*
 	 * We should perform an IPI and flush all tlbs,
-	 * but that can deadlock->flush only current cpu.
-	 * Preemption needs to be disabled around __flush_tlb_all() due to
-	 * CR3 reload in __native_flush_tlb().
+	 * but that can deadlock->flush only current cpu:
 	 */
-	preempt_disable();
 	__flush_tlb_all();
-	preempt_enable();
 
 	arch_flush_lazy_mmu_mode();
 }
@@ -2085,12 +2071,18 @@ int kernel_map_pages_in_pgd(pgd_t *pgd, u64 pfn, unsigned long address,
 		.pgd = pgd,
 		.numpages = numpages,
 		.mask_set = __pgprot(0),
-		.mask_clr = __pgprot(~page_flags & (_PAGE_NX|_PAGE_RW)),
+		.mask_clr = __pgprot(0),
 		.flags = 0,
 	};
 
 	if (!(__supported_pte_mask & _PAGE_NX))
 		goto out;
+
+	if (!(page_flags & _PAGE_NX))
+		cpa.mask_clr = __pgprot(_PAGE_NX);
+
+	if (!(page_flags & _PAGE_RW))
+		cpa.mask_clr = __pgprot(_PAGE_RW);
 
 	if (!(page_flags & _PAGE_ENC))
 		cpa.mask_clr = pgprot_encrypted(cpa.mask_clr);

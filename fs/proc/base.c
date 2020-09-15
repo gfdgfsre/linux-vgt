@@ -96,12 +96,9 @@
 #ifdef CONFIG_HARDWALL
 #include <asm/hardwall.h>
 #endif
-#include <linux/swait.h>
 #include <trace/events/oom.h>
 #include "internal.h"
 #include "fd.h"
-
-#include "../../lib/kstrtox.h"
 
 /* NOTE:
  *	Implementing inode permission operations in /proc is almost
@@ -264,7 +261,7 @@ static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
 	 * Inherently racy -- command line shares address space
 	 * with code and data.
 	 */
-	rv = access_remote_vm(mm, arg_end - 1, &c, 1, FOLL_ANON);
+	rv = access_remote_vm(mm, arg_end - 1, &c, 1, 0);
 	if (rv <= 0)
 		goto out_free_page;
 
@@ -282,7 +279,7 @@ static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
 			int nr_read;
 
 			_count = min3(count, len, PAGE_SIZE);
-			nr_read = access_remote_vm(mm, p, page, _count, FOLL_ANON);
+			nr_read = access_remote_vm(mm, p, page, _count, 0);
 			if (nr_read < 0)
 				rv = nr_read;
 			if (nr_read <= 0)
@@ -328,7 +325,7 @@ static ssize_t proc_pid_cmdline_read(struct file *file, char __user *buf,
 				bool final;
 
 				_count = min3(count, len, PAGE_SIZE);
-				nr_read = access_remote_vm(mm, p, page, _count, FOLL_ANON);
+				nr_read = access_remote_vm(mm, p, page, _count, 0);
 				if (nr_read < 0)
 					rv = nr_read;
 				if (nr_read <= 0)
@@ -431,20 +428,6 @@ static int proc_pid_stack(struct seq_file *m, struct pid_namespace *ns,
 	unsigned long *entries;
 	int err;
 	int i;
-
-	/*
-	 * The ability to racily run the kernel stack unwinder on a running task
-	 * and then observe the unwinder output is scary; while it is useful for
-	 * debugging kernel issues, it can also allow an attacker to leak kernel
-	 * stack contents.
-	 * Doing this in a manner that is at least safe from races would require
-	 * some work to ensure that the remote task can not be scheduled; and
-	 * even then, this would still expose the unwinder as local attack
-	 * surface.
-	 * Therefore, this interface is restricted to root.
-	 */
-	if (!file_ns_capable(m->file, &init_user_ns, CAP_SYS_ADMIN))
-		return -EACCES;
 
 	entries = kmalloc(MAX_STACK_TRACE_DEPTH * sizeof(*entries), GFP_KERNEL);
 	if (!entries)
@@ -961,7 +944,7 @@ static ssize_t environ_read(struct file *file, char __user *buf,
 		max_len = min_t(size_t, PAGE_SIZE, count);
 		this_len = min(max_len, this_len);
 
-		retval = access_remote_vm(mm, (env_start + src), page, this_len, FOLL_ANON);
+		retval = access_remote_vm(mm, (env_start + src), page, this_len, 0);
 
 		if (retval <= 0) {
 			ret = retval;
@@ -1109,6 +1092,10 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 
 			task_lock(p);
 			if (!p->vfork_done && process_shares_mm(p, mm)) {
+				pr_info("updating oom_score_adj for %d (%s) from %d to %d because it shares mm with %d (%s). Report if this is unexpected.\n",
+						task_pid_nr(p), p->comm,
+						p->signal->oom_score_adj, oom_adj,
+						task_pid_nr(task), task->comm);
 				p->signal->oom_score_adj = oom_adj;
 				if (!legacy && has_capability_noaudit(current, CAP_SYS_RESOURCE))
 					p->signal->oom_score_adj_min = (short)oom_adj;
@@ -1705,12 +1692,6 @@ void task_dump_owner(struct task_struct *task, mode_t mode,
 	kuid_t uid;
 	kgid_t gid;
 
-	if (unlikely(task->flags & PF_KTHREAD)) {
-		*ruid = GLOBAL_ROOT_UID;
-		*rgid = GLOBAL_ROOT_GID;
-		return;
-	}
-
 	/* Default to the tasks effective ownership */
 	rcu_read_lock();
 	cred = __task_cred(task);
@@ -1897,7 +1878,7 @@ bool proc_fill_cache(struct file *file, struct dir_context *ctx,
 
 	child = d_hash_and_lookup(dir, &qname);
 	if (!child) {
-		DECLARE_SWAIT_QUEUE_HEAD_ONSTACK(wq);
+		DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
 		child = d_alloc_parallel(dir, &qname, &wq);
 		if (IS_ERR(child))
 			goto end_instantiate;
@@ -1927,33 +1908,8 @@ end_instantiate:
 static int dname_to_vma_addr(struct dentry *dentry,
 			     unsigned long *start, unsigned long *end)
 {
-	const char *str = dentry->d_name.name;
-	unsigned long long sval, eval;
-	unsigned int len;
-
-	len = _parse_integer(str, 16, &sval);
-	if (len & KSTRTOX_OVERFLOW)
+	if (sscanf(dentry->d_name.name, "%lx-%lx", start, end) != 2)
 		return -EINVAL;
-	if (sval != (unsigned long)sval)
-		return -EINVAL;
-	str += len;
-
-	if (*str != '-')
-		return -EINVAL;
-	str++;
-
-	len = _parse_integer(str, 16, &eval);
-	if (len & KSTRTOX_OVERFLOW)
-		return -EINVAL;
-	if (eval != (unsigned long)eval)
-		return -EINVAL;
-	str += len;
-
-	if (*str != '\0')
-		return -EINVAL;
-
-	*start = sval;
-	*end = eval;
 
 	return 0;
 }
@@ -2468,7 +2424,7 @@ out:
 	return -ENOENT;
 }
 
-static struct dentry *proc_pident_lookup(struct inode *dir,
+static struct dentry *proc_pident_lookup(struct inode *dir, 
 					 struct dentry *dentry,
 					 const struct pid_entry *ents,
 					 unsigned int nents)
@@ -2615,7 +2571,7 @@ static const struct pid_entry attr_dir_stuff[] = {
 
 static int proc_attr_dir_readdir(struct file *file, struct dir_context *ctx)
 {
-	return proc_pident_readdir(file, ctx,
+	return proc_pident_readdir(file, ctx, 
 				   attr_dir_stuff, ARRAY_SIZE(attr_dir_stuff));
 }
 

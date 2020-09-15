@@ -21,7 +21,6 @@
 #include <linux/err.h>
 #include <linux/cma.h>
 #include <linux/scatterlist.h>
-#include <linux/highmem.h>
 
 #include "ion.h"
 
@@ -40,33 +39,11 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 	struct ion_cma_heap *cma_heap = to_cma_heap(heap);
 	struct sg_table *table;
 	struct page *pages;
-	unsigned long size = PAGE_ALIGN(len);
-	unsigned long nr_pages = size >> PAGE_SHIFT;
-	unsigned long align = get_order(size);
 	int ret;
 
-	if (align > CONFIG_CMA_ALIGNMENT)
-		align = CONFIG_CMA_ALIGNMENT;
-
-	pages = cma_alloc(cma_heap->cma, nr_pages, align, GFP_KERNEL);
+	pages = cma_alloc(cma_heap->cma, len, 0, GFP_KERNEL);
 	if (!pages)
 		return -ENOMEM;
-
-	if (PageHighMem(pages)) {
-		unsigned long nr_clear_pages = nr_pages;
-		struct page *page = pages;
-
-		while (nr_clear_pages > 0) {
-			void *vaddr = kmap_atomic(page);
-
-			memset(vaddr, 0, PAGE_SIZE);
-			kunmap_atomic(vaddr);
-			page++;
-			nr_clear_pages--;
-		}
-	} else {
-		memset(page_address(pages), 0, size);
-	}
 
 	table = kmalloc(sizeof(*table), GFP_KERNEL);
 	if (!table)
@@ -76,7 +53,7 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 	if (ret)
 		goto free_mem;
 
-	sg_set_page(table->sgl, pages, size, 0);
+	sg_set_page(table->sgl, pages, len, 0);
 
 	buffer->priv_virt = pages;
 	buffer->sg_table = table;
@@ -85,7 +62,7 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 free_mem:
 	kfree(table);
 err:
-	cma_release(cma_heap->cma, pages, nr_pages);
+	cma_release(cma_heap->cma, pages, buffer->size);
 	return -ENOMEM;
 }
 
@@ -93,10 +70,9 @@ static void ion_cma_free(struct ion_buffer *buffer)
 {
 	struct ion_cma_heap *cma_heap = to_cma_heap(buffer->heap);
 	struct page *pages = buffer->priv_virt;
-	unsigned long nr_pages = PAGE_ALIGN(buffer->size) >> PAGE_SHIFT;
 
 	/* release memory */
-	cma_release(cma_heap->cma, pages, nr_pages);
+	cma_release(cma_heap->cma, pages, buffer->size);
 	/* release sg table */
 	sg_free_table(buffer->sg_table);
 	kfree(buffer->sg_table);

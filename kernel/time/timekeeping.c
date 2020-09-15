@@ -41,9 +41,7 @@
 static struct {
 	seqcount_t		seq;
 	struct timekeeper	timekeeper;
-} tk_core ____cacheline_aligned = {
-	.seq = SEQCNT_ZERO(tk_core.seq),
-};
+} tk_core ____cacheline_aligned;
 
 static DEFINE_RAW_SPINLOCK(timekeeper_lock);
 static struct timekeeper shadow_timekeeper;
@@ -2328,10 +2326,8 @@ EXPORT_SYMBOL(hardpps);
  */
 void xtime_update(unsigned long ticks)
 {
-	raw_spin_lock(&jiffies_lock);
-	write_seqcount_begin(&jiffies_seq);
+	write_seqlock(&jiffies_lock);
 	do_timer(ticks);
-	write_seqcount_end(&jiffies_seq);
-	raw_spin_unlock(&jiffies_lock);
+	write_sequnlock(&jiffies_lock);
 	update_wall_time();
 }

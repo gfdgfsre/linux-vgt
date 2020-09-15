@@ -77,20 +77,8 @@ gnet_stats_start_copy_compat(struct sk_buff *skb, int type, int tc_stats_type,
 		d->lock = lock;
 		spin_lock_bh(lock);
 	}
-	if (d->tail) {
-		int ret = gnet_stats_copy(d, type, NULL, 0, padattr);
-
-		/* The initial attribute added in gnet_stats_copy() may be
-		 * preceded by a padding attribute, in which case d->tail will
-		 * end up pointing at the padding instead of the real attribute.
-		 * Fix this so gnet_stats_finish_copy() adjusts the length of
-		 * the right attribute.
-		 */
-		if (ret == 0 && d->tail->nla_type == padattr)
-			d->tail = (struct nlattr *)((char *)d->tail +
-						    NLA_ALIGN(d->tail->nla_len));
-		return ret;
-	}
+	if (d->tail)
+		return gnet_stats_copy(d, type, NULL, 0, padattr);
 
 	return 0;
 }
@@ -142,7 +130,7 @@ __gnet_stats_copy_basic_cpu(struct gnet_stats_basic_packed *bstats,
 }
 
 void
-__gnet_stats_copy_basic(net_seqlock_t *running,
+__gnet_stats_copy_basic(const seqcount_t *running,
 			struct gnet_stats_basic_packed *bstats,
 			struct gnet_stats_basic_cpu __percpu *cpu,
 			struct gnet_stats_basic_packed *b)
@@ -155,10 +143,10 @@ __gnet_stats_copy_basic(net_seqlock_t *running,
 	}
 	do {
 		if (running)
-			seq = net_seq_begin(running);
+			seq = read_seqcount_begin(running);
 		bstats->bytes = b->bytes;
 		bstats->packets = b->packets;
-	} while (running && net_seq_retry(running, seq));
+	} while (running && read_seqcount_retry(running, seq));
 }
 EXPORT_SYMBOL(__gnet_stats_copy_basic);
 
@@ -176,7 +164,7 @@ EXPORT_SYMBOL(__gnet_stats_copy_basic);
  * if the room in the socket buffer was not sufficient.
  */
 int
-gnet_stats_copy_basic(net_seqlock_t *running,
+gnet_stats_copy_basic(const seqcount_t *running,
 		      struct gnet_dump *d,
 		      struct gnet_stats_basic_cpu __percpu *cpu,
 		      struct gnet_stats_basic_packed *b)

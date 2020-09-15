@@ -116,20 +116,6 @@ void invalidate_bdev(struct block_device *bdev)
 }
 EXPORT_SYMBOL(invalidate_bdev);
 
-static void set_init_blocksize(struct block_device *bdev)
-{
-	unsigned bsize = bdev_logical_block_size(bdev);
-	loff_t size = i_size_read(bdev->bd_inode);
-
-	while (bsize < PAGE_SIZE) {
-		if (size & bsize)
-			break;
-		bsize <<= 1;
-	}
-	bdev->bd_block_size = bsize;
-	bdev->bd_inode->i_blkbits = blksize_bits(bsize);
-}
-
 int set_blocksize(struct block_device *bdev, int size)
 {
 	/* Size must be a power of two, and between 512 and PAGE_SIZE */
@@ -245,7 +231,7 @@ __blkdev_direct_IO_simple(struct kiocb *iocb, struct iov_iter *iter,
 
 	ret = bio_iov_iter_get_pages(&bio, iter);
 	if (unlikely(ret))
-		goto out;
+		return ret;
 	ret = bio.bi_iter.bi_size;
 
 	if (iov_iter_rw(iter) == READ) {
@@ -274,12 +260,11 @@ __blkdev_direct_IO_simple(struct kiocb *iocb, struct iov_iter *iter,
 		put_page(bvec->bv_page);
 	}
 
-	if (unlikely(bio.bi_status))
-		ret = blk_status_to_errno(bio.bi_status);
-
-out:
 	if (vecs != inline_vecs)
 		kfree(vecs);
+
+	if (unlikely(bio.bi_status))
+		ret = blk_status_to_errno(bio.bi_status);
 
 	bio_uninit(&bio);
 
@@ -306,10 +291,10 @@ static void blkdev_bio_end_io(struct bio *bio)
 	struct blkdev_dio *dio = bio->bi_private;
 	bool should_dirty = dio->should_dirty;
 
-	if (bio->bi_status && !dio->bio.bi_status)
-		dio->bio.bi_status = bio->bi_status;
-
-	if (!dio->multi_bio || atomic_dec_and_test(&dio->ref)) {
+	if (dio->multi_bio && !atomic_dec_and_test(&dio->ref)) {
+		if (bio->bi_status && !dio->bio.bi_status)
+			dio->bio.bi_status = bio->bi_status;
+	} else {
 		if (!dio->is_sync) {
 			struct kiocb *iocb = dio->iocb;
 			ssize_t ret;
@@ -1407,9 +1392,18 @@ EXPORT_SYMBOL(check_disk_change);
 
 void bd_set_size(struct block_device *bdev, loff_t size)
 {
+	unsigned bsize = bdev_logical_block_size(bdev);
+
 	inode_lock(bdev->bd_inode);
 	i_size_write(bdev->bd_inode, size);
 	inode_unlock(bdev->bd_inode);
+	while (bsize < PAGE_SIZE) {
+		if (size & bsize)
+			break;
+		bsize <<= 1;
+	}
+	bdev->bd_block_size = bsize;
+	bdev->bd_inode->i_blkbits = blksize_bits(bsize);
 }
 EXPORT_SYMBOL(bd_set_size);
 
@@ -1439,8 +1433,10 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 	 */
 	if (!for_part) {
 		ret = devcgroup_inode_permission(bdev->bd_inode, perm);
-		if (ret != 0)
+		if (ret != 0) {
+			bdput(bdev);
 			return ret;
+		}
 	}
 
  restart:
@@ -1485,10 +1481,8 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 				}
 			}
 
-			if (!ret) {
+			if (!ret)
 				bd_set_size(bdev,(loff_t)get_capacity(disk)<<9);
-				set_init_blocksize(bdev);
-			}
 
 			/*
 			 * If the device is invalidated, rescan partition
@@ -1513,10 +1507,8 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 				goto out_clear;
 			BUG_ON(for_part);
 			ret = __blkdev_get(whole, mode, 1);
-			if (ret) {
-				bdput(whole);
+			if (ret)
 				goto out_clear;
-			}
 			bdev->bd_contains = whole;
 			bdev->bd_part = disk_get_part(disk, partno);
 			if (!(disk->flags & GENHD_FL_UP) ||
@@ -1525,7 +1517,6 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 				goto out_clear;
 			}
 			bd_set_size(bdev, (loff_t)bdev->bd_part->nr_sects << 9);
-			set_init_blocksize(bdev);
 		}
 
 		if (bdev->bd_bdi == &noop_backing_dev_info)
@@ -1570,6 +1561,7 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 	put_disk(disk);
 	module_put(owner);
  out:
+	bdput(bdev);
 
 	return ret;
 }
@@ -1654,9 +1646,6 @@ int blkdev_get(struct block_device *bdev, fmode_t mode, void *holder)
 		mutex_unlock(&bdev->bd_mutex);
 		bdput(whole);
 	}
-
-	if (res)
-		bdput(bdev);
 
 	return res;
 }

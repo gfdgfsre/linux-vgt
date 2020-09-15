@@ -256,44 +256,6 @@ spu_ablkcipher_tx_sg_create(struct brcm_message *mssg,
 	return 0;
 }
 
-static int mailbox_send_message(struct brcm_message *mssg, u32 flags,
-				u8 chan_idx)
-{
-	int err;
-	int retry_cnt = 0;
-	struct device *dev = &(iproc_priv.pdev->dev);
-
-	err = mbox_send_message(iproc_priv.mbox[chan_idx], mssg);
-	if (flags & CRYPTO_TFM_REQ_MAY_SLEEP) {
-		while ((err == -ENOBUFS) && (retry_cnt < SPU_MB_RETRY_MAX)) {
-			/*
-			 * Mailbox queue is full. Since MAY_SLEEP is set, assume
-			 * not in atomic context and we can wait and try again.
-			 */
-			retry_cnt++;
-			usleep_range(MBOX_SLEEP_MIN, MBOX_SLEEP_MAX);
-			err = mbox_send_message(iproc_priv.mbox[chan_idx],
-						mssg);
-			atomic_inc(&iproc_priv.mb_no_spc);
-		}
-	}
-	if (err < 0) {
-		atomic_inc(&iproc_priv.mb_send_fail);
-		return err;
-	}
-
-	/* Check error returned by mailbox controller */
-	err = mssg->error;
-	if (unlikely(err < 0)) {
-		dev_err(dev, "message error %d", err);
-		/* Signal txdone for mailbox channel */
-	}
-
-	/* Signal txdone for mailbox channel */
-	mbox_client_txdone(iproc_priv.mbox[chan_idx], err);
-	return err;
-}
-
 /**
  * handle_ablkcipher_req() - Submit as much of a block cipher request as fits in
  * a single SPU request message, starting at the current position in the request
@@ -331,6 +293,7 @@ static int handle_ablkcipher_req(struct iproc_reqctx_s *rctx)
 	u32 pad_len;		/* total length of all padding */
 	bool update_key = false;
 	struct brcm_message *mssg;	/* mailbox message */
+	int retry_cnt = 0;
 
 	/* number of entries in src and dst sg in mailbox message. */
 	u8 rx_frag_num = 2;	/* response header and STATUS */
@@ -499,9 +462,24 @@ static int handle_ablkcipher_req(struct iproc_reqctx_s *rctx)
 	if (err)
 		return err;
 
-	err = mailbox_send_message(mssg, req->base.flags, rctx->chan_idx);
-	if (unlikely(err < 0))
+	err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx], mssg);
+	if (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) {
+		while ((err == -ENOBUFS) && (retry_cnt < SPU_MB_RETRY_MAX)) {
+			/*
+			 * Mailbox queue is full. Since MAY_SLEEP is set, assume
+			 * not in atomic context and we can wait and try again.
+			 */
+			retry_cnt++;
+			usleep_range(MBOX_SLEEP_MIN, MBOX_SLEEP_MAX);
+			err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx],
+						mssg);
+			atomic_inc(&iproc_priv.mb_no_spc);
+		}
+	}
+	if (unlikely(err < 0)) {
+		atomic_inc(&iproc_priv.mb_send_fail);
 		return err;
+	}
 
 	return -EINPROGRESS;
 }
@@ -718,7 +696,7 @@ static int handle_ahash_req(struct iproc_reqctx_s *rctx)
 	 */
 	unsigned int new_data_len;
 
-	unsigned int __maybe_unused chunk_start = 0;
+	unsigned int chunk_start = 0;
 	u32 db_size;	 /* Length of data field, incl gcm and hash padding */
 	int pad_len = 0; /* total pad len, including gcm, hash, stat padding */
 	u32 data_pad_len = 0;	/* length of GCM/CCM padding */
@@ -732,6 +710,7 @@ static int handle_ahash_req(struct iproc_reqctx_s *rctx)
 	u32 spu_hdr_len;
 	unsigned int digestsize;
 	u16 rem = 0;
+	int retry_cnt = 0;
 
 	/*
 	 * number of entries in src and dst sg. Always includes SPU msg header.
@@ -925,10 +904,24 @@ static int handle_ahash_req(struct iproc_reqctx_s *rctx)
 	if (err)
 		return err;
 
-	err = mailbox_send_message(mssg, req->base.flags, rctx->chan_idx);
-	if (unlikely(err < 0))
+	err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx], mssg);
+	if (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) {
+		while ((err == -ENOBUFS) && (retry_cnt < SPU_MB_RETRY_MAX)) {
+			/*
+			 * Mailbox queue is full. Since MAY_SLEEP is set, assume
+			 * not in atomic context and we can wait and try again.
+			 */
+			retry_cnt++;
+			usleep_range(MBOX_SLEEP_MIN, MBOX_SLEEP_MAX);
+			err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx],
+						mssg);
+			atomic_inc(&iproc_priv.mb_no_spc);
+		}
+	}
+	if (err < 0) {
+		atomic_inc(&iproc_priv.mb_send_fail);
 		return err;
-
+	}
 	return -EINPROGRESS;
 }
 
@@ -1327,6 +1320,7 @@ static int handle_aead_req(struct iproc_reqctx_s *rctx)
 	int assoc_nents = 0;
 	bool incl_icv = false;
 	unsigned int digestsize = ctx->digestsize;
+	int retry_cnt = 0;
 
 	/* number of entries in src and dst sg. Always includes SPU msg header.
 	 */
@@ -1564,9 +1558,24 @@ static int handle_aead_req(struct iproc_reqctx_s *rctx)
 	if (err)
 		return err;
 
-	err = mailbox_send_message(mssg, req->base.flags, rctx->chan_idx);
-	if (unlikely(err < 0))
+	err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx], mssg);
+	if (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) {
+		while ((err == -ENOBUFS) && (retry_cnt < SPU_MB_RETRY_MAX)) {
+			/*
+			 * Mailbox queue is full. Since MAY_SLEEP is set, assume
+			 * not in atomic context and we can wait and try again.
+			 */
+			retry_cnt++;
+			usleep_range(MBOX_SLEEP_MIN, MBOX_SLEEP_MAX);
+			err = mbox_send_message(iproc_priv.mbox[rctx->chan_idx],
+						mssg);
+			atomic_inc(&iproc_priv.mb_no_spc);
+		}
+	}
+	if (err < 0) {
+		atomic_inc(&iproc_priv.mb_send_fail);
 		return err;
+	}
 
 	return -EINPROGRESS;
 }
@@ -1676,6 +1685,8 @@ static void spu_rx_callback(struct mbox_client *cl, void *msg)
 	struct spu_hw *spu = &iproc_priv.spu;
 	struct brcm_message *mssg = msg;
 	struct iproc_reqctx_s *rctx;
+	struct iproc_ctx_s *ctx;
+	struct crypto_async_request *areq;
 	int err = 0;
 
 	rctx = mssg->ctx;
@@ -1685,6 +1696,8 @@ static void spu_rx_callback(struct mbox_client *cl, void *msg)
 		err = -EFAULT;
 		goto cb_finish;
 	}
+	areq = rctx->parent;
+	ctx = rctx->ctx;
 
 	/* process the SPU status */
 	err = spu->spu_status_process(rctx->msg_buf.rx_stat);
@@ -2842,28 +2855,44 @@ static int aead_authenc_setkey(struct crypto_aead *cipher,
 	struct spu_hw *spu = &iproc_priv.spu;
 	struct iproc_ctx_s *ctx = crypto_aead_ctx(cipher);
 	struct crypto_tfm *tfm = crypto_aead_tfm(cipher);
-	struct crypto_authenc_keys keys;
-	int ret;
+	struct rtattr *rta = (void *)key;
+	struct crypto_authenc_key_param *param;
+	const u8 *origkey = key;
+	const unsigned int origkeylen = keylen;
+
+	int ret = 0;
 
 	flow_log("%s() aead:%p key:%p keylen:%u\n", __func__, cipher, key,
 		 keylen);
 	flow_dump("  key: ", key, keylen);
 
-	ret = crypto_authenc_extractkeys(&keys, key, keylen);
-	if (ret)
+	if (!RTA_OK(rta, keylen))
+		goto badkey;
+	if (rta->rta_type != CRYPTO_AUTHENC_KEYA_PARAM)
+		goto badkey;
+	if (RTA_PAYLOAD(rta) < sizeof(*param))
 		goto badkey;
 
-	if (keys.enckeylen > MAX_KEY_SIZE ||
-	    keys.authkeylen > MAX_KEY_SIZE)
+	param = RTA_DATA(rta);
+	ctx->enckeylen = be32_to_cpu(param->enckeylen);
+
+	key += RTA_ALIGN(rta->rta_len);
+	keylen -= RTA_ALIGN(rta->rta_len);
+
+	if (keylen < ctx->enckeylen)
+		goto badkey;
+	if (ctx->enckeylen > MAX_KEY_SIZE)
 		goto badkey;
 
-	ctx->enckeylen = keys.enckeylen;
-	ctx->authkeylen = keys.authkeylen;
+	ctx->authkeylen = keylen - ctx->enckeylen;
 
-	memcpy(ctx->enckey, keys.enckey, keys.enckeylen);
+	if (ctx->authkeylen > MAX_KEY_SIZE)
+		goto badkey;
+
+	memcpy(ctx->enckey, key + ctx->authkeylen, ctx->enckeylen);
 	/* May end up padding auth key. So make sure it's zeroed. */
 	memset(ctx->authkey, 0, sizeof(ctx->authkey));
-	memcpy(ctx->authkey, keys.authkey, keys.authkeylen);
+	memcpy(ctx->authkey, key, ctx->authkeylen);
 
 	switch (ctx->alg->cipher_info.alg) {
 	case CIPHER_ALG_DES:
@@ -2871,7 +2900,7 @@ static int aead_authenc_setkey(struct crypto_aead *cipher,
 			u32 tmp[DES_EXPKEY_WORDS];
 			u32 flags = CRYPTO_TFM_RES_WEAK_KEY;
 
-			if (des_ekey(tmp, keys.enckey) == 0) {
+			if (des_ekey(tmp, key) == 0) {
 				if (crypto_aead_get_flags(cipher) &
 				    CRYPTO_TFM_REQ_WEAK_KEY) {
 					crypto_aead_set_flags(cipher, flags);
@@ -2886,7 +2915,7 @@ static int aead_authenc_setkey(struct crypto_aead *cipher,
 		break;
 	case CIPHER_ALG_3DES:
 		if (ctx->enckeylen == (DES_KEY_SIZE * 3)) {
-			const u32 *K = (const u32 *)keys.enckey;
+			const u32 *K = (const u32 *)key;
 			u32 flags = CRYPTO_TFM_RES_BAD_KEY_SCHED;
 
 			if (!((K[0] ^ K[2]) | (K[1] ^ K[3])) ||
@@ -2937,7 +2966,9 @@ static int aead_authenc_setkey(struct crypto_aead *cipher,
 		ctx->fallback_cipher->base.crt_flags &= ~CRYPTO_TFM_REQ_MASK;
 		ctx->fallback_cipher->base.crt_flags |=
 		    tfm->crt_flags & CRYPTO_TFM_REQ_MASK;
-		ret = crypto_aead_setkey(ctx->fallback_cipher, key, keylen);
+		ret =
+		    crypto_aead_setkey(ctx->fallback_cipher, origkey,
+				       origkeylen);
 		if (ret) {
 			flow_log("  fallback setkey() returned:%d\n", ret);
 			tfm->crt_flags &= ~CRYPTO_TFM_RES_MASK;
@@ -4506,7 +4537,7 @@ static int spu_mb_init(struct device *dev)
 	mcl->dev = dev;
 	mcl->tx_block = false;
 	mcl->tx_tout = 0;
-	mcl->knows_txdone = true;
+	mcl->knows_txdone = false;
 	mcl->rx_callback = spu_rx_callback;
 	mcl->tx_done = NULL;
 
@@ -4633,16 +4664,12 @@ static int spu_register_ahash(struct iproc_alg_s *driver_alg)
 	hash->halg.statesize = sizeof(struct spu_hash_export_s);
 
 	if (driver_alg->auth_info.mode != HASH_MODE_HMAC) {
+		hash->setkey = ahash_setkey;
 		hash->init = ahash_init;
 		hash->update = ahash_update;
 		hash->final = ahash_final;
 		hash->finup = ahash_finup;
 		hash->digest = ahash_digest;
-		if ((driver_alg->auth_info.alg == HASH_ALG_AES) &&
-		    ((driver_alg->auth_info.mode == HASH_MODE_XCBC) ||
-		    (driver_alg->auth_info.mode == HASH_MODE_CMAC))) {
-			hash->setkey = ahash_setkey;
-		}
 	} else {
 		hash->setkey = ahash_hmac_setkey;
 		hash->init = ahash_hmac_init;

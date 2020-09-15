@@ -1,0 +1,1 @@
+cmd_drivers/soc/sunxi-scr/scr.ko := /aosp/buildroot/buildroot-2020.02.4/output/host/bin/aarch64-buildroot-linux-musl-ld -EL -r  -maarch64linux -T ./scripts/module-common.lds --build-id  -o drivers/soc/sunxi-scr/scr.ko drivers/soc/sunxi-scr/scr.o drivers/soc/sunxi-scr/scr.mod.o ;  true

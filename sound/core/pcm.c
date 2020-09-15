@@ -25,11 +25,9 @@
 #include <linux/time.h>
 #include <linux/mutex.h>
 #include <linux/device.h>
-#include <linux/nospec.h>
 #include <sound/core.h>
 #include <sound/minors.h>
 #include <sound/pcm.h>
-#include <sound/timer.h>
 #include <sound/control.h>
 #include <sound/info.h>
 
@@ -130,7 +128,6 @@ static int snd_pcm_control_ioctl(struct snd_card *card,
 				return -EFAULT;
 			if (stream < 0 || stream > 1)
 				return -EINVAL;
-			stream = array_index_nospec(stream, 2);
 			if (get_user(subdevice, &info->subdevice))
 				return -EFAULT;
 			mutex_lock(&register_mutex);
@@ -156,9 +153,7 @@ static int snd_pcm_control_ioctl(struct snd_card *card,
 				err = -ENXIO;
 				goto _error;
 			}
-			mutex_lock(&pcm->open_mutex);
 			err = snd_pcm_info_user(substream, info);
-			mutex_unlock(&pcm->open_mutex);
 		_error:
 			mutex_unlock(&register_mutex);
 			return err;
@@ -1053,13 +1048,8 @@ void snd_pcm_detach_substream(struct snd_pcm_substream *substream)
 	snd_free_pages((void*)runtime->control,
 		       PAGE_ALIGN(sizeof(struct snd_pcm_mmap_control)));
 	kfree(runtime->hw_constraints.rules);
-	/* Avoid concurrent access to runtime via PCM timer interface */
-	if (substream->timer)
-		spin_lock_irq(&substream->timer->lock);
-	substream->runtime = NULL;
-	if (substream->timer)
-		spin_unlock_irq(&substream->timer->lock);
 	kfree(runtime);
+	substream->runtime = NULL;
 	put_pid(substream->pid);
 	substream->pid = NULL;
 	substream->pstr->substream_opened--;

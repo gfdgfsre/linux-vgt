@@ -12,7 +12,6 @@
 #include <linux/fs.h>
 #include <linux/atomic.h>
 #include <linux/page-flags.h>
-#include <linux/locallock.h>
 #include <asm/page.h>
 
 struct notifier_block;
@@ -156,9 +155,9 @@ struct swap_extent {
 /*
  * Max bad pages in the new format..
  */
+#define __swapoffset(x) ((unsigned long)&((union swap_header *)0)->x)
 #define MAX_SWAP_BADPAGES \
-	((offsetof(union swap_header, magic.magic) - \
-	  offsetof(union swap_header, info.badpages)) / sizeof(int))
+	((__swapoffset(magic.magic) - __swapoffset(info.badpages)) / sizeof(int))
 
 enum {
 	SWP_USED	= (1 << 0),	/* is slot in swap_info[] used? */
@@ -232,6 +231,7 @@ struct swap_info_struct {
 	unsigned long	flags;		/* SWP_USED etc: see above */
 	signed short	prio;		/* swap priority of this type */
 	struct plist_node list;		/* entry in swap_active_head */
+	struct plist_node avail_lists[MAX_NUMNODES];/* entry in swap_avail_heads */
 	signed char	type;		/* strange name for an index */
 	unsigned int	max;		/* extent of the swap_map */
 	unsigned char *swap_map;	/* vmalloc'ed array of usage counts */
@@ -272,16 +272,6 @@ struct swap_info_struct {
 					 */
 	struct work_struct discard_work; /* discard worker */
 	struct swap_cluster_list discard_clusters; /* discard clusters list */
-	struct plist_node avail_lists[0]; /*
-					   * entries in swap_avail_heads, one
-					   * entry per node.
-					   * Must be last as the number of the
-					   * array is nr_node_ids, which is not
-					   * a fixed value so have to allocate
-					   * dynamically.
-					   * And it has to be an array so that
-					   * plist_for_each_* can work.
-					   */
 };
 
 #ifdef CONFIG_64BIT
@@ -307,8 +297,7 @@ struct vma_swap_readahead {
 void *workingset_eviction(struct address_space *mapping, struct page *page);
 bool workingset_refault(void *shadow);
 void workingset_activation(struct page *page);
-void __workingset_update_node(struct radix_tree_node *node, void *private);
-DECLARE_LOCAL_IRQ_LOCK(shadow_nodes_lock);
+void workingset_update_node(struct radix_tree_node *node, void *private);
 
 /* linux/mm/page_alloc.c */
 extern unsigned long totalram_pages;
@@ -321,7 +310,6 @@ extern unsigned long nr_free_pagecache_pages(void);
 
 
 /* linux/mm/swap.c */
-DECLARE_LOCAL_IRQ_LOCK(swapvec_lock);
 extern void lru_cache_add(struct page *);
 extern void lru_cache_add_anon(struct page *page);
 extern void lru_cache_add_file(struct page *page);
@@ -366,8 +354,14 @@ extern unsigned long vm_total_pages;
 extern int node_reclaim_mode;
 extern int sysctl_min_unmapped_ratio;
 extern int sysctl_min_slab_ratio;
+extern int node_reclaim(struct pglist_data *, gfp_t, unsigned int);
 #else
 #define node_reclaim_mode 0
+static inline int node_reclaim(struct pglist_data *pgdat, gfp_t mask,
+				unsigned int order)
+{
+	return 0;
+}
 #endif
 
 extern int page_evictable(struct page *page);

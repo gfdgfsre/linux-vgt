@@ -185,7 +185,6 @@ static __always_inline void pagefault_disabled_dec(void)
  */
 static inline void pagefault_disable(void)
 {
-	migrate_disable();
 	pagefault_disabled_inc();
 	/*
 	 * make sure to have issued the store before a pagefault
@@ -202,7 +201,6 @@ static inline void pagefault_enable(void)
 	 */
 	barrier();
 	pagefault_disabled_dec();
-	migrate_enable();
 }
 
 /*
@@ -269,7 +267,7 @@ extern long strncpy_from_unsafe(char *dst, const void *unsafe_addr, long count);
 	probe_kernel_read(&retval, addr, sizeof(retval))
 
 #ifndef user_access_begin
-#define user_access_begin(type, ptr, len) access_ok(type, ptr, len)
+#define user_access_begin() do { } while (0)
 #define user_access_end() do { } while (0)
 #define unsafe_get_user(x, ptr, err) do { if (unlikely(__get_user(x, ptr))) goto err; } while (0)
 #define unsafe_put_user(x, ptr, err) do { if (unlikely(__put_user(x, ptr))) goto err; } while (0)

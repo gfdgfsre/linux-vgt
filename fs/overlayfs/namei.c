@@ -56,15 +56,6 @@ static int ovl_check_redirect(struct dentry *dentry, struct ovl_lookup_data *d,
 			if (s == next)
 				goto invalid;
 		}
-		/*
-		 * One of the ancestor path elements in an absolute path
-		 * lookup in ovl_lookup_layer() could have been opaque and
-		 * that will stop further lookup in lower layers (d->stop=true)
-		 * But we have found an absolute redirect in decendant path
-		 * element and that should force continue lookup in lower
-		 * layers (reset d->stop).
-		 */
-		d->stop = false;
 	} else {
 		if (strchr(buf, '/') != NULL)
 			goto invalid;
@@ -368,10 +359,8 @@ int ovl_verify_origin(struct dentry *dentry, struct vfsmount *mnt,
 
 	fh = ovl_encode_fh(origin, is_upper);
 	err = PTR_ERR(fh);
-	if (IS_ERR(fh)) {
-		fh = NULL;
+	if (IS_ERR(fh))
 		goto fail;
-	}
 
 	err = ovl_verify_origin_fh(dentry, fh);
 	if (set && err == -ENODATA)
@@ -448,7 +437,7 @@ int ovl_verify_index(struct dentry *index, struct path *lowerstack,
 
 	/* Check if index is orphan and don't warn before cleaning it */
 	if (d_inode(index)->i_nlink == 1 &&
-	    ovl_get_nlink(origin.dentry, index, 0) == 0)
+	    ovl_get_nlink(index, origin.dentry, 0) == 0)
 		err = -ENOENT;
 
 	dput(origin.dentry);
@@ -521,7 +510,7 @@ static struct dentry *ovl_lookup_index(struct dentry *dentry,
 			index = NULL;
 			goto out;
 		}
-		pr_warn_ratelimited("overlayfs: failed inode index lookup (ino=%lu, key=%.*s, err=%i);\n"
+		pr_warn_ratelimited("overlayfs: failed inode index lookup (ino=%lu, key=%*s, err=%i);\n"
 				    "overlayfs: mount with '-o index=off' to disable inodes index.\n",
 				    d_inode(origin)->i_ino, name.len, name.name,
 				    err);
@@ -641,7 +630,7 @@ struct dentry *ovl_lookup(struct inode *dir, struct dentry *dentry,
 			err = ovl_check_origin(upperdentry, roe->lowerstack,
 					       roe->numlower, &stack, &ctr);
 			if (err)
-				goto out_put_upper;
+				goto out;
 		}
 
 		if (d.redirect) {

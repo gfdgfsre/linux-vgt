@@ -140,7 +140,6 @@
 #define WACOM_HID_WD_OFFSETBOTTOM       (WACOM_HID_UP_WACOMDIGITIZER | 0x0d33)
 #define WACOM_HID_WD_DATAMODE           (WACOM_HID_UP_WACOMDIGITIZER | 0x1002)
 #define WACOM_HID_WD_DIGITIZERINFO      (WACOM_HID_UP_WACOMDIGITIZER | 0x1013)
-#define WACOM_HID_WD_TOUCH_RING_SETTING (WACOM_HID_UP_WACOMDIGITIZER | 0x1032)
 #define WACOM_HID_UP_G9                 0xff090000
 #define WACOM_HID_G9_PEN                (WACOM_HID_UP_G9 | 0x02)
 #define WACOM_HID_G9_TOUCHSCREEN        (WACOM_HID_UP_G9 | 0x11)
@@ -167,7 +166,6 @@
 				 ((f)->physical == HID_DG_PEN) || \
 				 ((f)->application == HID_DG_PEN) || \
 				 ((f)->application == HID_DG_DIGITIZER) || \
-				 ((f)->application == WACOM_HID_WD_PEN) || \
 				 ((f)->application == WACOM_HID_WD_DIGITIZER) || \
 				 ((f)->application == WACOM_HID_G9_PEN) || \
 				 ((f)->application == WACOM_HID_G11_PEN))

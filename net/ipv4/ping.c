@@ -775,10 +775,8 @@ static int ping_v4_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	ipc.addr = faddr = daddr;
 
 	if (ipc.opt && ipc.opt->opt.srr) {
-		if (!daddr) {
-			err = -EINVAL;
-			goto out_free;
-		}
+		if (!daddr)
+			return -EINVAL;
 		faddr = ipc.opt->opt.faddr;
 	}
 	tos = get_rttos(&ipc, inet);
@@ -800,9 +798,6 @@ static int ping_v4_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 			   RT_SCOPE_UNIVERSE, sk->sk_protocol,
 			   inet_sk_flowi_flags(sk), faddr, saddr, 0, 0,
 			   sk->sk_uid);
-
-	fl4.fl4_icmp_type = user_icmph.type;
-	fl4.fl4_icmp_code = user_icmph.code;
 
 	security_sk_classify_flow(sk, flowi4_to_flowi(&fl4));
 	rt = ip_route_output_flow(net, &fl4, sk);
@@ -847,7 +842,6 @@ back_from_confirm:
 
 out:
 	ip_rt_put(rt);
-out_free:
 	if (free)
 		kfree(ipc.opt);
 	if (!err) {

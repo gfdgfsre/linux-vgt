@@ -351,7 +351,6 @@ static void __show_regs(const struct pt_regs *regs)
 void show_regs(struct pt_regs *regs)
 {
 	__show_regs((struct pt_regs *)regs);
-	dump_stack();
 }
 
 void show_registers(struct pt_regs *regs)
@@ -1193,12 +1192,12 @@ static void mt_ase_fp_affinity(void)
 		 * restricted the allowed set to exclude any CPUs with FPUs,
 		 * we'll skip the procedure.
 		 */
-		if (cpumask_intersects(&current->cpus_mask, &mt_fpu_cpumask)) {
+		if (cpumask_intersects(&current->cpus_allowed, &mt_fpu_cpumask)) {
 			cpumask_t tmask;
 
 			current->thread.user_cpus_allowed
-				= current->cpus_mask;
-			cpumask_and(&tmask, &current->cpus_mask,
+				= current->cpus_allowed;
+			cpumask_and(&tmask, &current->cpus_allowed,
 				    &mt_fpu_cpumask);
 			set_cpus_allowed_ptr(current, &tmask);
 			set_thread_flag(TIF_FPUBOUND);
@@ -2135,7 +2134,6 @@ static void configure_status(void)
 
 	change_c0_status(ST0_CU|ST0_MX|ST0_RE|ST0_FR|ST0_BEV|ST0_TS|ST0_KX|ST0_SX|ST0_UX,
 			 status_set);
-	back_to_back_c0_hazard();
 }
 
 unsigned int hwrena;

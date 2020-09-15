@@ -49,8 +49,10 @@ extern void kernel_thread_starter(void);
  */
 void exit_thread(struct task_struct *tsk)
 {
-	if (tsk == current)
+	if (tsk == current) {
+		exit_thread_runtime_instr();
 		exit_thread_gs();
+	}
 }
 
 void flush_thread(void)
@@ -63,7 +65,6 @@ void release_thread(struct task_struct *dead_task)
 
 void arch_release_task_struct(struct task_struct *tsk)
 {
-	runtime_instr_release(tsk);
 }
 
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
@@ -99,7 +100,6 @@ int copy_thread_tls(unsigned long clone_flags, unsigned long new_stackp,
 	memset(&p->thread.per_user, 0, sizeof(p->thread.per_user));
 	memset(&p->thread.per_event, 0, sizeof(p->thread.per_event));
 	clear_tsk_thread_flag(p, TIF_SINGLE_STEP);
-	p->thread.per_flags = 0;
 	/* Initialize per thread user and system timer values */
 	p->thread.user_timer = 0;
 	p->thread.guest_timer = 0;
@@ -185,30 +185,20 @@ unsigned long get_wchan(struct task_struct *p)
 
 	if (!p || p == current || p->state == TASK_RUNNING || !task_stack_page(p))
 		return 0;
-
-	if (!try_get_task_stack(p))
-		return 0;
-
 	low = task_stack_page(p);
 	high = (struct stack_frame *) task_pt_regs(p);
 	sf = (struct stack_frame *) p->thread.ksp;
-	if (sf <= low || sf > high) {
-		return_address = 0;
-		goto out;
-	}
+	if (sf <= low || sf > high)
+		return 0;
 	for (count = 0; count < 16; count++) {
 		sf = (struct stack_frame *) sf->back_chain;
-		if (sf <= low || sf > high) {
-			return_address = 0;
-			goto out;
-		}
+		if (sf <= low || sf > high)
+			return 0;
 		return_address = sf->gprs[8];
 		if (!in_sched_functions(return_address))
-			goto out;
+			return return_address;
 	}
-out:
-	put_task_stack(p);
-	return return_address;
+	return 0;
 }
 
 unsigned long arch_align_stack(unsigned long sp)

@@ -37,8 +37,6 @@
 
 #define ISCSI_TRANSPORT_VERSION "2.0-870"
 
-#define ISCSI_SEND_MAX_ALLOWED  10
-
 static int dbg_session;
 module_param_named(debug_session, dbg_session, int,
 		   S_IRUGO | S_IWUSR);
@@ -2010,7 +2008,7 @@ static void __iscsi_unbind_session(struct work_struct *work)
 	if (session->target_id == ISCSI_MAX_TARGET) {
 		spin_unlock_irqrestore(&session->lock, flags);
 		mutex_unlock(&ihost->mutex);
-		goto unbind_session_exit;
+		return;
 	}
 
 	target_id = session->target_id;
@@ -2022,8 +2020,6 @@ static void __iscsi_unbind_session(struct work_struct *work)
 		ida_simple_remove(&iscsi_sess_ida, target_id);
 
 	scsi_remove_target(&session->dev);
-
-unbind_session_exit:
 	iscsi_session_event(session, ISCSI_KEVENT_UNBIND_SESSION);
 	ISCSI_DBG_TRANS_SESSION(session, "Completed target removal\n");
 }
@@ -2189,8 +2185,6 @@ void iscsi_remove_session(struct iscsi_cls_session *session)
 	scsi_target_unblock(&session->dev, SDEV_TRANSPORT_OFFLINE);
 	/* flush running scans then delete devices */
 	flush_work(&session->scan_work);
-	/* flush running unbind operations */
-	flush_work(&session->unbind_work);
 	__iscsi_unbind_session(&session->unbind_work);
 
 	/* hw iscsi may not have removed all connections from session */
@@ -2326,12 +2320,6 @@ static int
 iscsi_multicast_skb(struct sk_buff *skb, uint32_t group, gfp_t gfp)
 {
 	return nlmsg_multicast(nls, skb, 0, group, gfp);
-}
-
-static int
-iscsi_unicast_skb(struct sk_buff *skb, u32 portid)
-{
-	return nlmsg_unicast(nls, skb, portid);
 }
 
 int iscsi_recv_pdu(struct iscsi_cls_conn *conn, struct iscsi_hdr *hdr,
@@ -2536,11 +2524,14 @@ void iscsi_ping_comp_event(uint32_t host_no, struct iscsi_transport *transport,
 EXPORT_SYMBOL_GPL(iscsi_ping_comp_event);
 
 static int
-iscsi_if_send_reply(u32 portid, int type, void *payload, int size)
+iscsi_if_send_reply(uint32_t group, int seq, int type, int done, int multi,
+		    void *payload, int size)
 {
 	struct sk_buff	*skb;
 	struct nlmsghdr	*nlh;
 	int len = nlmsg_total_size(size);
+	int flags = multi ? NLM_F_MULTI : 0;
+	int t = done ? NLMSG_DONE : type;
 
 	skb = alloc_skb(len, GFP_ATOMIC);
 	if (!skb) {
@@ -2548,9 +2539,10 @@ iscsi_if_send_reply(u32 portid, int type, void *payload, int size)
 		return -ENOMEM;
 	}
 
-	nlh = __nlmsg_put(skb, 0, 0, type, (len - sizeof(*nlh)), 0);
+	nlh = __nlmsg_put(skb, 0, 0, t, (len - sizeof(*nlh)), 0);
+	nlh->nlmsg_flags = flags;
 	memcpy(nlmsg_data(nlh), payload, size);
-	return iscsi_unicast_skb(skb, portid);
+	return iscsi_multicast_skb(skb, group, GFP_ATOMIC);
 }
 
 static int
@@ -2945,24 +2937,6 @@ iscsi_set_path(struct iscsi_transport *transport, struct iscsi_uevent *ev)
 
 	scsi_host_put(shost);
 	return err;
-}
-
-static int iscsi_session_has_conns(int sid)
-{
-	struct iscsi_cls_conn *conn;
-	unsigned long flags;
-	int found = 0;
-
-	spin_lock_irqsave(&connlock, flags);
-	list_for_each_entry(conn, &connlist, conn_list) {
-		if (iscsi_conn_get_sid(conn) == sid) {
-			found = 1;
-			break;
-		}
-	}
-	spin_unlock_irqrestore(&connlock, flags);
-
-	return found;
 }
 
 static int
@@ -3496,7 +3470,6 @@ static int
 iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 {
 	int err = 0;
-	u32 portid;
 	struct iscsi_uevent *ev = nlmsg_data(nlh);
 	struct iscsi_transport *transport = NULL;
 	struct iscsi_internal *priv;
@@ -3517,12 +3490,10 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 	if (!try_module_get(transport->owner))
 		return -EINVAL;
 
-	portid = NETLINK_CB(skb).portid;
-
 	switch (nlh->nlmsg_type) {
 	case ISCSI_UEVENT_CREATE_SESSION:
 		err = iscsi_if_create_session(priv, ep, ev,
-					      portid,
+					      NETLINK_CB(skb).portid,
 					      ev->u.c_session.initial_cmdsn,
 					      ev->u.c_session.cmds_max,
 					      ev->u.c_session.queue_depth);
@@ -3535,19 +3506,17 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 		}
 
 		err = iscsi_if_create_session(priv, ep, ev,
-					portid,
+					NETLINK_CB(skb).portid,
 					ev->u.c_bound_session.initial_cmdsn,
 					ev->u.c_bound_session.cmds_max,
 					ev->u.c_bound_session.queue_depth);
 		break;
 	case ISCSI_UEVENT_DESTROY_SESSION:
 		session = iscsi_session_lookup(ev->u.d_session.sid);
-		if (!session)
-			err = -EINVAL;
-		else if (iscsi_session_has_conns(ev->u.d_session.sid))
-			err = -EBUSY;
-		else
+		if (session)
 			transport->destroy_session(session);
+		else
+			err = -EINVAL;
 		break;
 	case ISCSI_UEVENT_UNBIND_SESSION:
 		session = iscsi_session_lookup(ev->u.d_session.sid);
@@ -3695,8 +3664,6 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 static void
 iscsi_if_rx(struct sk_buff *skb)
 {
-	u32 portid = NETLINK_CB(skb).portid;
-
 	mutex_lock(&rx_queue_mutex);
 	while (skb->len >= NLMSG_HDRLEN) {
 		int err;
@@ -3704,7 +3671,6 @@ iscsi_if_rx(struct sk_buff *skb)
 		struct nlmsghdr	*nlh;
 		struct iscsi_uevent *ev;
 		uint32_t group;
-		int retries = ISCSI_SEND_MAX_ALLOWED;
 
 		nlh = nlmsg_hdr(skb);
 		if (nlh->nlmsg_len < sizeof(*nlh) + sizeof(*ev) ||
@@ -3733,12 +3699,8 @@ iscsi_if_rx(struct sk_buff *skb)
 				break;
 			if (ev->type == ISCSI_UEVENT_GET_CHAP && !err)
 				break;
-			err = iscsi_if_send_reply(portid, nlh->nlmsg_type,
-						  ev, sizeof(*ev));
-			if (err == -EAGAIN && --retries < 0) {
-				printk(KERN_WARNING "Send reply failed, error %d\n", err);
-				break;
-			}
+			err = iscsi_if_send_reply(group, nlh->nlmsg_seq,
+				nlh->nlmsg_type, 0, 0, ev, sizeof(*ev));
 		} while (err < 0 && err != -ECONNREFUSED && err != -ESRCH);
 		skb_pull(skb, rlen);
 	}

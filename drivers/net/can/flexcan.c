@@ -177,7 +177,7 @@
 #define FLEXCAN_MB_CNT_LENGTH(x)	(((x) & 0xf) << 16)
 #define FLEXCAN_MB_CNT_TIMESTAMP(x)	((x) & 0xffff)
 
-#define FLEXCAN_TIMEOUT_US		(250)
+#define FLEXCAN_TIMEOUT_US		(50)
 
 /* FLEXCAN hardware feature flags
  *
@@ -189,7 +189,7 @@
  *   MX35  FlexCAN2  03.00.00.00     no        no         ?       no        no
  *   MX53  FlexCAN2  03.00.00.00    yes        no        no       no        no
  *   MX6s  FlexCAN3  10.00.12.00    yes       yes        no       no       yes
- *   VF610 FlexCAN3  ?               no       yes        no      yes       yes?
+ *   VF610 FlexCAN3  ?               no       yes         ?      yes       yes?
  *
  * Some SOCs do not have the RX_WARN & TX_WARN interrupt line connected.
  */
@@ -297,8 +297,7 @@ static const struct flexcan_devtype_data fsl_imx6q_devtype_data = {
 
 static const struct flexcan_devtype_data fsl_vf610_devtype_data = {
 	.quirks = FLEXCAN_QUIRK_DISABLE_RXFG | FLEXCAN_QUIRK_ENABLE_EACEN_RRS |
-		FLEXCAN_QUIRK_DISABLE_MECR | FLEXCAN_QUIRK_USE_OFF_TIMESTAMP |
-		FLEXCAN_QUIRK_BROKEN_PERR_STATE,
+		FLEXCAN_QUIRK_DISABLE_MECR | FLEXCAN_QUIRK_USE_OFF_TIMESTAMP,
 };
 
 static const struct can_bittiming_const flexcan_bittiming_const = {
@@ -526,7 +525,7 @@ static int flexcan_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		data = be32_to_cpup((__be32 *)&cf->data[0]);
 		flexcan_write(data, &priv->tx_mb->data[0]);
 	}
-	if (cf->can_dlc > 4) {
+	if (cf->can_dlc > 3) {
 		data = be32_to_cpup((__be32 *)&cf->data[4]);
 		flexcan_write(data, &priv->tx_mb->data[1]);
 	}
@@ -599,7 +598,7 @@ static void flexcan_irq_bus_err(struct net_device *dev, u32 reg_esr)
 	if (tx_errors)
 		dev->stats.tx_errors++;
 
-	can_rx_offload_queue_tail(&priv->offload, skb);
+	can_rx_offload_irq_queue_err_skb(&priv->offload, skb);
 }
 
 static void flexcan_irq_state(struct net_device *dev, u32 reg_esr)
@@ -639,7 +638,7 @@ static void flexcan_irq_state(struct net_device *dev, u32 reg_esr)
 	if (unlikely(new_state == CAN_STATE_BUS_OFF))
 		can_bus_off(dev);
 
-	can_rx_offload_queue_tail(&priv->offload, skb);
+	can_rx_offload_irq_queue_err_skb(&priv->offload, skb);
 }
 
 static inline struct flexcan_priv *rx_offload_to_priv(struct can_rx_offload *offload)
@@ -1018,7 +1017,6 @@ static int flexcan_chip_start(struct net_device *dev)
 		reg_mecr = flexcan_read(&regs->mecr);
 		reg_mecr &= ~FLEXCAN_MECR_ECRWRDIS;
 		flexcan_write(reg_mecr, &regs->mecr);
-		reg_mecr |= FLEXCAN_MECR_ECCDIS;
 		reg_mecr &= ~(FLEXCAN_MECR_NCEFAFRZ | FLEXCAN_MECR_HANCEI_MSK |
 			      FLEXCAN_MECR_FANCEI_MSK);
 		flexcan_write(reg_mecr, &regs->mecr);

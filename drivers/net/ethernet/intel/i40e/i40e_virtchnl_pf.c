@@ -1008,8 +1008,8 @@ static void i40e_cleanup_reset_vf(struct i40e_vf *vf)
 		set_bit(I40E_VF_STATE_ACTIVE, &vf->vf_states);
 		clear_bit(I40E_VF_STATE_DISABLED, &vf->vf_states);
 		/* Do not notify the client during VF init */
-		if (!test_and_clear_bit(I40E_VF_STATE_PRE_ENABLE,
-					&vf->vf_states))
+		if (test_and_clear_bit(I40E_VF_STATE_PRE_ENABLE,
+				       &vf->vf_states))
 			i40e_notify_client_of_vf_reset(pf, abs_vf_id);
 		vf->num_vlan = 0;
 	}
@@ -2029,10 +2029,8 @@ error_param:
 				      (u8 *)&stats, sizeof(stats));
 }
 
-/* If the VF is not trusted restrict the number of MAC/VLAN it can program
- * MAC filters: 16 for multicast, 1 for MAC, 1 for broadcast
- */
-#define I40E_VC_MAX_MAC_ADDR_PER_VF (16 + 1 + 1)
+/* If the VF is not trusted restrict the number of MAC/VLAN it can program */
+#define I40E_VC_MAX_MAC_ADDR_PER_VF 12
 #define I40E_VC_MAX_VLAN_PER_VF 8
 
 /**
@@ -2175,16 +2173,6 @@ static int i40e_vc_del_mac_addr_msg(struct i40e_vf *vf, u8 *msg, u16 msglen)
 			dev_err(&pf->pdev->dev, "Invalid MAC addr %pM for VF %d\n",
 				al->list[i].addr, vf->vf_id);
 			ret = I40E_ERR_INVALID_MAC_ADDR;
-			goto error_param;
-		}
-
-		if (vf->pf_set_mac &&
-		    ether_addr_equal(al->list[i].addr,
-				     vf->default_lan_addr.addr)) {
-			dev_err(&pf->pdev->dev,
-				"MAC addr %pM has been set by PF, cannot delete it for VF %d, reset VF to change MAC addr\n",
-				vf->default_lan_addr.addr, vf->vf_id);
-			ret = I40E_ERR_PARAM;
 			goto error_param;
 		}
 	}
@@ -2791,9 +2779,7 @@ int i40e_ndo_set_vf_mac(struct net_device *netdev, int vf_id, u8 *mac)
 	struct i40e_mac_filter *f;
 	struct i40e_vf *vf;
 	int ret = 0;
-	struct hlist_node *h;
 	int bkt;
-	u8 i;
 
 	/* validate the request */
 	if (vf_id >= pf->num_alloc_vfs) {
@@ -2805,16 +2791,6 @@ int i40e_ndo_set_vf_mac(struct net_device *netdev, int vf_id, u8 *mac)
 
 	vf = &(pf->vf[vf_id]);
 	vsi = pf->vsi[vf->lan_vsi_idx];
-
-	/* When the VF is resetting wait until it is done.
-	 * It can take up to 200 milliseconds,
-	 * but wait for up to 300 milliseconds to be safe.
-	 */
-	for (i = 0; i < 15; i++) {
-		if (test_bit(I40E_VF_STATE_INIT, &vf->vf_states))
-			break;
-		msleep(20);
-	}
 	if (!test_bit(I40E_VF_STATE_INIT, &vf->vf_states)) {
 		dev_err(&pf->pdev->dev, "VF %d still in reset. Try again.\n",
 			vf_id);
@@ -2841,7 +2817,7 @@ int i40e_ndo_set_vf_mac(struct net_device *netdev, int vf_id, u8 *mac)
 	/* Delete all the filters for this VSI - we're going to kill it
 	 * anyway.
 	 */
-	hash_for_each_safe(vsi->mac_filter_hash, bkt, h, f, hlist)
+	hash_for_each(vsi->mac_filter_hash, bkt, f, hlist)
 		__i40e_del_filter(vsi, f);
 
 	spin_unlock_bh(&vsi->mac_filter_hash_lock);
@@ -3201,7 +3177,7 @@ int i40e_ndo_set_vf_link_state(struct net_device *netdev, int vf_id, int link)
 		vf->link_forced = true;
 		vf->link_up = true;
 		pfe.event_data.link_event.link_status = true;
-		pfe.event_data.link_event.link_speed = VIRTCHNL_LINK_SPEED_40GB;
+		pfe.event_data.link_event.link_speed = I40E_LINK_SPEED_40GB;
 		break;
 	case IFLA_VF_LINK_STATE_DISABLE:
 		vf->link_forced = true;

@@ -38,7 +38,6 @@
 #include <linux/io.h>
 #include <linux/kdebug.h>
 #include <linux/syscalls.h>
-#include <linux/highmem.h>
 
 #include <asm/pgtable.h>
 #include <asm/ldt.h>
@@ -59,8 +58,6 @@
 #include <asm/vm86.h>
 #include <asm/intel_rdt_sched.h>
 #include <asm/proto.h>
-
-#include "process.h"
 
 void __show_regs(struct pt_regs *regs, int all)
 {
@@ -133,13 +130,6 @@ int copy_thread_tls(unsigned long clone_flags, unsigned long sp,
 	struct task_struct *tsk;
 	int err;
 
-	/*
-	 * For a new task use the RESET flags value since there is no before.
-	 * All the status flags are zero; DF and all the system flags must also
-	 * be 0, specifically IF must be 0 because we context switch to the new
-	 * task with interrupts disabled.
-	 */
-	frame->flags = X86_EFLAGS_FIXED;
 	frame->bp = 0;
 	frame->ret_addr = (unsigned long) ret_from_fork;
 	p->thread.sp = (unsigned long) fork_frame;
@@ -208,35 +198,6 @@ start_thread(struct pt_regs *regs, unsigned long new_ip, unsigned long new_sp)
 }
 EXPORT_SYMBOL_GPL(start_thread);
 
-#ifdef CONFIG_PREEMPT_RT_FULL
-static void switch_kmaps(struct task_struct *prev_p, struct task_struct *next_p)
-{
-	int i;
-
-	/*
-	 * Clear @prev's kmap_atomic mappings
-	 */
-	for (i = 0; i < prev_p->kmap_idx; i++) {
-		int idx = i + KM_TYPE_NR * smp_processor_id();
-		pte_t *ptep = kmap_pte - idx;
-
-		kpte_clear_flush(ptep, __fix_to_virt(FIX_KMAP_BEGIN + idx));
-	}
-	/*
-	 * Restore @next_p's kmap_atomic mappings
-	 */
-	for (i = 0; i < next_p->kmap_idx; i++) {
-		int idx = i + KM_TYPE_NR * smp_processor_id();
-
-		if (!pte_none(next_p->kmap_pte[i]))
-			set_pte(kmap_pte - idx, next_p->kmap_pte[i]);
-	}
-}
-#else
-static inline void
-switch_kmaps(struct task_struct *prev_p, struct task_struct *next_p) { }
-#endif
-
 
 /*
  *	switch_to(x,y) should switch tasks from x to y.
@@ -273,6 +234,7 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	struct fpu *prev_fpu = &prev->fpu;
 	struct fpu *next_fpu = &next->fpu;
 	int cpu = smp_processor_id();
+	struct tss_struct *tss = &per_cpu(cpu_tss, cpu);
 
 	/* never put a printk in __switch_to... printk() calls wake_up*() indirectly */
 
@@ -304,9 +266,12 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	if (get_kernel_rpl() && unlikely(prev->iopl != next->iopl))
 		set_iopl_mask(next->iopl);
 
-	switch_to_extra(prev_p, next_p);
-
-	switch_kmaps(prev_p, next_p);
+	/*
+	 * Now maybe handle debug registers and/or IO bitmaps
+	 */
+	if (unlikely(task_thread_info(prev_p)->flags & _TIF_WORK_CTXSW_PREV ||
+		     task_thread_info(next_p)->flags & _TIF_WORK_CTXSW_NEXT))
+		__switch_to_xtra(prev_p, next_p, tss);
 
 	/*
 	 * Leave lazy mode, flushing any hypercalls made here.
@@ -319,11 +284,9 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 
 	/*
 	 * Reload esp0 and cpu_current_top_of_stack.  This changes
-	 * current_thread_info().  Refresh the SYSENTER configuration in
-	 * case prev or next is vm86.
+	 * current_thread_info().
 	 */
-	update_sp0(next_p);
-	refresh_sysenter_cs(next);
+	load_sp0(tss, next);
 	this_cpu_write(cpu_current_top_of_stack,
 		       (unsigned long)task_stack_page(next_p) +
 		       THREAD_SIZE);

@@ -348,18 +348,21 @@ static __u32 sansflags(__u32 m)
 	return m & ~VFS_CAP_FLAGS_EFFECTIVE;
 }
 
-static bool is_v2header(size_t size, const struct vfs_cap_data *cap)
+static bool is_v2header(size_t size, __le32 magic)
 {
+	__u32 m = le32_to_cpu(magic);
 	if (size != XATTR_CAPS_SZ_2)
 		return false;
-	return sansflags(le32_to_cpu(cap->magic_etc)) == VFS_CAP_REVISION_2;
+	return sansflags(m) == VFS_CAP_REVISION_2;
 }
 
-static bool is_v3header(size_t size, const struct vfs_cap_data *cap)
+static bool is_v3header(size_t size, __le32 magic)
 {
+	__u32 m = le32_to_cpu(magic);
+
 	if (size != XATTR_CAPS_SZ_3)
 		return false;
-	return sansflags(le32_to_cpu(cap->magic_etc)) == VFS_CAP_REVISION_3;
+	return sansflags(m) == VFS_CAP_REVISION_3;
 }
 
 /*
@@ -388,7 +391,7 @@ int cap_inode_getsecurity(struct inode *inode, const char *name, void **buffer,
 	if (strcmp(name, "capability") != 0)
 		return -EOPNOTSUPP;
 
-	dentry = d_find_any_alias(inode);
+	dentry = d_find_alias(inode);
 	if (!dentry)
 		return -EINVAL;
 
@@ -402,7 +405,7 @@ int cap_inode_getsecurity(struct inode *inode, const char *name, void **buffer,
 
 	fs_ns = inode->i_sb->s_user_ns;
 	cap = (struct vfs_cap_data *) tmpbuf;
-	if (is_v2header((size_t) ret, cap)) {
+	if (is_v2header((size_t) ret, cap->magic_etc)) {
 		/* If this is sizeof(vfs_cap_data) then we're ok with the
 		 * on-disk value, so return that.  */
 		if (alloc)
@@ -410,7 +413,7 @@ int cap_inode_getsecurity(struct inode *inode, const char *name, void **buffer,
 		else
 			kfree(tmpbuf);
 		return ret;
-	} else if (!is_v3header((size_t) ret, cap)) {
+	} else if (!is_v3header((size_t) ret, cap->magic_etc)) {
 		kfree(tmpbuf);
 		return -EINVAL;
 	}
@@ -449,8 +452,6 @@ int cap_inode_getsecurity(struct inode *inode, const char *name, void **buffer,
 				magic |= VFS_CAP_FLAGS_EFFECTIVE;
 			memcpy(&cap->data, &nscap->data, sizeof(__le32) * 2 * VFS_CAP_U32);
 			cap->magic_etc = cpu_to_le32(magic);
-		} else {
-			size = -ENOMEM;
 		}
 	}
 	kfree(tmpbuf);
@@ -469,9 +470,9 @@ static kuid_t rootid_from_xattr(const void *value, size_t size,
 	return make_kuid(task_ns, rootid);
 }
 
-static bool validheader(size_t size, const struct vfs_cap_data *cap)
+static bool validheader(size_t size, __le32 magic)
 {
-	return is_v2header(size, cap) || is_v3header(size, cap);
+	return is_v2header(size, magic) || is_v3header(size, magic);
 }
 
 /*
@@ -494,7 +495,7 @@ int cap_convert_nscap(struct dentry *dentry, void **ivalue, size_t size)
 
 	if (!*ivalue)
 		return -EINVAL;
-	if (!validheader(size, cap))
+	if (!validheader(size, cap->magic_etc))
 		return -EINVAL;
 	if (!capable_wrt_inode_uidgid(inode, CAP_SETFCAP))
 		return -EPERM;
@@ -711,7 +712,6 @@ int cap_bprm_set_creds(struct linux_binprm *bprm)
 	int ret;
 	kuid_t root_uid;
 
-	new->cap_ambient = old->cap_ambient;
 	if (WARN_ON(!cap_ambient_invariant_ok(old)))
 		return -EPERM;
 

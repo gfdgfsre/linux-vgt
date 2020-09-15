@@ -146,24 +146,12 @@ int node_affinity_init(void)
 		while ((dev = pci_get_device(ids->vendor, ids->device, dev))) {
 			node = pcibus_to_node(dev->bus);
 			if (node < 0)
-				goto out;
+				node = numa_node_id();
 
 			hfi1_per_node_cntr[node]++;
 		}
 		ids++;
 	}
-
-	return 0;
-
-out:
-	/*
-	 * Invalid PCI NUMA node information found, note it, and populate
-	 * our database 1:1.
-	 */
-	pr_err("HFI: Invalid PCI NUMA node. Performance may be affected\n");
-	pr_err("HFI: System BIOS may need to be upgraded\n");
-	for (node = 0; node < node_affinity.num_possible_nodes; node++)
-		hfi1_per_node_cntr[node] = 1;
 
 	return 0;
 }
@@ -239,14 +227,8 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 	const struct cpumask *local_mask;
 	int curr_cpu, possible, i;
 
-	/*
-	 * If the BIOS does not have the NUMA node information set, select
-	 * NUMA 0 so we get consistent performance.
-	 */
-	if (node < 0) {
-		dd_dev_err(dd, "Invalid PCI NUMA node. Performance may be affected\n");
-		node = 0;
-	}
+	if (node < 0)
+		node = numa_node_id();
 	dd->node = node;
 
 	local_mask = cpumask_of_node(dd->node);
@@ -430,6 +412,7 @@ static void hfi1_cleanup_sdma_notifier(struct hfi1_msix_entry *msix)
 static int get_irq_affinity(struct hfi1_devdata *dd,
 			    struct hfi1_msix_entry *msix)
 {
+	int ret;
 	cpumask_var_t diff;
 	struct hfi1_affinity_node *entry;
 	struct cpu_mask_set *set = NULL;
@@ -440,6 +423,10 @@ static int get_irq_affinity(struct hfi1_devdata *dd,
 
 	extra[0] = '\0';
 	cpumask_clear(&msix->mask);
+
+	ret = zalloc_cpumask_var(&diff, GFP_KERNEL);
+	if (!ret)
+		return -ENOMEM;
 
 	entry = node_affinity_lookup(dd->node);
 
@@ -471,9 +458,6 @@ static int get_irq_affinity(struct hfi1_devdata *dd,
 	 * finds its CPU here.
 	 */
 	if (cpu == -1 && set) {
-		if (!zalloc_cpumask_var(&diff, GFP_KERNEL))
-			return -ENOMEM;
-
 		if (cpumask_equal(&set->mask, &set->used)) {
 			/*
 			 * We've used up all the CPUs, bump up the generation
@@ -485,8 +469,6 @@ static int get_irq_affinity(struct hfi1_devdata *dd,
 		cpumask_andnot(diff, &set->mask, &set->used);
 		cpu = cpumask_first(diff);
 		cpumask_set_cpu(cpu, &set->used);
-
-		free_cpumask_var(diff);
 	}
 
 	cpumask_set_cpu(cpu, &msix->mask);
@@ -500,6 +482,7 @@ static int get_irq_affinity(struct hfi1_devdata *dd,
 		hfi1_setup_sdma_notifier(msix);
 	}
 
+	free_cpumask_var(diff);
 	return 0;
 }
 
@@ -593,7 +576,7 @@ int hfi1_get_proc_affinity(int node)
 	struct hfi1_affinity_node *entry;
 	cpumask_var_t diff, hw_thread_mask, available_mask, intrs_mask;
 	const struct cpumask *node_mask,
-		*proc_mask = current->cpus_ptr;
+		*proc_mask = &current->cpus_allowed;
 	struct hfi1_affinity_node_list *affinity = &node_affinity;
 	struct cpu_mask_set *set = &affinity->proc;
 
@@ -601,7 +584,7 @@ int hfi1_get_proc_affinity(int node)
 	 * check whether process/context affinity has already
 	 * been set
 	 */
-	if (current->nr_cpus_allowed == 1) {
+	if (cpumask_weight(proc_mask) == 1) {
 		hfi1_cdbg(PROC, "PID %u %s affinity set to CPU %*pbl",
 			  current->pid, current->comm,
 			  cpumask_pr_args(proc_mask));
@@ -612,7 +595,7 @@ int hfi1_get_proc_affinity(int node)
 		cpu = cpumask_first(proc_mask);
 		cpumask_set_cpu(cpu, &set->used);
 		goto done;
-	} else if (current->nr_cpus_allowed < cpumask_weight(&set->mask)) {
+	} else if (cpumask_weight(proc_mask) < cpumask_weight(&set->mask)) {
 		hfi1_cdbg(PROC, "PID %u %s affinity set to CPU set(s) %*pbl",
 			  current->pid, current->comm,
 			  cpumask_pr_args(proc_mask));

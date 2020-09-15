@@ -34,7 +34,6 @@
 #include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-#include <linux/vmalloc.h>
 
 #include "rxe.h"
 #include "rxe_loc.h"
@@ -256,7 +255,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
 			   qp->sq.queue->buf_size, &qp->sq.queue->ip);
 
 	if (err) {
-		vfree(qp->sq.queue->buf);
+		kvfree(qp->sq.queue->buf);
 		kfree(qp->sq.queue);
 		return err;
 	}
@@ -309,7 +308,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
 				   qp->rq.queue->buf_size,
 				   &qp->rq.queue->ip);
 		if (err) {
-			vfree(qp->rq.queue->buf);
+			kvfree(qp->rq.queue->buf);
 			kfree(qp->rq.queue);
 			return err;
 		}
@@ -825,9 +824,9 @@ void rxe_qp_destroy(struct rxe_qp *qp)
 }
 
 /* called when the last reference to the qp is dropped */
-static void rxe_qp_do_cleanup(struct work_struct *work)
+void rxe_qp_cleanup(struct rxe_pool_entry *arg)
 {
-	struct rxe_qp *qp = container_of(work, typeof(*qp), cleanup_work.work);
+	struct rxe_qp *qp = container_of(arg, typeof(*qp), pelem);
 
 	rxe_drop_all_mcast_groups(qp);
 
@@ -859,12 +858,4 @@ static void rxe_qp_do_cleanup(struct work_struct *work)
 
 	kernel_sock_shutdown(qp->sk, SHUT_RDWR);
 	sock_release(qp->sk);
-}
-
-/* called when the last reference to the qp is dropped */
-void rxe_qp_cleanup(struct rxe_pool_entry *arg)
-{
-	struct rxe_qp *qp = container_of(arg, typeof(*qp), pelem);
-
-	execute_in_process_context(rxe_qp_do_cleanup, &qp->cleanup_work);
 }

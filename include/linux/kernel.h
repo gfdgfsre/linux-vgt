@@ -72,8 +72,8 @@
 
 #define u64_to_user_ptr(x) (		\
 {					\
-	typecheck(u64, (x));		\
-	(void __user *)(uintptr_t)(x);	\
+	typecheck(u64, x);		\
+	(void __user *)(uintptr_t)x;	\
 }					\
 )
 
@@ -101,8 +101,7 @@
 #define DIV_ROUND_DOWN_ULL(ll, d) \
 	({ unsigned long long _tmp = (ll); do_div(_tmp, d); _tmp; })
 
-#define DIV_ROUND_UP_ULL(ll, d) \
-	DIV_ROUND_DOWN_ULL((unsigned long long)(ll) + (d) - 1, (d))
+#define DIV_ROUND_UP_ULL(ll, d)		DIV_ROUND_DOWN_ULL((ll) + (d) - 1, (d))
 
 #if BITS_PER_LONG == 32
 # define DIV_ROUND_UP_SECTOR_T(ll,d) DIV_ROUND_UP_ULL(ll, d)
@@ -226,9 +225,6 @@ extern int _cond_resched(void);
  */
 # define might_sleep() \
 	do { __might_sleep(__FILE__, __LINE__, 0); might_resched(); } while (0)
-
-# define might_sleep_no_state_check() \
-	do { ___might_sleep(__FILE__, __LINE__, 0); might_resched(); } while (0)
 # define sched_annotate_sleep()	(current->task_state_change = 0)
 #else
   static inline void ___might_sleep(const char *file, int line,
@@ -236,7 +232,6 @@ extern int _cond_resched(void);
   static inline void __might_sleep(const char *file, int line,
 				   int preempt_offset) { }
 # define might_sleep() do { might_resched(); } while (0)
-# define might_sleep_no_state_check() do { might_resched(); } while (0)
 # define sched_annotate_sleep() do { } while (0)
 #endif
 
@@ -536,7 +531,6 @@ extern enum system_states {
 	SYSTEM_HALT,
 	SYSTEM_POWER_OFF,
 	SYSTEM_RESTART,
-	SYSTEM_SUSPEND,
 } system_state;
 
 #define TAINT_PROPRIETARY_MODULE	0

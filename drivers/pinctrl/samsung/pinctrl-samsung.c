@@ -277,7 +277,6 @@ static int samsung_dt_node_to_map(struct pinctrl_dev *pctldev,
 						&reserved_maps, num_maps);
 		if (ret < 0) {
 			samsung_dt_free_map(pctldev, *map, *num_maps);
-			of_node_put(np);
 			return ret;
 		}
 	}
@@ -762,10 +761,8 @@ static struct samsung_pmx_func *samsung_pinctrl_create_functions(
 		if (!of_get_child_count(cfg_np)) {
 			ret = samsung_pinctrl_create_function(dev, drvdata,
 							cfg_np, func);
-			if (ret < 0) {
-				of_node_put(cfg_np);
+			if (ret < 0)
 				return ERR_PTR(ret);
-			}
 			if (ret > 0) {
 				++func;
 				++func_cnt;
@@ -776,11 +773,8 @@ static struct samsung_pmx_func *samsung_pinctrl_create_functions(
 		for_each_child_of_node(cfg_np, func_np) {
 			ret = samsung_pinctrl_create_function(dev, drvdata,
 						func_np, func);
-			if (ret < 0) {
-				of_node_put(func_np);
-				of_node_put(cfg_np);
+			if (ret < 0)
 				return ERR_PTR(ret);
-			}
 			if (ret > 0) {
 				++func;
 				++func_cnt;
@@ -953,33 +947,12 @@ static int samsung_gpiolib_register(struct platform_device *pdev,
 	return 0;
 }
 
-static const struct samsung_pin_ctrl *
-samsung_pinctrl_get_soc_data_for_of_alias(struct platform_device *pdev)
-{
-	struct device_node *node = pdev->dev.of_node;
-	const struct samsung_pinctrl_of_match_data *of_data;
-	int id;
-
-	id = of_alias_get_id(node, "pinctrl");
-	if (id < 0) {
-		dev_err(&pdev->dev, "failed to get alias id\n");
-		return NULL;
-	}
-
-	of_data = of_device_get_match_data(&pdev->dev);
-	if (id >= of_data->num_ctrl) {
-		dev_err(&pdev->dev, "invalid alias id %d\n", id);
-		return NULL;
-	}
-
-	return &(of_data->ctrl[id]);
-}
-
 /* retrieve the soc specific data */
 static const struct samsung_pin_ctrl *
 samsung_pinctrl_get_soc_data(struct samsung_pinctrl_drv_data *d,
 			     struct platform_device *pdev)
 {
+	int id;
 	struct device_node *node = pdev->dev.of_node;
 	struct device_node *np;
 	const struct samsung_pin_bank_data *bdata;
@@ -989,9 +962,13 @@ samsung_pinctrl_get_soc_data(struct samsung_pinctrl_drv_data *d,
 	void __iomem *virt_base[SAMSUNG_PINCTRL_NUM_RESOURCES];
 	unsigned int i;
 
-	ctrl = samsung_pinctrl_get_soc_data_for_of_alias(pdev);
-	if (!ctrl)
+	id = of_alias_get_id(node, "pinctrl");
+	if (id < 0) {
+		dev_err(&pdev->dev, "failed to get alias id\n");
 		return ERR_PTR(-ENOENT);
+	}
+	ctrl = of_device_get_match_data(&pdev->dev);
+	ctrl += id;
 
 	d->suspend = ctrl->suspend;
 	d->resume = ctrl->resume;
@@ -1216,41 +1193,41 @@ static int __maybe_unused samsung_pinctrl_resume(struct device *dev)
 static const struct of_device_id samsung_pinctrl_dt_match[] = {
 #ifdef CONFIG_PINCTRL_EXYNOS_ARM
 	{ .compatible = "samsung,exynos3250-pinctrl",
-		.data = &exynos3250_of_data },
+		.data = exynos3250_pin_ctrl },
 	{ .compatible = "samsung,exynos4210-pinctrl",
-		.data = &exynos4210_of_data },
+		.data = exynos4210_pin_ctrl },
 	{ .compatible = "samsung,exynos4x12-pinctrl",
-		.data = &exynos4x12_of_data },
+		.data = exynos4x12_pin_ctrl },
 	{ .compatible = "samsung,exynos5250-pinctrl",
-		.data = &exynos5250_of_data },
+		.data = exynos5250_pin_ctrl },
 	{ .compatible = "samsung,exynos5260-pinctrl",
-		.data = &exynos5260_of_data },
+		.data = exynos5260_pin_ctrl },
 	{ .compatible = "samsung,exynos5410-pinctrl",
-		.data = &exynos5410_of_data },
+		.data = exynos5410_pin_ctrl },
 	{ .compatible = "samsung,exynos5420-pinctrl",
-		.data = &exynos5420_of_data },
+		.data = exynos5420_pin_ctrl },
 	{ .compatible = "samsung,s5pv210-pinctrl",
-		.data = &s5pv210_of_data },
+		.data = s5pv210_pin_ctrl },
 #endif
 #ifdef CONFIG_PINCTRL_EXYNOS_ARM64
 	{ .compatible = "samsung,exynos5433-pinctrl",
-		.data = &exynos5433_of_data },
+		.data = exynos5433_pin_ctrl },
 	{ .compatible = "samsung,exynos7-pinctrl",
-		.data = &exynos7_of_data },
+		.data = exynos7_pin_ctrl },
 #endif
 #ifdef CONFIG_PINCTRL_S3C64XX
 	{ .compatible = "samsung,s3c64xx-pinctrl",
-		.data = &s3c64xx_of_data },
+		.data = s3c64xx_pin_ctrl },
 #endif
 #ifdef CONFIG_PINCTRL_S3C24XX
 	{ .compatible = "samsung,s3c2412-pinctrl",
-		.data = &s3c2412_of_data },
+		.data = s3c2412_pin_ctrl },
 	{ .compatible = "samsung,s3c2416-pinctrl",
-		.data = &s3c2416_of_data },
+		.data = s3c2416_pin_ctrl },
 	{ .compatible = "samsung,s3c2440-pinctrl",
-		.data = &s3c2440_of_data },
+		.data = s3c2440_pin_ctrl },
 	{ .compatible = "samsung,s3c2450-pinctrl",
-		.data = &s3c2450_of_data },
+		.data = s3c2450_pin_ctrl },
 #endif
 	{},
 };

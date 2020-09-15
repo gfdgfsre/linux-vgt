@@ -23,7 +23,6 @@
 #include <net/netfilter/nf_conntrack_seqadj.h>
 #include <net/netfilter/nf_conntrack_zones.h>
 #include <net/netfilter/ipv6/nf_defrag_ipv6.h>
-#include <net/ipv6_frag.h>
 
 #ifdef CONFIG_NF_NAT_NEEDED
 #include <linux/netfilter/nf_nat.h>
@@ -879,17 +878,6 @@ static int ovs_ct_nat(struct net *net, struct sw_flow_key *key,
 	}
 	err = ovs_ct_nat_execute(skb, ct, ctinfo, &info->range, maniptype);
 
-	if (err == NF_ACCEPT &&
-	    ct->status & IPS_SRC_NAT && ct->status & IPS_DST_NAT) {
-		if (maniptype == NF_NAT_MANIP_SRC)
-			maniptype = NF_NAT_MANIP_DST;
-		else
-			maniptype = NF_NAT_MANIP_SRC;
-
-		err = ovs_ct_nat_execute(skb, ct, ctinfo, &info->range,
-					 maniptype);
-	}
-
 	/* Mark NAT done if successful and update the flow key. */
 	if (err == NF_ACCEPT)
 		ovs_nat_update_key(key, skb, maniptype);
@@ -1094,8 +1082,7 @@ static int ovs_ct_commit(struct net *net, struct sw_flow_key *key,
 					 &info->labels.mask);
 		if (err)
 			return err;
-	} else if (IS_ENABLED(CONFIG_NF_CONNTRACK_LABELS) &&
-		   labels_nonzero(&info->labels.mask)) {
+	} else if (labels_nonzero(&info->labels.mask)) {
 		err = ovs_ct_set_labels(ct, key, &info->labels.value,
 					&info->labels.mask);
 		if (err)
@@ -1108,36 +1095,6 @@ static int ovs_ct_commit(struct net *net, struct sw_flow_key *key,
 		return -EINVAL;
 
 	return 0;
-}
-
-/* Trim the skb to the length specified by the IP/IPv6 header,
- * removing any trailing lower-layer padding. This prepares the skb
- * for higher-layer processing that assumes skb->len excludes padding
- * (such as nf_ip_checksum). The caller needs to pull the skb to the
- * network header, and ensure ip_hdr/ipv6_hdr points to valid data.
- */
-static int ovs_skb_network_trim(struct sk_buff *skb)
-{
-	unsigned int len;
-	int err;
-
-	switch (skb->protocol) {
-	case htons(ETH_P_IP):
-		len = ntohs(ip_hdr(skb)->tot_len);
-		break;
-	case htons(ETH_P_IPV6):
-		len = sizeof(struct ipv6hdr)
-			+ ntohs(ipv6_hdr(skb)->payload_len);
-		break;
-	default:
-		len = skb->len;
-	}
-
-	err = pskb_trim_rcsum(skb, len);
-	if (err)
-		kfree_skb(skb);
-
-	return err;
 }
 
 /* Returns 0 on success, -EINPROGRESS if 'skb' is stolen, or other nonzero
@@ -1153,10 +1110,6 @@ int ovs_ct_execute(struct net *net, struct sk_buff *skb,
 	/* The conntrack module expects to be working at L3. */
 	nh_ofs = skb_network_offset(skb);
 	skb_pull_rcsum(skb, nh_ofs);
-
-	err = ovs_skb_network_trim(skb);
-	if (err)
-		return err;
 
 	if (key->ip.frag != OVS_FRAG_TYPE_NONE) {
 		err = handle_fragments(net, key, info->zone.id, skb);

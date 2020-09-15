@@ -170,7 +170,7 @@
 #endif
 
 #ifdef CONFIG_SERIAL_EARLYCON
-#define EARLYCON_TABLE() . = ALIGN(8);				\
+#define EARLYCON_TABLE() STRUCT_ALIGN();			\
 			 VMLINUX_SYMBOL(__earlycon_table) = .;	\
 			 KEEP(*(__earlycon_table))		\
 			 VMLINUX_SYMBOL(__earlycon_table_end) = .;
@@ -251,8 +251,7 @@
 
 #define PAGE_ALIGNED_DATA(page_align)					\
 	. = ALIGN(page_align);						\
-	*(.data..page_aligned)						\
-	. = ALIGN(page_align);
+	*(.data..page_aligned)
 
 #define READ_MOSTLY_DATA(align)						\
 	. = ALIGN(align);						\
@@ -460,7 +459,6 @@
 #define TEXT_TEXT							\
 		ALIGN_FUNCTION();					\
 		*(.text.hot TEXT_MAIN .text.fixup .text.unlikely)	\
-		*(.text..refcount)					\
 		*(.ref.text)						\
 	MEM_KEEP(init.text)						\
 	MEM_KEEP(exit.text)						\
@@ -620,9 +618,7 @@
 	. = ALIGN(bss_align);						\
 	.bss : AT(ADDR(.bss) - LOAD_OFFSET) {				\
 		BSS_FIRST_SECTIONS					\
-		. = ALIGN(PAGE_SIZE);					\
 		*(.bss..page_aligned)					\
-		. = ALIGN(PAGE_SIZE);					\
 		*(.dynbss)						\
 		*(BSS_MAIN)						\
 		*(COMMON)						\
@@ -691,7 +687,7 @@
 #define BUG_TABLE
 #endif
 
-#ifdef CONFIG_UNWINDER_ORC
+#ifdef CONFIG_ORC_UNWINDER
 #define ORC_UNWIND_TABLE						\
 	. = ALIGN(4);							\
 	.orc_unwind_ip : AT(ADDR(.orc_unwind_ip) - LOAD_OFFSET) {	\
@@ -699,7 +695,7 @@
 		KEEP(*(.orc_unwind_ip))					\
 		VMLINUX_SYMBOL(__stop_orc_unwind_ip) = .;		\
 	}								\
-	. = ALIGN(2);							\
+	. = ALIGN(6);							\
 	.orc_unwind : AT(ADDR(.orc_unwind) - LOAD_OFFSET) {		\
 		VMLINUX_SYMBOL(__start_orc_unwind) = .;			\
 		KEEP(*(.orc_unwind))					\

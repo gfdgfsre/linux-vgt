@@ -829,8 +829,10 @@ __acquires(&uap->port.lock)
 	if (!uap->using_tx_dma)
 		return;
 
-	dmaengine_terminate_async(uap->dmatx.chan);
-
+	/* Avoid deadlock with the DMA engine callback */
+	spin_unlock(&uap->port.lock);
+	dmaengine_terminate_all(uap->dmatx.chan);
+	spin_lock(&uap->port.lock);
 	if (uap->dmatx.queued) {
 		dma_unmap_sg(uap->dmatx.chan->device->dev, &uap->dmatx.sg, 1,
 			     DMA_TO_DEVICE);
@@ -1745,26 +1747,10 @@ static int pl011_allocate_irq(struct uart_amba_port *uap)
  */
 static void pl011_enable_interrupts(struct uart_amba_port *uap)
 {
-	unsigned int i;
-
 	spin_lock_irq(&uap->port.lock);
 
 	/* Clear out any spuriously appearing RX interrupts */
 	pl011_write(UART011_RTIS | UART011_RXIS, uap, REG_ICR);
-
-	/*
-	 * RXIS is asserted only when the RX FIFO transitions from below
-	 * to above the trigger threshold.  If the RX FIFO is already
-	 * full to the threshold this can't happen and RXIS will now be
-	 * stuck off.  Drain the RX FIFO explicitly to fix this:
-	 */
-	for (i = 0; i < uap->fifosize * 2; ++i) {
-		if (pl011_read(uap, REG_FR) & UART01x_FR_RXFE)
-			break;
-
-		pl011_read(uap, REG_DR);
-	}
-
 	uap->im = UART011_RTIM;
 	if (!pl011_dma_rx_running(uap))
 		uap->im |= UART011_RXIM;
@@ -2229,24 +2215,18 @@ pl011_console_write(struct console *co, const char *s, unsigned int count)
 {
 	struct uart_amba_port *uap = amba_ports[co->index];
 	unsigned int old_cr = 0, new_cr;
-	unsigned long flags = 0;
+	unsigned long flags;
 	int locked = 1;
 
 	clk_enable(uap->clk);
 
-	/*
-	 * local_irq_save(flags);
-	 *
-	 * This local_irq_save() is nonsense. If we come in via sysrq
-	 * handling then interrupts are already disabled. Aside of
-	 * that the port.sysrq check is racy on SMP regardless.
-	*/
+	local_irq_save(flags);
 	if (uap->port.sysrq)
 		locked = 0;
 	else if (oops_in_progress)
-		locked = spin_trylock_irqsave(&uap->port.lock, flags);
+		locked = spin_trylock(&uap->port.lock);
 	else
-		spin_lock_irqsave(&uap->port.lock, flags);
+		spin_lock(&uap->port.lock);
 
 	/*
 	 *	First save the CR then disable the interrupts
@@ -2272,7 +2252,8 @@ pl011_console_write(struct console *co, const char *s, unsigned int count)
 		pl011_write(old_cr, uap, REG_CR);
 
 	if (locked)
-		spin_unlock_irqrestore(&uap->port.lock, flags);
+		spin_unlock(&uap->port.lock);
+	local_irq_restore(flags);
 
 	clk_disable(uap->clk);
 }
@@ -2610,7 +2591,6 @@ static int pl011_setup_port(struct device *dev, struct uart_amba_port *uap,
 	uap->port.fifosize = uap->fifosize;
 	uap->port.flags = UPF_BOOT_AUTOCONF;
 	uap->port.line = index;
-	spin_lock_init(&uap->port.lock);
 
 	amba_ports[index] = uap;
 
@@ -2804,7 +2784,6 @@ static struct platform_driver arm_sbsa_uart_platform_driver = {
 		.name	= "sbsa-uart",
 		.of_match_table = of_match_ptr(sbsa_uart_of_match),
 		.acpi_match_table = ACPI_PTR(sbsa_uart_acpi_match),
-		.suppress_bind_attrs = IS_BUILTIN(CONFIG_SERIAL_AMBA_PL011),
 	},
 };
 
@@ -2833,7 +2812,6 @@ static struct amba_driver pl011_driver = {
 	.drv = {
 		.name	= "uart-pl011",
 		.pm	= &pl011_dev_pm_ops,
-		.suppress_bind_attrs = IS_BUILTIN(CONFIG_SERIAL_AMBA_PL011),
 	},
 	.id_table	= pl011_ids,
 	.probe		= pl011_probe,

@@ -82,7 +82,7 @@ int p9_show_client_options(struct seq_file *m, struct p9_client *clnt)
 {
 	if (clnt->msize != 8192)
 		seq_printf(m, ",msize=%u", clnt->msize);
-	seq_printf(m, ",trans=%s", clnt->trans_mod->name);
+	seq_printf(m, "trans=%s", clnt->trans_mod->name);
 
 	switch (clnt->proto_version) {
 	case p9_proto_legacy:
@@ -179,12 +179,6 @@ static int parse_opts(char *opts, struct p9_client *clnt)
 				p9_debug(P9_DEBUG_ERROR,
 					 "integer field, but no integer?\n");
 				ret = r;
-				continue;
-			}
-			if (option < 4096) {
-				p9_debug(P9_DEBUG_ERROR,
-					 "msize should be at least 4k\n");
-				ret = -EINVAL;
 				continue;
 			}
 			clnt->msize = option;
@@ -779,7 +773,8 @@ p9_client_rpc(struct p9_client *c, int8_t type, const char *fmt, ...)
 	}
 again:
 	/* Wait for the response */
-	err = wait_event_killable(*req->wq, req->status >= REQ_STATUS_RCVD);
+	err = wait_event_interruptible(*req->wq,
+				       req->status >= REQ_STATUS_RCVD);
 
 	/*
 	 * Make sure our req is coherent with regard to updates in other
@@ -961,7 +956,7 @@ static int p9_client_version(struct p9_client *c)
 {
 	int err = 0;
 	struct p9_req_t *req;
-	char *version = NULL;
+	char *version;
 	int msize;
 
 	p9_debug(P9_DEBUG_9P, ">>> TVERSION msize %d protocol %d\n",
@@ -1002,18 +997,10 @@ static int p9_client_version(struct p9_client *c)
 	else if (!strncmp(version, "9P2000", 6))
 		c->proto_version = p9_proto_legacy;
 	else {
-		p9_debug(P9_DEBUG_ERROR,
-			 "server returned an unknown version: %s\n", version);
 		err = -EREMOTEIO;
 		goto error;
 	}
 
-	if (msize < 4096) {
-		p9_debug(P9_DEBUG_ERROR,
-			 "server returned a msize < 4096: %d\n", msize);
-		err = -EREMOTEIO;
-		goto error;
-	}
 	if (msize < c->msize)
 		c->msize = msize;
 
@@ -1077,13 +1064,6 @@ struct p9_client *p9_client_create(const char *dev_name, char *options)
 
 	if (clnt->msize > clnt->trans_mod->maxsize)
 		clnt->msize = clnt->trans_mod->maxsize;
-
-	if (clnt->msize < 4096) {
-		p9_debug(P9_DEBUG_ERROR,
-			 "Please specify a msize of at least 4k\n");
-		err = -EINVAL;
-		goto close_trans;
-	}
 
 	err = p9_client_version(clnt);
 	if (err)

@@ -1,0 +1,1 @@
+cmd_drivers/soc/sunxi-scr/scr.o := /aosp/buildroot/buildroot-2020.02.4/output/host/bin/aarch64-buildroot-linux-musl-ld -EL  -maarch64linux   -r -o drivers/soc/sunxi-scr/scr.o drivers/soc/sunxi-scr/smartcard.o drivers/soc/sunxi-scr/sunxi-scr.o 

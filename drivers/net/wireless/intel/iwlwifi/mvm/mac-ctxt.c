@@ -438,8 +438,7 @@ int iwl_mvm_mac_ctxt_init(struct iwl_mvm *mvm, struct ieee80211_vif *vif)
 	}
 
 	/* Allocate the CAB queue for softAP and GO interfaces */
-	if (vif->type == NL80211_IFTYPE_AP ||
-	    vif->type == NL80211_IFTYPE_ADHOC) {
+	if (vif->type == NL80211_IFTYPE_AP) {
 		/*
 		 * For TVQM this will be overwritten later with the FW assigned
 		 * queue value (when queue is enabled).
@@ -788,7 +787,7 @@ static int iwl_mvm_mac_ctxt_cmd_listener(struct iwl_mvm *mvm,
 					 u32 action)
 {
 	struct iwl_mac_ctx_cmd cmd = {};
-	u32 tfd_queue_msk = BIT(mvm->snif_queue);
+	u32 tfd_queue_msk = 0;
 	int ret;
 
 	WARN_ON(vif->type != NL80211_IFTYPE_MONITOR);

@@ -34,7 +34,7 @@ static inline void hlist_nulls_del_init_rcu(struct hlist_nulls_node *n)
 {
 	if (!hlist_nulls_unhashed(n)) {
 		__hlist_nulls_del(n);
-		WRITE_ONCE(n->pprev, NULL);
+		n->pprev = NULL;
 	}
 }
 
@@ -66,7 +66,7 @@ static inline void hlist_nulls_del_init_rcu(struct hlist_nulls_node *n)
 static inline void hlist_nulls_del_rcu(struct hlist_nulls_node *n)
 {
 	__hlist_nulls_del(n);
-	WRITE_ONCE(n->pprev, LIST_POISON2);
+	n->pprev = LIST_POISON2;
 }
 
 /**
@@ -94,10 +94,10 @@ static inline void hlist_nulls_add_head_rcu(struct hlist_nulls_node *n,
 	struct hlist_nulls_node *first = h->first;
 
 	n->next = first;
-	WRITE_ONCE(n->pprev, &h->first);
+	n->pprev = &h->first;
 	rcu_assign_pointer(hlist_nulls_first_rcu(h), n);
 	if (!is_a_nulls(first))
-		WRITE_ONCE(first->pprev, &n->next);
+		first->pprev = &n->next;
 }
 
 /**
@@ -106,8 +106,9 @@ static inline void hlist_nulls_add_head_rcu(struct hlist_nulls_node *n,
  * @h: the list to add to.
  *
  * Description:
- * Adds the specified element to the specified hlist_nulls,
- * while permitting racing traversals.
+ * Adds the specified element to the end of the specified hlist_nulls,
+ * while permitting racing traversals.  NOTE: tail insertion requires
+ * list traversal.
  *
  * The caller must take whatever precautions are necessary
  * (such as holding appropriate locks) to avoid racing
@@ -120,18 +121,18 @@ static inline void hlist_nulls_add_head_rcu(struct hlist_nulls_node *n,
  * list-traversal primitive must be guarded by rcu_read_lock().
  */
 static inline void hlist_nulls_add_tail_rcu(struct hlist_nulls_node *n,
-					    struct hlist_nulls_head *h)
+					struct hlist_nulls_head *h)
 {
 	struct hlist_nulls_node *i, *last = NULL;
 
-	/* Note: write side code, so rcu accessors are not needed. */
-	for (i = h->first; !is_a_nulls(i); i = i->next)
+	for (i = hlist_nulls_first_rcu(h); !is_a_nulls(i);
+	     i = hlist_nulls_next_rcu(i))
 		last = i;
 
 	if (last) {
 		n->next = last->next;
 		n->pprev = &last->next;
-		rcu_assign_pointer(hlist_next_rcu(last), n);
+		rcu_assign_pointer(hlist_nulls_next_rcu(last), n);
 	} else {
 		hlist_nulls_add_head_rcu(n, h);
 	}

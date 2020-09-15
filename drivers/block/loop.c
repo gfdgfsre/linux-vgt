@@ -70,7 +70,7 @@
 #include <linux/writeback.h>
 #include <linux/completion.h>
 #include <linux/highmem.h>
-#include <linux/kthread-cgroup.h>
+#include <linux/kthread.h>
 #include <linux/splice.h>
 #include <linux/sysfs.h>
 #include <linux/miscdevice.h>
@@ -266,7 +266,7 @@ static int lo_write_bvec(struct file *file, struct bio_vec *bvec, loff_t *ppos)
 	struct iov_iter i;
 	ssize_t bw;
 
-	iov_iter_bvec(&i, ITER_BVEC | WRITE, bvec, 1, bvec->bv_len);
+	iov_iter_bvec(&i, ITER_BVEC, bvec, 1, bvec->bv_len);
 
 	file_start_write(file);
 	bw = vfs_iter_write(file, &i, ppos, 0);
@@ -414,19 +414,17 @@ out_free_page:
 	return ret;
 }
 
-static int lo_fallocate(struct loop_device *lo, struct request *rq, loff_t pos,
-			int mode)
+static int lo_discard(struct loop_device *lo, struct request *rq, loff_t pos)
 {
 	/*
-	 * We use fallocate to manipulate the space mappings used by the image
-	 * a.k.a. discard/zerorange. However we do not support this if
-	 * encryption is enabled, because it may give an attacker useful
-	 * information.
+	 * We use punch hole to reclaim the free space used by the
+	 * image a.k.a. discard. However we do not support discard if
+	 * encryption is enabled, because it may give an attacker
+	 * useful information.
 	 */
 	struct file *file = lo->lo_backing_file;
+	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
 	int ret;
-
-	mode |= FALLOC_FL_KEEP_SIZE;
 
 	if ((!file->f_op->fallocate) || lo->lo_encrypt_key_size) {
 		ret = -EOPNOTSUPP;
@@ -567,17 +565,9 @@ static int do_req_filebacked(struct loop_device *lo, struct request *rq)
 	switch (req_op(rq)) {
 	case REQ_OP_FLUSH:
 		return lo_req_flush(lo, rq);
-	case REQ_OP_WRITE_ZEROES:
-		/*
-		 * If the caller doesn't want deallocation, call zeroout to
-		 * write zeroes the range.  Otherwise, punch them out.
-		 */
-		return lo_fallocate(lo, rq, pos,
-			(rq->cmd_flags & REQ_NOUNMAP) ?
-				FALLOC_FL_ZERO_RANGE :
-				FALLOC_FL_PUNCH_HOLE);
 	case REQ_OP_DISCARD:
-		return lo_fallocate(lo, rq, pos, FALLOC_FL_PUNCH_HOLE);
+	case REQ_OP_WRITE_ZEROES:
+		return lo_discard(lo, rq, pos);
 	case REQ_OP_WRITE:
 		if (lo->transfer)
 			return lo_write_transfer(lo, rq, pos);
@@ -627,36 +617,6 @@ static void loop_reread_partitions(struct loop_device *lo,
 			__func__, lo->lo_number, lo->lo_file_name, rc);
 }
 
-static inline int is_loop_device(struct file *file)
-{
-	struct inode *i = file->f_mapping->host;
-
-	return i && S_ISBLK(i->i_mode) && MAJOR(i->i_rdev) == LOOP_MAJOR;
-}
-
-static int loop_validate_file(struct file *file, struct block_device *bdev)
-{
-	struct inode	*inode = file->f_mapping->host;
-	struct file	*f = file;
-
-	/* Avoid recursion */
-	while (is_loop_device(f)) {
-		struct loop_device *l;
-
-		if (f->f_mapping->host->i_bdev == bdev)
-			return -EBADF;
-
-		l = f->f_mapping->host->i_bdev->bd_disk->private_data;
-		if (l->lo_state == Lo_unbound) {
-			return -EINVAL;
-		}
-		f = l->lo_backing_file;
-	}
-	if (!S_ISREG(inode->i_mode) && !S_ISBLK(inode->i_mode))
-		return -EINVAL;
-	return 0;
-}
-
 /*
  * loop_change_fd switched the backing store of a loopback device to
  * a new file. This is useful for operating system installers to free up
@@ -686,14 +646,13 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	if (!file)
 		goto out;
 
-	error = loop_validate_file(file, bdev);
-	if (error)
-		goto out_putf;
-
 	inode = file->f_mapping->host;
 	old_file = lo->lo_backing_file;
 
 	error = -EINVAL;
+
+	if (!S_ISREG(inode->i_mode) && !S_ISBLK(inode->i_mode))
+		goto out_putf;
 
 	/* size of the new backing store needs to be the same */
 	if (get_loop_size(lo, file) != get_loop_size(lo, old_file))
@@ -718,6 +677,13 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	fput(file);
  out:
 	return error;
+}
+
+static inline int is_loop_device(struct file *file)
+{
+	struct inode *i = file->f_mapping->host;
+
+	return i && S_ISBLK(i->i_mode) && MAJOR(i->i_rdev) == LOOP_MAJOR;
 }
 
 /* loop sysfs attributes */
@@ -816,17 +782,16 @@ static struct attribute_group loop_attribute_group = {
 	.attrs= loop_attrs,
 };
 
-static void loop_sysfs_init(struct loop_device *lo)
+static int loop_sysfs_init(struct loop_device *lo)
 {
-	lo->sysfs_inited = !sysfs_create_group(&disk_to_dev(lo->lo_disk)->kobj,
-						&loop_attribute_group);
+	return sysfs_create_group(&disk_to_dev(lo->lo_disk)->kobj,
+				  &loop_attribute_group);
 }
 
 static void loop_sysfs_exit(struct loop_device *lo)
 {
-	if (lo->sysfs_inited)
-		sysfs_remove_group(&disk_to_dev(lo->lo_disk)->kobj,
-				   &loop_attribute_group);
+	sysfs_remove_group(&disk_to_dev(lo->lo_disk)->kobj,
+			   &loop_attribute_group);
 }
 
 static void loop_config_discard(struct loop_device *lo)
@@ -867,7 +832,7 @@ static void loop_unprepare_queue(struct loop_device *lo)
 
 static int loop_kthread_worker_fn(void *worker_ptr)
 {
-	current->flags |= PF_LESS_THROTTLE | PF_MEMALLOC_NOIO;
+	current->flags |= PF_LESS_THROTTLE;
 	return kthread_worker_fn(worker_ptr);
 }
 
@@ -885,7 +850,7 @@ static int loop_prepare_queue(struct loop_device *lo)
 static int loop_set_fd(struct loop_device *lo, fmode_t mode,
 		       struct block_device *bdev, unsigned int arg)
 {
-	struct file	*file;
+	struct file	*file, *f;
 	struct inode	*inode;
 	struct address_space *mapping;
 	int		lo_flags = 0;
@@ -904,12 +869,28 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
 	if (lo->lo_state != Lo_unbound)
 		goto out_putf;
 
-	error = loop_validate_file(file, bdev);
-	if (error)
-		goto out_putf;
+	/* Avoid recursion */
+	f = file;
+	while (is_loop_device(f)) {
+		struct loop_device *l;
+
+		if (f->f_mapping->host->i_bdev == bdev)
+			goto out_putf;
+
+		l = f->f_mapping->host->i_bdev->bd_disk->private_data;
+		if (l->lo_state == Lo_unbound) {
+			error = -EINVAL;
+			goto out_putf;
+		}
+		f = l->lo_backing_file;
+	}
 
 	mapping = file->f_mapping;
 	inode = mapping->host;
+
+	error = -EINVAL;
+	if (!S_ISREG(inode->i_mode) && !S_ISBLK(inode->i_mode))
+		goto out_putf;
 
 	if (!(file->f_mode & FMODE_WRITE) || !(mode & FMODE_WRITE) ||
 	    !file->f_op->write_iter)
@@ -1107,12 +1088,6 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
 	if ((unsigned int) info->lo_encrypt_key_size > LO_KEY_SIZE)
 		return -EINVAL;
 
-	if (lo->lo_offset != info->lo_offset ||
-	    lo->lo_sizelimit != info->lo_sizelimit) {
-		sync_blockdev(lo->lo_device);
-		invalidate_bdev(lo->lo_device);
-	}
-
 	/* I/O need to be drained during transfer transition */
 	blk_mq_freeze_queue(lo->lo_queue);
 
@@ -1123,15 +1098,11 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
 	if (info->lo_encrypt_type) {
 		unsigned int type = info->lo_encrypt_type;
 
-		if (type >= MAX_LO_CRYPT) {
-			err = -EINVAL;
-			goto exit;
-		}
+		if (type >= MAX_LO_CRYPT)
+			return -EINVAL;
 		xfer = xfer_funcs[type];
-		if (xfer == NULL) {
-			err = -EINVAL;
-			goto exit;
-		}
+		if (xfer == NULL)
+			return -EINVAL;
 	} else
 		xfer = NULL;
 
@@ -1141,14 +1112,6 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
 
 	if (lo->lo_offset != info->lo_offset ||
 	    lo->lo_sizelimit != info->lo_sizelimit) {
-		/* kill_bdev should have truncated all the pages */
-		if (lo->lo_device->bd_inode->i_mapping->nrpages) {
-			err = -EAGAIN;
-			pr_warn("%s: loop%d (%s) has still dirty pages (nrpages=%lu)\n",
-				__func__, lo->lo_number, lo->lo_file_name,
-				lo->lo_device->bd_inode->i_mapping->nrpages);
-			goto exit;
-		}
 		if (figure_loop_size(lo, info->lo_offset, info->lo_sizelimit)) {
 			err = -EFBIG;
 			goto exit;
@@ -1199,17 +1162,21 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
 static int
 loop_get_status(struct loop_device *lo, struct loop_info64 *info)
 {
-	struct path path;
+	struct file *file = lo->lo_backing_file;
 	struct kstat stat;
-	int ret;
+	int error;
 
-	if (lo->lo_state != Lo_bound) {
-		mutex_unlock(&lo->lo_ctl_mutex);
+	if (lo->lo_state != Lo_bound)
 		return -ENXIO;
-	}
-
+	error = vfs_getattr(&file->f_path, &stat,
+			    STATX_INO, AT_STATX_SYNC_AS_STAT);
+	if (error)
+		return error;
 	memset(info, 0, sizeof(*info));
 	info->lo_number = lo->lo_number;
+	info->lo_device = huge_encode_dev(stat.dev);
+	info->lo_inode = stat.ino;
+	info->lo_rdevice = huge_encode_dev(lo->lo_device ? stat.rdev : stat.dev);
 	info->lo_offset = lo->lo_offset;
 	info->lo_sizelimit = lo->lo_sizelimit;
 	info->lo_flags = lo->lo_flags;
@@ -1222,19 +1189,7 @@ loop_get_status(struct loop_device *lo, struct loop_info64 *info)
 		memcpy(info->lo_encrypt_key, lo->lo_encrypt_key,
 		       lo->lo_encrypt_key_size);
 	}
-
-	/* Drop lo_ctl_mutex while we call into the filesystem. */
-	path = lo->lo_backing_file->f_path;
-	path_get(&path);
-	mutex_unlock(&lo->lo_ctl_mutex);
-	ret = vfs_getattr(&path, &stat, STATX_INO, AT_STATX_SYNC_AS_STAT);
-	if (!ret) {
-		info->lo_device = huge_encode_dev(stat.dev);
-		info->lo_inode = stat.ino;
-		info->lo_rdevice = huge_encode_dev(stat.rdev);
-	}
-	path_put(&path);
-	return ret;
+	return 0;
 }
 
 static void
@@ -1315,13 +1270,12 @@ static int
 loop_get_status_old(struct loop_device *lo, struct loop_info __user *arg) {
 	struct loop_info info;
 	struct loop_info64 info64;
-	int err;
+	int err = 0;
 
-	if (!arg) {
-		mutex_unlock(&lo->lo_ctl_mutex);
-		return -EINVAL;
-	}
-	err = loop_get_status(lo, &info64);
+	if (!arg)
+		err = -EINVAL;
+	if (!err)
+		err = loop_get_status(lo, &info64);
 	if (!err)
 		err = loop_info64_to_old(&info64, &info);
 	if (!err && copy_to_user(arg, &info, sizeof(info)))
@@ -1333,13 +1287,12 @@ loop_get_status_old(struct loop_device *lo, struct loop_info __user *arg) {
 static int
 loop_get_status64(struct loop_device *lo, struct loop_info64 __user *arg) {
 	struct loop_info64 info64;
-	int err;
+	int err = 0;
 
-	if (!arg) {
-		mutex_unlock(&lo->lo_ctl_mutex);
-		return -EINVAL;
-	}
-	err = loop_get_status(lo, &info64);
+	if (!arg)
+		err = -EINVAL;
+	if (!err)
+		err = loop_get_status(lo, &info64);
 	if (!err && copy_to_user(arg, &info64, sizeof(info64)))
 		err = -EFAULT;
 
@@ -1370,39 +1323,22 @@ static int loop_set_dio(struct loop_device *lo, unsigned long arg)
 
 static int loop_set_block_size(struct loop_device *lo, unsigned long arg)
 {
-	int err = 0;
-
 	if (lo->lo_state != Lo_bound)
 		return -ENXIO;
 
 	if (arg < 512 || arg > PAGE_SIZE || !is_power_of_2(arg))
 		return -EINVAL;
 
-	if (lo->lo_queue->limits.logical_block_size != arg) {
-		sync_blockdev(lo->lo_device);
-		invalidate_bdev(lo->lo_device);
-	}
-
 	blk_mq_freeze_queue(lo->lo_queue);
-
-	/* invalidate_bdev should have truncated all the pages */
-	if (lo->lo_queue->limits.logical_block_size != arg &&
-			lo->lo_device->bd_inode->i_mapping->nrpages) {
-		err = -EAGAIN;
-		pr_warn("%s: loop%d (%s) has still dirty pages (nrpages=%lu)\n",
-			__func__, lo->lo_number, lo->lo_file_name,
-			lo->lo_device->bd_inode->i_mapping->nrpages);
-		goto out_unfreeze;
-	}
 
 	blk_queue_logical_block_size(lo->lo_queue, arg);
 	blk_queue_physical_block_size(lo->lo_queue, arg);
 	blk_queue_io_min(lo->lo_queue, arg);
 	loop_update_dio(lo);
-out_unfreeze:
+
 	blk_mq_unfreeze_queue(lo->lo_queue);
 
-	return err;
+	return 0;
 }
 
 static int lo_ioctl(struct block_device *bdev, fmode_t mode,
@@ -1433,8 +1369,7 @@ static int lo_ioctl(struct block_device *bdev, fmode_t mode,
 		break;
 	case LOOP_GET_STATUS:
 		err = loop_get_status_old(lo, (struct loop_info __user *) arg);
-		/* loop_get_status() unlocks lo_ctl_mutex */
-		goto out_unlocked;
+		break;
 	case LOOP_SET_STATUS64:
 		err = -EPERM;
 		if ((mode & FMODE_WRITE) || capable(CAP_SYS_ADMIN))
@@ -1443,8 +1378,7 @@ static int lo_ioctl(struct block_device *bdev, fmode_t mode,
 		break;
 	case LOOP_GET_STATUS64:
 		err = loop_get_status64(lo, (struct loop_info64 __user *) arg);
-		/* loop_get_status() unlocks lo_ctl_mutex */
-		goto out_unlocked;
+		break;
 	case LOOP_SET_CAPACITY:
 		err = -EPERM;
 		if ((mode & FMODE_WRITE) || capable(CAP_SYS_ADMIN))
@@ -1577,13 +1511,12 @@ loop_get_status_compat(struct loop_device *lo,
 		       struct compat_loop_info __user *arg)
 {
 	struct loop_info64 info64;
-	int err;
+	int err = 0;
 
-	if (!arg) {
-		mutex_unlock(&lo->lo_ctl_mutex);
-		return -EINVAL;
-	}
-	err = loop_get_status(lo, &info64);
+	if (!arg)
+		err = -EINVAL;
+	if (!err)
+		err = loop_get_status(lo, &info64);
 	if (!err)
 		err = loop_info64_to_compat(&info64, arg);
 	return err;
@@ -1606,7 +1539,7 @@ static int lo_compat_ioctl(struct block_device *bdev, fmode_t mode,
 		mutex_lock(&lo->lo_ctl_mutex);
 		err = loop_get_status_compat(
 			lo, (struct compat_loop_info __user *) arg);
-		/* loop_get_status() unlocks lo_ctl_mutex */
+		mutex_unlock(&lo->lo_ctl_mutex);
 		break;
 	case LOOP_SET_CAPACITY:
 	case LOOP_CLR_FD:
@@ -1615,7 +1548,6 @@ static int lo_compat_ioctl(struct block_device *bdev, fmode_t mode,
 		arg = (unsigned long) compat_ptr(arg);
 	case LOOP_SET_FD:
 	case LOOP_CHANGE_FD:
-	case LOOP_SET_DIRECT_IO:
 		err = lo_ioctl(bdev, mode, cmd, arg);
 		break;
 	default:
@@ -1644,8 +1576,9 @@ out:
 	return err;
 }
 
-static void __lo_release(struct loop_device *lo)
+static void lo_release(struct gendisk *disk, fmode_t mode)
 {
+	struct loop_device *lo = disk->private_data;
 	int err;
 
 	if (atomic_dec_return(&lo->lo_refcnt))
@@ -1670,13 +1603,6 @@ static void __lo_release(struct loop_device *lo)
 	}
 
 	mutex_unlock(&lo->lo_ctl_mutex);
-}
-
-static void lo_release(struct gendisk *disk, fmode_t mode)
-{
-	mutex_lock(&loop_index_mutex);
-	__lo_release(disk->private_data);
-	mutex_unlock(&loop_index_mutex);
 }
 
 static const struct block_device_operations lo_fops = {

@@ -509,8 +509,7 @@ static irqreturn_t amd_gpio_irq_handler(int irq, void *dev_id)
 	irqreturn_t ret = IRQ_NONE;
 	unsigned int i, irqnr;
 	unsigned long flags;
-	u32 __iomem *regs;
-	u32  regval;
+	u32 *regs, regval;
 	u64 status, mask;
 
 	/* Read the wake status */
@@ -531,8 +530,7 @@ static irqreturn_t amd_gpio_irq_handler(int irq, void *dev_id)
 		/* Each status bit covers four pins */
 		for (i = 0; i < 4; i++) {
 			regval = readl(regs + i);
-			if (!(regval & PIN_IRQ_PENDING) ||
-			    !(regval & BIT(INTERRUPT_MASK_OFF)))
+			if (!(regval & PIN_IRQ_PENDING))
 				continue;
 			irq = irq_find_mapping(gc->irqdomain, irqnr + i);
 			generic_handle_irq(irq);

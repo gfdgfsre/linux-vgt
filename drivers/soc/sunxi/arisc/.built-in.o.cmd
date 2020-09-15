@@ -1,0 +1,1 @@
+cmd_drivers/soc/sunxi/arisc/built-in.o :=  /aosp/out/gcc-linaro-5.3.1-2016.05/gcc-aarch64/bin/aarch64-linux-gnu-ld -EL    -r -o drivers/soc/sunxi/arisc/built-in.o drivers/soc/sunxi/arisc/arisc-notifier.o drivers/soc/sunxi/arisc/scp-call.o drivers/soc/sunxi/arisc/interfaces/built-in.o drivers/soc/sunxi/arisc/arisc.o 

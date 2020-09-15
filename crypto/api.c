@@ -31,7 +31,7 @@ EXPORT_SYMBOL_GPL(crypto_alg_list);
 DECLARE_RWSEM(crypto_alg_sem);
 EXPORT_SYMBOL_GPL(crypto_alg_sem);
 
-SRCU_NOTIFIER_HEAD(crypto_chain);
+BLOCKING_NOTIFIER_HEAD(crypto_chain);
 EXPORT_SYMBOL_GPL(crypto_chain);
 
 static struct crypto_alg *crypto_larval_wait(struct crypto_alg *alg);
@@ -215,7 +215,7 @@ struct crypto_alg *crypto_larval_lookup(const char *name, u32 type, u32 mask)
 	mask &= ~(CRYPTO_ALG_LARVAL | CRYPTO_ALG_DEAD);
 
 	alg = crypto_alg_lookup(name, type, mask);
-	if (!alg && !(mask & CRYPTO_NOLOAD)) {
+	if (!alg) {
 		request_module("crypto-%s", name);
 
 		if (!((type ^ CRYPTO_ALG_NEED_FALLBACK) & mask &
@@ -236,10 +236,10 @@ int crypto_probing_notify(unsigned long val, void *v)
 {
 	int ok;
 
-	ok = srcu_notifier_call_chain(&crypto_chain, val, v);
+	ok = blocking_notifier_call_chain(&crypto_chain, val, v);
 	if (ok == NOTIFY_DONE) {
 		request_module("cryptomgr");
-		ok = srcu_notifier_call_chain(&crypto_chain, val, v);
+		ok = blocking_notifier_call_chain(&crypto_chain, val, v);
 	}
 
 	return ok;
@@ -339,12 +339,13 @@ static unsigned int crypto_ctxsize(struct crypto_alg *alg, u32 type, u32 mask)
 	return len;
 }
 
-static void crypto_shoot_alg(struct crypto_alg *alg)
+void crypto_shoot_alg(struct crypto_alg *alg)
 {
 	down_write(&crypto_alg_sem);
 	alg->cra_flags |= CRYPTO_ALG_DYING;
 	up_write(&crypto_alg_sem);
 }
+EXPORT_SYMBOL_GPL(crypto_shoot_alg);
 
 struct crypto_tfm *__crypto_alloc_tfm(struct crypto_alg *alg, u32 type,
 				      u32 mask)

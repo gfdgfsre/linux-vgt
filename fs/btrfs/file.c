@@ -784,7 +784,8 @@ next_slot:
 				btrfs_file_extent_num_bytes(leaf, fi);
 		} else if (extent_type == BTRFS_FILE_EXTENT_INLINE) {
 			extent_end = key.offset +
-				btrfs_file_extent_ram_bytes(leaf, fi);
+				btrfs_file_extent_inline_len(leaf,
+						     path->slots[0], fi);
 		} else {
 			/* can't happen */
 			BUG();
@@ -1624,7 +1625,6 @@ static noinline ssize_t __btrfs_buffered_write(struct file *file,
 			break;
 		}
 
-		only_release_metadata = false;
 		sector_offset = pos & (fs_info->sectorsize - 1);
 		reserve_bytes = round_up(write_bytes + sector_offset,
 				fs_info->sectorsize);
@@ -1778,6 +1778,7 @@ again:
 			set_extent_bit(&BTRFS_I(inode)->io_tree, lockstart,
 				       lockend, EXTENT_NORESERVE, NULL,
 				       NULL, GFP_NOFS);
+			only_release_metadata = false;
 		}
 
 		btrfs_drop_pages(pages, num_pages);
@@ -1881,7 +1882,7 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 	bool sync = (file->f_flags & O_DSYNC) || IS_SYNC(file->f_mapping->host);
 	ssize_t err;
 	loff_t pos;
-	size_t count;
+	size_t count = iov_iter_count(from);
 	loff_t oldsize;
 	int clean_page = 0;
 
@@ -1889,10 +1890,9 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 	    (iocb->ki_flags & IOCB_NOWAIT))
 		return -EOPNOTSUPP;
 
-	if (iocb->ki_flags & IOCB_NOWAIT) {
-		if (!inode_trylock(inode))
+	if (!inode_trylock(inode)) {
+		if (iocb->ki_flags & IOCB_NOWAIT)
 			return -EAGAIN;
-	} else {
 		inode_lock(inode);
 	}
 
@@ -1903,7 +1903,6 @@ static ssize_t btrfs_file_write_iter(struct kiocb *iocb,
 	}
 
 	pos = iocb->ki_pos;
-	count = iov_iter_count(from);
 	if (iocb->ki_flags & IOCB_NOWAIT) {
 		/*
 		 * We will allocate space in case nodatacow is not set,
@@ -2019,19 +2018,10 @@ int btrfs_release_file(struct inode *inode, struct file *filp)
 static int start_ordered_ops(struct inode *inode, loff_t start, loff_t end)
 {
 	int ret;
-	struct blk_plug plug;
 
-	/*
-	 * This is only called in fsync, which would do synchronous writes, so
-	 * a plug can merge adjacent IOs as much as possible.  Esp. in case of
-	 * multiple disks using raid profile, a large IO can be split to
-	 * several segments of stripe length (currently 64K).
-	 */
-	blk_start_plug(&plug);
 	atomic_inc(&BTRFS_I(inode)->sync_writers);
 	ret = btrfs_fdatawrite_range(inode, start, end);
 	atomic_dec(&BTRFS_I(inode)->sync_writers);
-	blk_finish_plug(&plug);
 
 	return ret;
 }
@@ -2060,25 +2050,11 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	u64 len;
 
 	/*
-	 * If the inode needs a full sync, make sure we use a full range to
-	 * avoid log tree corruption, due to hole detection racing with ordered
-	 * extent completion for adjacent ranges, and assertion failures during
-	 * hole detection.
-	 */
-	if (test_bit(BTRFS_INODE_NEEDS_FULL_SYNC,
-		     &BTRFS_I(inode)->runtime_flags)) {
-		start = 0;
-		end = LLONG_MAX;
-	}
-
-	/*
 	 * The range length can be represented by u64, we have to do the typecasts
 	 * to avoid signed overflow if it's [0, LLONG_MAX] eg. from fsync()
 	 */
 	len = (u64)end - (u64)start + 1;
 	trace_btrfs_sync_file(file, datasync);
-
-	btrfs_init_log_ctx(&ctx, inode);
 
 	/*
 	 * We write the dirty pages in the range and wait until they complete
@@ -2091,14 +2067,6 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		goto out;
 
 	inode_lock(inode);
-
-	/*
-	 * We take the dio_sem here because the tree log stuff can race with
-	 * lockless dio writes and get an extent map logged for an extent we
-	 * never waited on.  We need it this high up for lockdep reasons.
-	 */
-	down_write(&BTRFS_I(inode)->dio_sem);
-
 	atomic_inc(&root->log_batch);
 	full_sync = test_bit(BTRFS_INODE_NEEDS_FULL_SYNC,
 			     &BTRFS_I(inode)->runtime_flags);
@@ -2150,7 +2118,6 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		ret = start_ordered_ops(inode, start, end);
 	}
 	if (ret) {
-		up_write(&BTRFS_I(inode)->dio_sem);
 		inode_unlock(inode);
 		goto out;
 	}
@@ -2206,7 +2173,6 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		 * checked called fsync.
 		 */
 		ret = filemap_check_wb_err(inode->i_mapping, file->f_wb_err);
-		up_write(&BTRFS_I(inode)->dio_sem);
 		inode_unlock(inode);
 		goto out;
 	}
@@ -2231,11 +2197,12 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	trans = btrfs_start_transaction(root, 0);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
-		up_write(&BTRFS_I(inode)->dio_sem);
 		inode_unlock(inode);
 		goto out;
 	}
 	trans->sync = true;
+
+	btrfs_init_log_ctx(&ctx, inode);
 
 	ret = btrfs_log_dentry_safe(trans, root, dentry, start, end, &ctx);
 	if (ret < 0) {
@@ -2253,7 +2220,6 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	 * file again, but that will end up using the synchronization
 	 * inside btrfs_sync_log to keep things safe.
 	 */
-	up_write(&BTRFS_I(inode)->dio_sem);
 	inode_unlock(inode);
 
 	/*
@@ -2295,7 +2261,6 @@ int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		ret = btrfs_end_transaction(trans);
 	}
 out:
-	ASSERT(list_empty(&ctx.list));
 	err = file_check_and_advance_wb_err(file);
 	if (!ret)
 		ret = err;
@@ -2785,11 +2750,6 @@ out_only_mutex:
 		 * for detecting, at fsync time, if the inode isn't yet in the
 		 * log tree or it's there but not up to date.
 		 */
-		struct timespec now = current_time(inode);
-
-		inode_inc_iversion(inode);
-		inode->i_mtime = now;
-		inode->i_ctime = now;
 		trans = btrfs_start_transaction(root, 1);
 		if (IS_ERR(trans)) {
 			err = PTR_ERR(trans);
@@ -2982,7 +2942,6 @@ static long btrfs_fallocate(struct file *file, int mode,
 			ret = btrfs_qgroup_reserve_data(inode, &data_reserved,
 					cur_offset, last_byte - cur_offset);
 			if (ret < 0) {
-				cur_offset = last_byte;
 				free_extent_map(em);
 				break;
 			}
@@ -3053,7 +3012,7 @@ out:
 	/* Let go of our reservation. */
 	if (ret != 0)
 		btrfs_free_reserved_data_space(inode, data_reserved,
-				cur_offset, alloc_end - cur_offset);
+				alloc_start, alloc_end - cur_offset);
 	extent_changeset_free(data_reserved);
 	return ret;
 }

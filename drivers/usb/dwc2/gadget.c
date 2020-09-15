@@ -848,7 +848,6 @@ static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
 	u32 index;
 	u32 maxsize = 0;
 	u32 mask = 0;
-	u8 pid = 0;
 
 	maxsize = dwc2_gadget_get_desc_params(hs_ep, &mask);
 	if (len > maxsize) {
@@ -894,11 +893,7 @@ static int dwc2_gadget_fill_isoc_desc(struct dwc2_hsotg_ep *hs_ep,
 			 ((len << DEV_DMA_NBYTES_SHIFT) & mask));
 
 	if (hs_ep->dir_in) {
-		if (len)
-			pid = DIV_ROUND_UP(len, hs_ep->ep.maxpacket);
-		else
-			pid = 1;
-		desc->status |= ((pid << DEV_DMA_ISOC_PID_SHIFT) &
+		desc->status |= ((hs_ep->mc << DEV_DMA_ISOC_PID_SHIFT) &
 				 DEV_DMA_ISOC_PID_MASK) |
 				((len % hs_ep->ep.maxpacket) ?
 				 DEV_DMA_SHORT : 0) |
@@ -937,7 +932,6 @@ static void dwc2_gadget_start_isoc_ddma(struct dwc2_hsotg_ep *hs_ep)
 	u32 ctrl;
 
 	if (list_empty(&hs_ep->queue)) {
-		hs_ep->target_frame = TARGET_FRAME_INITIAL;
 		dev_dbg(hsotg->dev, "%s: No requests in queue\n", __func__);
 		return;
 	}
@@ -2276,7 +2270,6 @@ static unsigned int dwc2_gadget_get_xfersize_ddma(struct dwc2_hsotg_ep *hs_ep)
 		if (status & DEV_DMA_STS_MASK)
 			dev_err(hsotg->dev, "descriptor %d closed with %x\n",
 				i, status & DEV_DMA_STS_MASK);
-		desc++;
 	}
 
 	return bytes_rem;
@@ -3421,6 +3414,12 @@ void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *hsotg,
 	dwc2_writel(dwc2_hsotg_ep0_mps(hsotg->eps_out[0]->ep.maxpacket) |
 	       DXEPCTL_USBACTEP, hsotg->regs + DIEPCTL0);
 
+	dwc2_hsotg_enqueue_setup(hsotg);
+
+	dev_dbg(hsotg->dev, "EP0: DIEPCTL0=0x%08x, DOEPCTL0=0x%08x\n",
+		dwc2_readl(hsotg->regs + DIEPCTL0),
+		dwc2_readl(hsotg->regs + DOEPCTL0));
+
 	/* clear global NAKs */
 	val = DCTL_CGOUTNAK | DCTL_CGNPINNAK;
 	if (!is_usb_reset)
@@ -3431,12 +3430,6 @@ void dwc2_hsotg_core_init_disconnected(struct dwc2_hsotg *hsotg,
 	mdelay(3);
 
 	hsotg->lx_state = DWC2_L0;
-
-	dwc2_hsotg_enqueue_setup(hsotg);
-
-	dev_dbg(hsotg->dev, "EP0: DIEPCTL0=0x%08x, DOEPCTL0=0x%08x\n",
-		dwc2_readl(hsotg->regs + DIEPCTL0),
-		dwc2_readl(hsotg->regs + DOEPCTL0));
 }
 
 static void dwc2_hsotg_core_disconnect(struct dwc2_hsotg *hsotg)
@@ -3933,12 +3926,11 @@ static int dwc2_hsotg_ep_enable(struct usb_ep *ep,
 	 * a unique tx-fifo even if it is non-periodic.
 	 */
 	if (dir_in && hsotg->dedicated_fifos) {
-		unsigned fifo_count = dwc2_hsotg_tx_fifo_count(hsotg);
 		u32 fifo_index = 0;
 		u32 fifo_size = UINT_MAX;
 
 		size = hs_ep->ep.maxpacket * hs_ep->mc;
-		for (i = 1; i <= fifo_count; ++i) {
+		for (i = 1; i < hsotg->num_of_eps; ++i) {
 			if (hsotg->fifo_map & (1 << i))
 				continue;
 			val = dwc2_readl(hsotg->regs + DPTXFSIZN(i));
@@ -4723,6 +4715,10 @@ int dwc2_gadget_init(struct dwc2_hsotg *hsotg, int irq)
 					  epnum, 0);
 	}
 
+	ret = usb_add_gadget_udc(dev, &hsotg->gadget);
+	if (ret)
+		return ret;
+
 	dwc2_hsotg_dump(hsotg);
 
 	return 0;
@@ -4735,7 +4731,6 @@ int dwc2_gadget_init(struct dwc2_hsotg *hsotg, int irq)
 int dwc2_hsotg_remove(struct dwc2_hsotg *hsotg)
 {
 	usb_del_gadget_udc(&hsotg->gadget);
-	dwc2_hsotg_ep_free_request(&hsotg->eps_out[0]->ep, hsotg->ctrl_req);
 
 	return 0;
 }

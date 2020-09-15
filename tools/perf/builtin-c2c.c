@@ -528,8 +528,8 @@ tot_hitm_cmp(struct perf_hpp_fmt *fmt __maybe_unused,
 {
 	struct c2c_hist_entry *c2c_left;
 	struct c2c_hist_entry *c2c_right;
-	uint64_t tot_hitm_left;
-	uint64_t tot_hitm_right;
+	unsigned int tot_hitm_left;
+	unsigned int tot_hitm_right;
 
 	c2c_left  = container_of(left, struct c2c_hist_entry, he);
 	c2c_right = container_of(right, struct c2c_hist_entry, he);
@@ -562,8 +562,7 @@ __f ## _cmp(struct perf_hpp_fmt *fmt __maybe_unused,			\
 									\
 	c2c_left  = container_of(left, struct c2c_hist_entry, he);	\
 	c2c_right = container_of(right, struct c2c_hist_entry, he);	\
-	return (uint64_t) c2c_left->stats.__f -				\
-	       (uint64_t) c2c_right->stats.__f;				\
+	return c2c_left->stats.__f - c2c_right->stats.__f;		\
 }
 
 #define STAT_FN(__f)		\
@@ -616,8 +615,7 @@ ld_llcmiss_cmp(struct perf_hpp_fmt *fmt __maybe_unused,
 	c2c_left  = container_of(left, struct c2c_hist_entry, he);
 	c2c_right = container_of(right, struct c2c_hist_entry, he);
 
-	return (uint64_t) llc_miss(&c2c_left->stats) -
-	       (uint64_t) llc_miss(&c2c_right->stats);
+	return llc_miss(&c2c_left->stats) - llc_miss(&c2c_right->stats);
 }
 
 static uint64_t total_records(struct c2c_stats *stats)
@@ -1937,12 +1935,6 @@ static int setup_nodes(struct perf_session *session)
 		if (!set)
 			return -ENOMEM;
 
-		nodes[node] = set;
-
-		/* empty node, skip */
-		if (cpu_map__empty(map))
-			continue;
-
 		for (cpu = 0; cpu < map->nr; cpu++) {
 			set_bit(map->map[cpu], set);
 
@@ -1951,6 +1943,8 @@ static int setup_nodes(struct perf_session *session)
 
 			cpu2node[map->map[cpu]] = node;
 		}
+
+		nodes[node] = set;
 	}
 
 	setup_nodes_header();
@@ -2235,9 +2229,6 @@ static int perf_c2c__browse_cacheline(struct hist_entry *he)
 	" s             Togle full lenght of symbol and source line columns \n"
 	" q             Return back to cacheline list \n";
 
-	if (!he)
-		return 0;
-
 	/* Display compact version first. */
 	c2c.symbol_full = false;
 
@@ -2402,10 +2393,9 @@ static int setup_callchain(struct perf_evlist *evlist)
 	enum perf_call_graph_mode mode = CALLCHAIN_NONE;
 
 	if ((sample_type & PERF_SAMPLE_REGS_USER) &&
-	    (sample_type & PERF_SAMPLE_STACK_USER)) {
+	    (sample_type & PERF_SAMPLE_STACK_USER))
 		mode = CALLCHAIN_DWARF;
-		dwarf_callchain_users = true;
-	} else if (sample_type & PERF_SAMPLE_BRANCH_STACK)
+	else if (sample_type & PERF_SAMPLE_BRANCH_STACK)
 		mode = CALLCHAIN_LBR;
 	else if (sample_type & PERF_SAMPLE_CALLCHAIN)
 		mode = CALLCHAIN_FP;
@@ -2456,7 +2446,6 @@ static int build_cl_output(char *cl_sort, bool no_source)
 	bool add_sym   = false;
 	bool add_dso   = false;
 	bool add_src   = false;
-	int ret = 0;
 
 	if (!buf)
 		return -ENOMEM;
@@ -2475,8 +2464,7 @@ static int build_cl_output(char *cl_sort, bool no_source)
 			add_dso = true;
 		} else if (strcmp(tok, "offset")) {
 			pr_err("unrecognized sort token: %s\n", tok);
-			ret = -EINVAL;
-			goto err;
+			return -EINVAL;
 		}
 	}
 
@@ -2499,15 +2487,13 @@ static int build_cl_output(char *cl_sort, bool no_source)
 		add_sym ? "symbol," : "",
 		add_dso ? "dso," : "",
 		add_src ? "cl_srcline," : "",
-		"node") < 0) {
-		ret = -ENOMEM;
-		goto err;
-	}
+		"node") < 0)
+		return -ENOMEM;
 
 	c2c.show_src = add_src;
-err:
+
 	free(buf);
-	return ret;
+	return 0;
 }
 
 static int setup_coalesce(const char *coalesce, bool no_source)
@@ -2747,7 +2733,6 @@ static int perf_c2c__record(int argc, const char **argv)
 		if (!perf_mem_events[j].supported) {
 			pr_err("failed: event '%s' not supported\n",
 			       perf_mem_events[j].name);
-			free(rec_argv);
 			return -1;
 		}
 

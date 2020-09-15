@@ -31,7 +31,6 @@
 #include <linux/of.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
-#include <linux/iopoll.h>
 
 #define CDNS_UART_TTY_NAME	"ttyPS"
 #define CDNS_UART_NAME		"xuartps"
@@ -40,7 +39,6 @@
 #define CDNS_UART_NR_PORTS	2
 #define CDNS_UART_FIFO_SIZE	64	/* FIFO size */
 #define CDNS_UART_REGISTER_SPACE	0x1000
-#define TX_TIMEOUT		500000
 
 /* Rx Trigger level */
 static int rx_trigger_level = 56;
@@ -132,7 +130,7 @@ MODULE_PARM_DESC(rx_timeout, "Rx timeout, 1-255");
 #define CDNS_UART_IXR_RXTRIG	0x00000001 /* RX FIFO trigger interrupt */
 #define CDNS_UART_IXR_RXFULL	0x00000004 /* RX FIFO full interrupt. */
 #define CDNS_UART_IXR_RXEMPTY	0x00000002 /* RX FIFO empty interrupt. */
-#define CDNS_UART_IXR_RXMASK	0x000021e7 /* Valid RX bit mask */
+#define CDNS_UART_IXR_MASK	0x00001FFF /* Valid bit mask */
 
 	/*
 	 * Do not enable parity error interrupt for the following
@@ -368,13 +366,7 @@ static irqreturn_t cdns_uart_isr(int irq, void *dev_id)
 		cdns_uart_handle_tx(dev_id);
 		isrstatus &= ~CDNS_UART_IXR_TXEMPTY;
 	}
-
-	/*
-	 * Skip RX processing if RX is disabled as RXEMPTY will never be set
-	 * as read bytes will not be removed from the FIFO.
-	 */
-	if (isrstatus & CDNS_UART_IXR_RXMASK &&
-	    !(readl(port->membase + CDNS_UART_CR) & CDNS_UART_CR_RX_DIS))
+	if (isrstatus & CDNS_UART_IXR_MASK)
 		cdns_uart_handle_rx(dev_id, isrstatus);
 
 	spin_unlock(&port->lock);
@@ -687,21 +679,18 @@ static void cdns_uart_set_termios(struct uart_port *port,
 	unsigned int cval = 0;
 	unsigned int baud, minbaud, maxbaud;
 	unsigned long flags;
-	unsigned int ctrl_reg, mode_reg, val;
-	int err;
+	unsigned int ctrl_reg, mode_reg;
+
+	spin_lock_irqsave(&port->lock, flags);
 
 	/* Wait for the transmit FIFO to empty before making changes */
 	if (!(readl(port->membase + CDNS_UART_CR) &
 				CDNS_UART_CR_TX_DIS)) {
-		err = readl_poll_timeout(port->membase + CDNS_UART_SR,
-					 val, (val & CDNS_UART_SR_TXEMPTY),
-					 1000, TX_TIMEOUT);
-		if (err) {
-			dev_err(port->dev, "timed out waiting for tx empty");
-			return;
+		while (!(readl(port->membase + CDNS_UART_SR) &
+				CDNS_UART_SR_TXEMPTY)) {
+			cpu_relax();
 		}
 	}
-	spin_lock_irqsave(&port->lock, flags);
 
 	/* Disable the TX and RX to set baud rate */
 	ctrl_reg = readl(port->membase + CDNS_UART_CR);
@@ -1126,7 +1115,7 @@ static struct uart_port *cdns_uart_get_port(int id)
 	struct uart_port *port;
 
 	/* Try the given port id if failed use default method */
-	if (id < CDNS_UART_NR_PORTS && cdns_uart_port[id].mapbase != 0) {
+	if (cdns_uart_port[id].mapbase != 0) {
 		/* Find the next unused port */
 		for (id = 0; id < CDNS_UART_NR_PORTS; id++)
 			if (cdns_uart_port[id].mapbase == 0)
@@ -1275,7 +1264,7 @@ static void cdns_uart_console_write(struct console *co, const char *s,
  *
  * Return: 0 on success, negative errno otherwise.
  */
-static int cdns_uart_console_setup(struct console *co, char *options)
+static int __init cdns_uart_console_setup(struct console *co, char *options)
 {
 	struct uart_port *port = &cdns_uart_port[co->index];
 	int baud = 9600;
@@ -1347,11 +1336,24 @@ static struct uart_driver cdns_uart_uart_driver = {
 static int cdns_uart_suspend(struct device *device)
 {
 	struct uart_port *port = dev_get_drvdata(device);
-	int may_wake;
+	struct tty_struct *tty;
+	struct device *tty_dev;
+	int may_wake = 0;
 
-	may_wake = device_may_wakeup(device);
+	/* Get the tty which could be NULL so don't assume it's valid */
+	tty = tty_port_tty_get(&port->state->port);
+	if (tty) {
+		tty_dev = tty->dev;
+		may_wake = device_may_wakeup(tty_dev);
+		tty_kref_put(tty);
+	}
 
-	if (console_suspend_enabled && may_wake) {
+	/*
+	 * Call the API provided in serial_core.c file which handles
+	 * the suspend.
+	 */
+	uart_suspend_port(&cdns_uart_uart_driver, port);
+	if (!(console_suspend_enabled && !may_wake)) {
 		unsigned long flags = 0;
 
 		spin_lock_irqsave(&port->lock, flags);
@@ -1366,11 +1368,7 @@ static int cdns_uart_suspend(struct device *device)
 		spin_unlock_irqrestore(&port->lock, flags);
 	}
 
-	/*
-	 * Call the API provided in serial_core.c file which handles
-	 * the suspend.
-	 */
-	return uart_suspend_port(&cdns_uart_uart_driver, port);
+	return 0;
 }
 
 /**
@@ -1384,9 +1382,17 @@ static int cdns_uart_resume(struct device *device)
 	struct uart_port *port = dev_get_drvdata(device);
 	unsigned long flags = 0;
 	u32 ctrl_reg;
-	int may_wake;
+	struct tty_struct *tty;
+	struct device *tty_dev;
+	int may_wake = 0;
 
-	may_wake = device_may_wakeup(device);
+	/* Get the tty which could be NULL so don't assume it's valid */
+	tty = tty_port_tty_get(&port->state->port);
+	if (tty) {
+		tty_dev = tty->dev;
+		may_wake = device_may_wakeup(tty_dev);
+		tty_kref_put(tty);
+	}
 
 	if (console_suspend_enabled && !may_wake) {
 		struct cdns_uart *cdns_uart = port->private_data;
@@ -1638,7 +1644,6 @@ static struct platform_driver cdns_uart_platform_driver = {
 		.name = CDNS_UART_NAME,
 		.of_match_table = cdns_uart_of_match,
 		.pm = &cdns_uart_dev_pm_ops,
-		.suppress_bind_attrs = IS_BUILTIN(CONFIG_SERIAL_XILINX_PS_UART),
 		},
 };
 

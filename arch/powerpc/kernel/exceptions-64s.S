@@ -254,7 +254,7 @@ BEGIN_FTR_SECTION
 	LOAD_HANDLER(r12, machine_check_handle_early)
 1:	mtspr	SPRN_SRR0,r12
 	mtspr	SPRN_SRR1,r11
-	RFI_TO_KERNEL
+	rfid
 	b	.	/* prevent speculative execution */
 2:
 	/* Stack overflow. Stay on emergency stack and panic.
@@ -443,7 +443,7 @@ EXC_COMMON_BEGIN(machine_check_handle_early)
 	li	r3,MSR_ME
 	andc	r10,r10,r3		/* Turn off MSR_ME */
 	mtspr	SPRN_SRR1,r10
-	RFI_TO_KERNEL
+	rfid
 	b	.
 2:
 	/*
@@ -461,13 +461,9 @@ EXC_COMMON_BEGIN(machine_check_handle_early)
 	 */
 	bl	machine_check_queue_event
 	MACHINE_CHECK_HANDLER_WINDUP
-	RFI_TO_USER_OR_KERNEL
+	rfid
 9:
 	/* Deliver the machine check to host kernel in V mode. */
-BEGIN_FTR_SECTION
-	ld	r10,ORIG_GPR3(r1)
-	mtspr	SPRN_CFAR,r10
-END_FTR_SECTION_IFSET(CPU_FTR_CFAR)
 	MACHINE_CHECK_HANDLER_WINDUP
 	b	machine_check_pSeries
 
@@ -546,7 +542,7 @@ EXC_COMMON_BEGIN(instruction_access_common)
 	RECONCILE_IRQ_STATE(r10, r11)
 	ld	r12,_MSR(r1)
 	ld	r3,_NIP(r1)
-	andis.	r4,r12,DSISR_SRR1_MATCH_64S@h
+	andis.	r4,r12,DSISR_BAD_FAULT_64S@h
 	li	r5,0x400
 	std	r3,_DAR(r1)
 	std	r4,_DSISR(r1)
@@ -600,9 +596,6 @@ EXC_COMMON_BEGIN(slb_miss_common)
 	stw	r9,PACA_EXSLB+EX_CCR(r13)	/* save CR in exc. frame */
 	std	r10,PACA_EXSLB+EX_LR(r13)	/* save LR */
 
-	andi.	r9,r11,MSR_PR	// Check for exception from userspace
-	cmpdi	cr4,r9,MSR_PR	// And save the result in CR4 for later
-
 	/*
 	 * Test MSR_RI before calling slb_allocate_realmode, because the
 	 * MSR in r11 gets clobbered. However we still want to allocate
@@ -629,12 +622,9 @@ END_MMU_FTR_SECTION_IFCLR(MMU_FTR_TYPE_RADIX)
 
 	/* All done -- return from exception. */
 
-	bne	cr4,1f		/* returning to kernel */
-
 .machine	push
 .machine	"power4"
 	mtcrf	0x80,r9
-	mtcrf	0x08,r9		/* MSR[PR] indication is in cr4 */
 	mtcrf	0x04,r9		/* MSR[RI] indication is in cr5 */
 	mtcrf	0x02,r9		/* I/D indication is in cr6 */
 	mtcrf	0x01,r9		/* slb_allocate uses cr0 and cr7 */
@@ -648,29 +638,8 @@ END_MMU_FTR_SECTION_IFCLR(MMU_FTR_TYPE_RADIX)
 	ld	r11,PACA_EXSLB+EX_R11(r13)
 	ld	r12,PACA_EXSLB+EX_R12(r13)
 	ld	r13,PACA_EXSLB+EX_R13(r13)
-	RFI_TO_USER
+	rfid
 	b	.	/* prevent speculative execution */
-1:
-.machine	push
-.machine	"power4"
-	mtcrf	0x80,r9
-	mtcrf	0x08,r9		/* MSR[PR] indication is in cr4 */
-	mtcrf	0x04,r9		/* MSR[RI] indication is in cr5 */
-	mtcrf	0x02,r9		/* I/D indication is in cr6 */
-	mtcrf	0x01,r9		/* slb_allocate uses cr0 and cr7 */
-.machine	pop
-
-	RESTORE_CTR(r9, PACA_EXSLB)
-	RESTORE_PPR_PACA(PACA_EXSLB, r9)
-	mr	r3,r12
-	ld	r9,PACA_EXSLB+EX_R9(r13)
-	ld	r10,PACA_EXSLB+EX_R10(r13)
-	ld	r11,PACA_EXSLB+EX_R11(r13)
-	ld	r12,PACA_EXSLB+EX_R12(r13)
-	ld	r13,PACA_EXSLB+EX_R13(r13)
-	RFI_TO_KERNEL
-	b	.	/* prevent speculative execution */
-
 
 2:	std     r3,PACA_EXSLB+EX_DAR(r13)
 	mr	r3,r12
@@ -680,7 +649,7 @@ END_MMU_FTR_SECTION_IFCLR(MMU_FTR_TYPE_RADIX)
 	mtspr	SPRN_SRR0,r10
 	ld	r10,PACAKMSR(r13)
 	mtspr	SPRN_SRR1,r10
-	RFI_TO_KERNEL
+	rfid
 	b	.
 
 8:	std     r3,PACA_EXSLB+EX_DAR(r13)
@@ -691,7 +660,7 @@ END_MMU_FTR_SECTION_IFCLR(MMU_FTR_TYPE_RADIX)
 	mtspr	SPRN_SRR0,r10
 	ld	r10,PACAKMSR(r13)
 	mtspr	SPRN_SRR1,r10
-	RFI_TO_KERNEL
+	rfid
 	b	.
 
 EXC_COMMON_BEGIN(unrecov_slb)
@@ -708,7 +677,7 @@ EXC_COMMON_BEGIN(bad_addr_slb)
 	ld	r3, PACA_EXSLB+EX_DAR(r13)
 	std	r3, _DAR(r1)
 	beq	cr6, 2f
-	li	r10, 0x481		/* fix trap number for I-SLB miss */
+	li	r10, 0x480		/* fix trap number for I-SLB miss */
 	std	r10, _TRAP(r1)
 2:	bl	save_nvgprs
 	addi	r3, r1, STACK_FRAME_OVERHEAD
@@ -829,7 +798,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_TM)
 #endif
 
 
-EXC_REAL_OOL_MASKABLE(decrementer, 0x900, 0x80)
+EXC_REAL_MASKABLE(decrementer, 0x900, 0x80)
 EXC_VIRT_MASKABLE(decrementer, 0x4900, 0x80, 0x900)
 TRAMP_KVM(PACA_EXGEN, 0x900)
 EXC_COMMON_ASYNC(decrementer_common, 0x900, timer_interrupt)
@@ -905,7 +874,6 @@ EXC_COMMON(trap_0b_common, 0xb00, unknown_exception)
 	mtctr	r13;							\
 	GET_PACA(r13);							\
 	std	r10,PACA_EXGEN+EX_R10(r13);				\
-	INTERRUPT_TO_KERNEL;						\
 	KVMTEST_PR(0xc00); /* uses r10, branch to do_kvm_0xc00_system_call */ \
 	HMT_MEDIUM;							\
 	mfctr	r9;
@@ -914,8 +882,7 @@ EXC_COMMON(trap_0b_common, 0xb00, unknown_exception)
 #define SYSCALL_KVMTEST							\
 	HMT_MEDIUM;							\
 	mr	r9,r13;							\
-	GET_PACA(r13);							\
-	INTERRUPT_TO_KERNEL;
+	GET_PACA(r13);
 #endif
 	
 #define LOAD_SYSCALL_HANDLER(reg)					\
@@ -938,7 +905,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_REAL_LE)				\
 	mtspr	SPRN_SRR0,r10 ; 				\
 	ld	r10,PACAKMSR(r13) ;				\
 	mtspr	SPRN_SRR1,r10 ; 				\
-	RFI_TO_KERNEL ;						\
+	rfid ; 							\
 	b	. ;	/* prevent speculative execution */
 
 #define SYSCALL_FASTENDIAN					\
@@ -947,7 +914,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_REAL_LE)				\
 	xori	r12,r12,MSR_LE ;				\
 	mtspr	SPRN_SRR1,r12 ;					\
 	mr	r13,r9 ;					\
-	RFI_TO_USER ;	/* return to userspace */		\
+	rfid ;		/* return to userspace */		\
 	b	. ;	/* prevent speculative execution */
 
 #if defined(CONFIG_RELOCATABLE)
@@ -1332,7 +1299,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_CFAR)
 	ld	r11,PACA_EXGEN+EX_R11(r13)
 	ld	r12,PACA_EXGEN+EX_R12(r13)
 	ld	r13,PACA_EXGEN+EX_R13(r13)
-	HRFI_TO_UNKNOWN
+	HRFID
 	b	.
 #endif
 
@@ -1436,108 +1403,9 @@ masked_##_H##interrupt:					\
 	ld	r10,PACA_EXGEN+EX_R10(r13);		\
 	ld	r11,PACA_EXGEN+EX_R11(r13);		\
 	/* returns to kernel where r13 must be set up, so don't restore it */ \
-	##_H##RFI_TO_KERNEL;				\
+	##_H##rfid;					\
 	b	.;					\
 	MASKED_DEC_HANDLER(_H)
-
-TRAMP_REAL_BEGIN(stf_barrier_fallback)
-	std	r9,PACA_EXRFI+EX_R9(r13)
-	std	r10,PACA_EXRFI+EX_R10(r13)
-	sync
-	ld	r9,PACA_EXRFI+EX_R9(r13)
-	ld	r10,PACA_EXRFI+EX_R10(r13)
-	ori	31,31,0
-	.rept 14
-	b	1f
-1:
-	.endr
-	blr
-
-TRAMP_REAL_BEGIN(rfi_flush_fallback)
-	SET_SCRATCH0(r13);
-	GET_PACA(r13);
-	std	r1,PACA_EXRFI+EX_R12(r13)
-	ld	r1,PACAKSAVE(r13)
-	std	r9,PACA_EXRFI+EX_R9(r13)
-	std	r10,PACA_EXRFI+EX_R10(r13)
-	std	r11,PACA_EXRFI+EX_R11(r13)
-	mfctr	r9
-	ld	r10,PACA_RFI_FLUSH_FALLBACK_AREA(r13)
-	ld	r11,PACA_L1D_FLUSH_SIZE(r13)
-	srdi	r11,r11,(7 + 3) /* 128 byte lines, unrolled 8x */
-	mtctr	r11
-	DCBT_STOP_ALL_STREAM_IDS(r11) /* Stop prefetch streams */
-
-	/* order ld/st prior to dcbt stop all streams with flushing */
-	sync
-
-	/*
-	 * The load adresses are at staggered offsets within cachelines,
-	 * which suits some pipelines better (on others it should not
-	 * hurt).
-	 */
-1:
-	ld	r11,(0x80 + 8)*0(r10)
-	ld	r11,(0x80 + 8)*1(r10)
-	ld	r11,(0x80 + 8)*2(r10)
-	ld	r11,(0x80 + 8)*3(r10)
-	ld	r11,(0x80 + 8)*4(r10)
-	ld	r11,(0x80 + 8)*5(r10)
-	ld	r11,(0x80 + 8)*6(r10)
-	ld	r11,(0x80 + 8)*7(r10)
-	addi	r10,r10,0x80*8
-	bdnz	1b
-
-	mtctr	r9
-	ld	r9,PACA_EXRFI+EX_R9(r13)
-	ld	r10,PACA_EXRFI+EX_R10(r13)
-	ld	r11,PACA_EXRFI+EX_R11(r13)
-	ld	r1,PACA_EXRFI+EX_R12(r13)
-	GET_SCRATCH0(r13);
-	rfid
-
-TRAMP_REAL_BEGIN(hrfi_flush_fallback)
-	SET_SCRATCH0(r13);
-	GET_PACA(r13);
-	std	r1,PACA_EXRFI+EX_R12(r13)
-	ld	r1,PACAKSAVE(r13)
-	std	r9,PACA_EXRFI+EX_R9(r13)
-	std	r10,PACA_EXRFI+EX_R10(r13)
-	std	r11,PACA_EXRFI+EX_R11(r13)
-	mfctr	r9
-	ld	r10,PACA_RFI_FLUSH_FALLBACK_AREA(r13)
-	ld	r11,PACA_L1D_FLUSH_SIZE(r13)
-	srdi	r11,r11,(7 + 3) /* 128 byte lines, unrolled 8x */
-	mtctr	r11
-	DCBT_STOP_ALL_STREAM_IDS(r11) /* Stop prefetch streams */
-
-	/* order ld/st prior to dcbt stop all streams with flushing */
-	sync
-
-	/*
-	 * The load adresses are at staggered offsets within cachelines,
-	 * which suits some pipelines better (on others it should not
-	 * hurt).
-	 */
-1:
-	ld	r11,(0x80 + 8)*0(r10)
-	ld	r11,(0x80 + 8)*1(r10)
-	ld	r11,(0x80 + 8)*2(r10)
-	ld	r11,(0x80 + 8)*3(r10)
-	ld	r11,(0x80 + 8)*4(r10)
-	ld	r11,(0x80 + 8)*5(r10)
-	ld	r11,(0x80 + 8)*6(r10)
-	ld	r11,(0x80 + 8)*7(r10)
-	addi	r10,r10,0x80*8
-	bdnz	1b
-
-	mtctr	r9
-	ld	r9,PACA_EXRFI+EX_R9(r13)
-	ld	r10,PACA_EXRFI+EX_R10(r13)
-	ld	r11,PACA_EXRFI+EX_R11(r13)
-	ld	r1,PACA_EXRFI+EX_R12(r13)
-	GET_SCRATCH0(r13);
-	hrfid
 
 /*
  * Real mode exceptions actually use this too, but alternate
@@ -1558,7 +1426,7 @@ TRAMP_REAL_BEGIN(kvmppc_skip_interrupt)
 	addi	r13, r13, 4
 	mtspr	SPRN_SRR0, r13
 	GET_SCRATCH0(r13)
-	RFI_TO_KERNEL
+	rfid
 	b	.
 
 TRAMP_REAL_BEGIN(kvmppc_skip_Hinterrupt)
@@ -1570,7 +1438,7 @@ TRAMP_REAL_BEGIN(kvmppc_skip_Hinterrupt)
 	addi	r13, r13, 4
 	mtspr	SPRN_HSRR0, r13
 	GET_SCRATCH0(r13)
-	HRFI_TO_KERNEL
+	hrfid
 	b	.
 #endif
 
@@ -1638,7 +1506,7 @@ USE_TEXT_SECTION()
 	.balign	IFETCH_ALIGN_BYTES
 do_hash_page:
 	#ifdef CONFIG_PPC_STD_MMU_64
-	lis	r0,(DSISR_BAD_FAULT_64S|DSISR_DABRMATCH)@h
+	lis	r0,DSISR_BAD_FAULT_64S@h
 	ori	r0,r0,DSISR_BAD_FAULT_64S@l
 	and.	r0,r4,r0		/* weird error? */
 	bne-	handle_page_fault	/* if not, try to insert a HPTE */
@@ -1679,7 +1547,7 @@ handle_page_fault:
 	addi	r3,r1,STACK_FRAME_OVERHEAD
 	bl	do_page_fault
 	cmpdi	r3,0
-	beq+	ret_from_except_lite
+	beq+	12f
 	bl	save_nvgprs
 	mr	r5,r3
 	addi	r3,r1,STACK_FRAME_OVERHEAD
@@ -1694,12 +1562,7 @@ handle_dabr_fault:
 	ld      r5,_DSISR(r1)
 	addi    r3,r1,STACK_FRAME_OVERHEAD
 	bl      do_break
-	/*
-	 * do_break() may have changed the NV GPRS while handling a breakpoint.
-	 * If so, we need to restore them with their updated values. Don't use
-	 * ret_from_except_lite here.
-	 */
-	b       ret_from_except
+12:	b       ret_from_except_lite
 
 
 #ifdef CONFIG_PPC_STD_MMU_64

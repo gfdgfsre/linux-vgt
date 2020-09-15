@@ -34,7 +34,6 @@
 #include <net/flow_dissector.h>
 
 #define IPV4_MAX_PMTU		65535U		/* RFC 2675, Section 5.1 */
-#define IPV4_MIN_MTU		68			/* RFC 791 */
 
 struct sock;
 
@@ -326,13 +325,6 @@ int ip_decrease_ttl(struct iphdr *iph)
 	return --iph->ttl;
 }
 
-static inline int ip_mtu_locked(const struct dst_entry *dst)
-{
-	const struct rtable *rt = (const struct rtable *)dst;
-
-	return rt->rt_mtu_locked || dst_metric_locked(dst, RTAX_MTU);
-}
-
 static inline
 int ip_dont_fragment(const struct sock *sk, const struct dst_entry *dst)
 {
@@ -340,7 +332,7 @@ int ip_dont_fragment(const struct sock *sk, const struct dst_entry *dst)
 
 	return  pmtudisc == IP_PMTUDISC_DO ||
 		(pmtudisc == IP_PMTUDISC_WANT &&
-		 !ip_mtu_locked(dst));
+		 !(dst_metric_locked(dst, RTAX_MTU)));
 }
 
 static inline bool ip_sk_accept_pmtu(const struct sock *sk)
@@ -366,7 +358,7 @@ static inline unsigned int ip_dst_mtu_maybe_forward(const struct dst_entry *dst,
 	struct net *net = dev_net(dst->dev);
 
 	if (net->ipv4.sysctl_ip_fwd_use_pmtu ||
-	    ip_mtu_locked(dst) ||
+	    dst_metric_locked(dst, RTAX_MTU) ||
 	    !forwarding)
 		return dst_mtu(dst);
 
@@ -570,6 +562,7 @@ static inline struct sk_buff *ip_check_defrag(struct net *net, struct sk_buff *s
 	return skb;
 }
 #endif
+int ip_frag_mem(struct net *net);
 
 /*
  *	Functions provided by ip_forward.c
@@ -593,8 +586,6 @@ static inline int ip_options_echo(struct net *net, struct ip_options *dopt,
 }
 
 void ip_options_fragment(struct sk_buff *skb);
-int __ip_options_compile(struct net *net, struct ip_options *opt,
-			 struct sk_buff *skb, __be32 *info);
 int ip_options_compile(struct net *net, struct ip_options *opt,
 		       struct sk_buff *skb);
 int ip_options_get(struct net *net, struct ip_options_rcu **optp,
@@ -603,7 +594,7 @@ int ip_options_get_from_user(struct net *net, struct ip_options_rcu **optp,
 			     unsigned char __user *data, int optlen);
 void ip_options_undo(struct ip_options *opt);
 void ip_forward_options(struct sk_buff *skb);
-int ip_options_rcv_srr(struct sk_buff *skb, struct net_device *dev);
+int ip_options_rcv_srr(struct sk_buff *skb);
 
 /*
  *	Functions provided by ip_sockglue.c
@@ -643,10 +634,5 @@ extern int sysctl_icmp_msgs_burst;
 #ifdef CONFIG_PROC_FS
 int ip_misc_proc_init(void);
 #endif
-
-static inline bool inetdev_valid_mtu(unsigned int mtu)
-{
-	return likely(mtu >= IPV4_MIN_MTU);
-}
 
 #endif	/* _IP_H */

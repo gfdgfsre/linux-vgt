@@ -1680,8 +1680,7 @@ static void igb_check_swap_media(struct igb_adapter *adapter)
 	if ((hw->phy.media_type == e1000_media_type_copper) &&
 	    (!(connsw & E1000_CONNSW_AUTOSENSE_EN))) {
 		swap_now = true;
-	} else if ((hw->phy.media_type != e1000_media_type_copper) &&
-		   !(connsw & E1000_CONNSW_SERDESD)) {
+	} else if (!(connsw & E1000_CONNSW_SERDESD)) {
 		/* copper signal takes time to appear */
 		if (adapter->copper_tries < 4) {
 			adapter->copper_tries++;
@@ -3163,8 +3162,6 @@ static int igb_sw_init(struct igb_adapter *adapter)
 	/* Setup and initialize a copy of the hw vlan table array */
 	adapter->shadow_vfta = kcalloc(E1000_VLAN_FILTER_TBL_SIZE, sizeof(u32),
 				       GFP_ATOMIC);
-	if (!adapter->shadow_vfta)
-		return -ENOMEM;
 
 	/* This call may decrease the number of queues */
 	if (igb_init_interrupt_scheme(adapter, true)) {
@@ -3332,7 +3329,7 @@ static int __igb_close(struct net_device *netdev, bool suspending)
 
 int igb_close(struct net_device *netdev)
 {
-	if (netif_device_present(netdev) || netdev->dismantle)
+	if (netif_device_present(netdev))
 		return __igb_close(netdev, false);
 	return 0;
 }
@@ -6973,7 +6970,7 @@ static bool igb_clean_tx_irq(struct igb_q_vector *q_vector, int napi_budget)
 			break;
 
 		/* prevent any other reads prior to eop_desc */
-		smp_rmb();
+		read_barrier_depends();
 
 		/* if DD is not set pending work has not been completed */
 		if (!(eop_desc->wb.status & cpu_to_le32(E1000_TXD_STAT_DD)))
@@ -7935,7 +7932,9 @@ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake,
 	struct e1000_hw *hw = &adapter->hw;
 	u32 ctrl, rctl, status;
 	u32 wufc = runtime ? E1000_WUFC_LNKC : adapter->wol;
-	bool wake;
+#ifdef CONFIG_PM
+	int retval = 0;
+#endif
 
 	rtnl_lock();
 	netif_device_detach(netdev);
@@ -7947,6 +7946,12 @@ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake,
 
 	igb_clear_interrupt_scheme(adapter);
 	rtnl_unlock();
+
+#ifdef CONFIG_PM
+	retval = pci_save_state(pdev);
+	if (retval)
+		return retval;
+#endif
 
 	status = rd32(E1000_STATUS);
 	if (status & E1000_STATUS_LU)
@@ -7964,6 +7969,10 @@ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake,
 		}
 
 		ctrl = rd32(E1000_CTRL);
+		/* advertise wake from D3Cold */
+		#define E1000_CTRL_ADVD3WUC 0x00100000
+		/* phy power management enable */
+		#define E1000_CTRL_EN_PHY_PWR_MGMT 0x00200000
 		ctrl |= E1000_CTRL_ADVD3WUC;
 		wr32(E1000_CTRL, ctrl);
 
@@ -7977,14 +7986,11 @@ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake,
 		wr32(E1000_WUFC, 0);
 	}
 
-	wake = wufc || adapter->en_mng_pt;
-	if (!wake)
+	*enable_wake = wufc || adapter->en_mng_pt;
+	if (!*enable_wake)
 		igb_power_down_link(adapter);
 	else
 		igb_power_up_link(adapter);
-
-	if (enable_wake)
-		*enable_wake = wake;
 
 	/* Release control of h/w to f/w.  If f/w is AMT enabled, this
 	 * would have already happened in close and is redundant.
@@ -8028,7 +8034,22 @@ static void igb_deliver_wake_packet(struct net_device *netdev)
 
 static int __maybe_unused igb_suspend(struct device *dev)
 {
-	return __igb_shutdown(to_pci_dev(dev), NULL, 0);
+	int retval;
+	bool wake;
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	retval = __igb_shutdown(pdev, &wake, 0);
+	if (retval)
+		return retval;
+
+	if (wake) {
+		pci_prepare_to_sleep(pdev);
+	} else {
+		pci_wake_from_d3(pdev, false);
+		pci_set_power_state(pdev, PCI_D3hot);
+	}
+
+	return 0;
 }
 
 static int __maybe_unused igb_resume(struct device *dev)
@@ -8099,7 +8120,22 @@ static int __maybe_unused igb_runtime_idle(struct device *dev)
 
 static int __maybe_unused igb_runtime_suspend(struct device *dev)
 {
-	return __igb_shutdown(to_pci_dev(dev), NULL, 1);
+	struct pci_dev *pdev = to_pci_dev(dev);
+	int retval;
+	bool wake;
+
+	retval = __igb_shutdown(pdev, &wake, 1);
+	if (retval)
+		return retval;
+
+	if (wake) {
+		pci_prepare_to_sleep(pdev);
+	} else {
+		pci_wake_from_d3(pdev, false);
+		pci_set_power_state(pdev, PCI_D3hot);
+	}
+
+	return 0;
 }
 
 static int __maybe_unused igb_runtime_resume(struct device *dev)
@@ -8335,20 +8371,14 @@ static void igb_rar_set_index(struct igb_adapter *adapter, u32 index)
 
 	/* Indicate to hardware the Address is Valid. */
 	if (adapter->mac_table[index].state & IGB_MAC_STATE_IN_USE) {
-		if (is_valid_ether_addr(addr))
-			rar_high |= E1000_RAH_AV;
+		rar_high |= E1000_RAH_AV;
 
-		switch (hw->mac.type) {
-		case e1000_82575:
-		case e1000_i210:
+		if (hw->mac.type == e1000_82575)
 			rar_high |= E1000_RAH_POOL_1 *
 				    adapter->mac_table[index].queue;
-			break;
-		default:
+		else
 			rar_high |= E1000_RAH_POOL_1 <<
 				    adapter->mac_table[index].queue;
-			break;
-		}
 	}
 
 	wr32(E1000_RAL(index), rar_low);
@@ -8379,36 +8409,17 @@ static int igb_set_vf_mac(struct igb_adapter *adapter,
 static int igb_ndo_set_vf_mac(struct net_device *netdev, int vf, u8 *mac)
 {
 	struct igb_adapter *adapter = netdev_priv(netdev);
-
-	if (vf >= adapter->vfs_allocated_count)
+	if (!is_valid_ether_addr(mac) || (vf >= adapter->vfs_allocated_count))
 		return -EINVAL;
-
-	/* Setting the VF MAC to 0 reverts the IGB_VF_FLAG_PF_SET_MAC
-	 * flag and allows to overwrite the MAC via VF netdev.  This
-	 * is necessary to allow libvirt a way to restore the original
-	 * MAC after unbinding vfio-pci and reloading igbvf after shutting
-	 * down a VM.
-	 */
-	if (is_zero_ether_addr(mac)) {
-		adapter->vf_data[vf].flags &= ~IGB_VF_FLAG_PF_SET_MAC;
-		dev_info(&adapter->pdev->dev,
-			 "remove administratively set MAC on VF %d\n",
-			 vf);
-	} else if (is_valid_ether_addr(mac)) {
-		adapter->vf_data[vf].flags |= IGB_VF_FLAG_PF_SET_MAC;
-		dev_info(&adapter->pdev->dev, "setting MAC %pM on VF %d\n",
-			 mac, vf);
-		dev_info(&adapter->pdev->dev,
-			 "Reload the VF driver to make this change effective.");
-		/* Generate additional warning if PF is down */
-		if (test_bit(__IGB_DOWN, &adapter->state)) {
-			dev_warn(&adapter->pdev->dev,
-				 "The VF MAC address has been set, but the PF device is not up.\n");
-			dev_warn(&adapter->pdev->dev,
-				 "Bring the PF device up before attempting to use the VF device.\n");
-		}
-	} else {
-		return -EINVAL;
+	adapter->vf_data[vf].flags |= IGB_VF_FLAG_PF_SET_MAC;
+	dev_info(&adapter->pdev->dev, "setting MAC %pM on VF %d\n", mac, vf);
+	dev_info(&adapter->pdev->dev,
+		 "Reload the VF driver to make this change effective.");
+	if (test_bit(__IGB_DOWN, &adapter->state)) {
+		dev_warn(&adapter->pdev->dev,
+			 "The VF MAC address has been set, but the PF device is not up.\n");
+		dev_warn(&adapter->pdev->dev,
+			 "Bring the PF device up before attempting to use the VF device.\n");
 	}
 	return igb_set_vf_mac(adapter, vf, mac);
 }

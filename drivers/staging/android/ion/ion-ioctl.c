@@ -71,10 +71,8 @@ long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return -EFAULT;
 
 	ret = validate_ioctl_arg(cmd, &data);
-	if (ret) {
-		pr_warn_once("%s: ioctl validate failed\n", __func__);
+	if (WARN_ON_ONCE(ret))
 		return ret;
-	}
 
 	if (!(dir & _IOC_WRITE))
 		memset(&data, 0, sizeof(data));

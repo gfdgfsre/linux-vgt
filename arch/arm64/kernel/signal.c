@@ -676,12 +676,11 @@ static void do_signal(struct pt_regs *regs)
 	unsigned long continue_addr = 0, restart_addr = 0;
 	int retval = 0;
 	struct ksignal ksig;
-	bool syscall = in_syscall(regs);
 
 	/*
 	 * If we were from a system call, check for system call restarting...
 	 */
-	if (syscall) {
+	if (in_syscall(regs)) {
 		continue_addr = regs->pc;
 		restart_addr = continue_addr - (compat_thumb_mode(regs) ? 2 : 4);
 		retval = regs->regs[0];
@@ -733,7 +732,7 @@ static void do_signal(struct pt_regs *regs)
 	 * Handle restarting a different system call. As above, if a debugger
 	 * has chosen to restart at a different PC, ignore the restart.
 	 */
-	if (syscall && regs->pc == restart_addr) {
+	if (in_syscall(regs) && regs->pc == restart_addr) {
 		if (retval == -ERESTART_RESTARTBLOCK)
 			setup_restart_syscall(regs);
 		user_rewind_single_step(current);
@@ -756,7 +755,7 @@ asmlinkage void do_notify_resume(struct pt_regs *regs,
 		/* Check valid user FS if needed */
 		addr_limit_user_check();
 
-		if (thread_flags & _TIF_NEED_RESCHED_MASK) {
+		if (thread_flags & _TIF_NEED_RESCHED) {
 			schedule();
 		} else {
 			local_irq_enable();

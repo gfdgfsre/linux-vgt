@@ -417,7 +417,6 @@ static struct rcu_torture_ops rcu_ops = {
 	.name		= "rcu"
 };
 
-#ifndef CONFIG_PREEMPT_RT_FULL
 /*
  * Definitions for rcu_bh torture testing.
  */
@@ -456,12 +455,6 @@ static struct rcu_torture_ops rcu_bh_ops = {
 	.irq_capable	= 1,
 	.name		= "rcu_bh"
 };
-
-#else
-static struct rcu_torture_ops rcu_bh_ops = {
-	.ttype		= INVALID_RCU_FLAVOR,
-};
-#endif
 
 /*
  * Don't even think about trying any of these in real life!!!
@@ -1606,10 +1599,6 @@ rcu_torture_cleanup(void)
 			cur_ops->cb_barrier();
 		return;
 	}
-	if (!cur_ops) {
-		torture_cleanup_end();
-		return;
-	}
 
 	rcu_torture_barrier_cleanup();
 	torture_stop_kthread(rcu_torture_stall, stall_task);
@@ -1745,7 +1734,6 @@ rcu_torture_init(void)
 			pr_alert(" %s", torture_ops[i]->name);
 		pr_alert("\n");
 		firsterr = -EINVAL;
-		cur_ops = NULL;
 		goto unwind;
 	}
 	if (cur_ops->fqs == NULL && fqs_duration != 0) {

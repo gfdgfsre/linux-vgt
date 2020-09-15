@@ -262,7 +262,6 @@ static DEFINE_SPINLOCK(minor_lock);
 
 static int blkfront_setup_indirect(struct blkfront_ring_info *rinfo);
 static void blkfront_gather_backend_features(struct blkfront_info *info);
-static int negotiate_mq(struct blkfront_info *info);
 
 static int get_id_from_freelist(struct blkfront_ring_info *rinfo)
 {
@@ -1115,8 +1114,8 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
 	if (!VDEV_IS_EXTENDED(info->vdevice)) {
 		err = xen_translate_vdev(info->vdevice, &minor, &offset);
 		if (err)
-			return err;
-		nr_parts = PARTS_PER_DISK;
+			return err;		
+ 		nr_parts = PARTS_PER_DISK;
 	} else {
 		minor = BLKIF_MINOR_EXT(info->vdevice);
 		nr_parts = PARTS_PER_EXT_DISK;
@@ -1775,17 +1774,10 @@ static int talk_to_blkback(struct xenbus_device *dev,
 	unsigned int i, max_page_order;
 	unsigned int ring_page_order;
 
-	if (!info)
-		return -ENODEV;
-
 	max_page_order = xenbus_read_unsigned(info->xbdev->otherend,
 					      "max-ring-page-order", 0);
 	ring_page_order = min(xen_blkif_max_ring_order, max_page_order);
 	info->nr_ring_pages = 1 << ring_page_order;
-
-	err = negotiate_mq(info);
-	if (err)
-		goto destroy_blkring;
 
 	for (i = 0; i < info->nr_rings; i++) {
 		struct blkfront_ring_info *rinfo = &info->rinfo[i];
@@ -1910,7 +1902,6 @@ static int negotiate_mq(struct blkfront_info *info)
 	info->rinfo = kzalloc(sizeof(struct blkfront_ring_info) * info->nr_rings, GFP_KERNEL);
 	if (!info->rinfo) {
 		xenbus_dev_fatal(info->xbdev, -ENOMEM, "allocating ring_info structure");
-		info->nr_rings = 0;
 		return -ENOMEM;
 	}
 
@@ -1987,6 +1978,11 @@ static int blkfront_probe(struct xenbus_device *dev,
 	}
 
 	info->xbdev = dev;
+	err = negotiate_mq(info);
+	if (err) {
+		kfree(info);
+		return err;
+	}
 
 	mutex_init(&info->mutex);
 	info->vdevice = vdevice;
@@ -2102,6 +2098,10 @@ static int blkfront_resume(struct xenbus_device *dev)
 	}
 
 	blkif_free(info, info->connected == BLKIF_STATE_CONNECTED);
+
+	err = negotiate_mq(info);
+	if (err)
+		return err;
 
 	err = talk_to_blkback(dev, info);
 	if (!err)
@@ -2471,9 +2471,6 @@ static int blkfront_remove(struct xenbus_device *xbdev)
 	struct gendisk *disk;
 
 	dev_dbg(&xbdev->dev, "%s removed", xbdev->nodename);
-
-	if (!info)
-		return 0;
 
 	blkif_free(info, 0);
 

@@ -59,12 +59,12 @@ qla2x00_poll(struct rsp_que *rsp)
 {
 	unsigned long flags;
 	struct qla_hw_data *ha = rsp->hw;
-	local_irq_save_nort(flags);
+	local_irq_save(flags);
 	if (IS_P3P_TYPE(ha))
 		qla82xx_poll(0, rsp);
 	else
 		ha->isp_ops->intr_handler(0, rsp);
-	local_irq_restore_nort(flags);
+	local_irq_restore(flags);
 }
 
 static inline uint8_t *
@@ -221,8 +221,6 @@ qla2xxx_get_qpair_sp(struct qla_qpair *qpair, fc_port_t *fcport, gfp_t flag)
 	sp->fcport = fcport;
 	sp->iocbs = 1;
 	sp->vha = qpair->vha;
-	INIT_LIST_HEAD(&sp->elem);
-
 done:
 	if (!sp)
 		QLA_QPAIR_MARK_NOT_BUSY(qpair);

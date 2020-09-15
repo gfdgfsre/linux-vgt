@@ -35,15 +35,6 @@
 #include "btrfs_inode.h"
 #include "transaction.h"
 #include "compression.h"
-#include "xattr.h"
-
-/*
- * Maximum number of references an extent can have in order for us to attempt to
- * issue clone operations instead of write operations. This currently exists to
- * avoid hitting limitations of the backreference walking code (taking a lot of
- * time and using too much memory for extents with large number of references).
- */
-#define SEND_MAX_EXTENT_REFS	64
 
 /*
  * A fs_path is a helper to dynamically build path names with unknown size.
@@ -1333,7 +1324,6 @@ static int find_extent_clone(struct send_ctx *sctx,
 	struct clone_root *cur_clone_root;
 	struct btrfs_key found_key;
 	struct btrfs_path *tmp_path;
-	struct btrfs_extent_item *ei;
 	int compressed;
 	u32 i;
 
@@ -1383,6 +1373,7 @@ static int find_extent_clone(struct send_ctx *sctx,
 	ret = extent_from_logical(fs_info, disk_byte, tmp_path,
 				  &found_key, &flags);
 	up_read(&fs_info->commit_root_sem);
+	btrfs_release_path(tmp_path);
 
 	if (ret < 0)
 		goto out;
@@ -1390,21 +1381,6 @@ static int find_extent_clone(struct send_ctx *sctx,
 		ret = -EIO;
 		goto out;
 	}
-
-	ei = btrfs_item_ptr(tmp_path->nodes[0], tmp_path->slots[0],
-			    struct btrfs_extent_item);
-	/*
-	 * Backreference walking (iterate_extent_inodes() below) is currently
-	 * too expensive when an extent has a large number of references, both
-	 * in time spent and used memory. So for now just fallback to write
-	 * operations instead of clone operations when an extent has more than
-	 * a certain amount of references.
-	 */
-	if (btrfs_extent_refs(tmp_path->nodes[0], ei) > SEND_MAX_EXTENT_REFS) {
-		ret = -ENOENT;
-		goto out;
-	}
-	btrfs_release_path(tmp_path);
 
 	/*
 	 * Setup the clone roots.
@@ -1546,7 +1522,7 @@ static int read_symlink(struct btrfs_root *root,
 	BUG_ON(compression);
 
 	off = btrfs_file_extent_inline_start(ei);
-	len = btrfs_file_extent_ram_bytes(path->nodes[0], ei);
+	len = btrfs_file_extent_inline_len(path->nodes[0], path->slots[0], ei);
 
 	ret = fs_path_add_from_extent_buffer(dest, path->nodes[0], off, len);
 
@@ -3378,8 +3354,7 @@ static void free_pending_move(struct send_ctx *sctx, struct pending_dir_move *m)
 	kfree(m);
 }
 
-static void tail_append_pending_moves(struct send_ctx *sctx,
-				      struct pending_dir_move *moves,
+static void tail_append_pending_moves(struct pending_dir_move *moves,
 				      struct list_head *stack)
 {
 	if (list_empty(&moves->list)) {
@@ -3389,10 +3364,6 @@ static void tail_append_pending_moves(struct send_ctx *sctx,
 		list_splice_init(&moves->list, &list);
 		list_add_tail(&moves->list, stack);
 		list_splice_tail(&list, stack);
-	}
-	if (!RB_EMPTY_NODE(&moves->node)) {
-		rb_erase(&moves->node, &sctx->pending_dir_moves);
-		RB_CLEAR_NODE(&moves->node);
 	}
 }
 
@@ -3408,7 +3379,7 @@ static int apply_children_dir_moves(struct send_ctx *sctx)
 		return 0;
 
 	INIT_LIST_HEAD(&stack);
-	tail_append_pending_moves(sctx, pm, &stack);
+	tail_append_pending_moves(pm, &stack);
 
 	while (!list_empty(&stack)) {
 		pm = list_first_entry(&stack, struct pending_dir_move, list);
@@ -3419,7 +3390,7 @@ static int apply_children_dir_moves(struct send_ctx *sctx)
 			goto out;
 		pm = get_pending_dir_moves(sctx, parent_ino);
 		if (pm)
-			tail_append_pending_moves(sctx, pm, &stack);
+			tail_append_pending_moves(pm, &stack);
 	}
 	return 0;
 
@@ -3556,40 +3527,7 @@ out:
 }
 
 /*
- * Check if inode ino2, or any of its ancestors, is inode ino1.
- * Return 1 if true, 0 if false and < 0 on error.
- */
-static int check_ino_in_path(struct btrfs_root *root,
-			     const u64 ino1,
-			     const u64 ino1_gen,
-			     const u64 ino2,
-			     const u64 ino2_gen,
-			     struct fs_path *fs_path)
-{
-	u64 ino = ino2;
-
-	if (ino1 == ino2)
-		return ino1_gen == ino2_gen;
-
-	while (ino > BTRFS_FIRST_FREE_OBJECTID) {
-		u64 parent;
-		u64 parent_gen;
-		int ret;
-
-		fs_path_reset(fs_path);
-		ret = get_first_ref(root, ino, &parent, &parent_gen, fs_path);
-		if (ret < 0)
-			return ret;
-		if (parent == ino1)
-			return parent_gen == ino1_gen;
-		ino = parent;
-	}
-	return 0;
-}
-
-/*
- * Check if ino ino1 is an ancestor of inode ino2 in the given root for any
- * possible path (in case ino2 is not a directory and has multiple hard links).
+ * Check if ino ino1 is an ancestor of inode ino2 in the given root.
  * Return 1 if true, 0 if false and < 0 on error.
  */
 static int is_ancestor(struct btrfs_root *root,
@@ -3598,91 +3536,36 @@ static int is_ancestor(struct btrfs_root *root,
 		       const u64 ino2,
 		       struct fs_path *fs_path)
 {
-	bool free_fs_path = false;
+	u64 ino = ino2;
+	bool free_path = false;
 	int ret = 0;
-	struct btrfs_path *path = NULL;
-	struct btrfs_key key;
 
 	if (!fs_path) {
 		fs_path = fs_path_alloc();
 		if (!fs_path)
 			return -ENOMEM;
-		free_fs_path = true;
+		free_path = true;
 	}
 
-	path = alloc_path_for_send();
-	if (!path) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	while (ino > BTRFS_FIRST_FREE_OBJECTID) {
+		u64 parent;
+		u64 parent_gen;
 
-	key.objectid = ino2;
-	key.type = BTRFS_INODE_REF_KEY;
-	key.offset = 0;
-
-	ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
-	if (ret < 0)
-		goto out;
-
-	while (true) {
-		struct extent_buffer *leaf = path->nodes[0];
-		int slot = path->slots[0];
-		u32 cur_offset = 0;
-		u32 item_size;
-
-		if (slot >= btrfs_header_nritems(leaf)) {
-			ret = btrfs_next_leaf(root, path);
-			if (ret < 0)
-				goto out;
-			if (ret > 0)
-				break;
-			continue;
+		fs_path_reset(fs_path);
+		ret = get_first_ref(root, ino, &parent, &parent_gen, fs_path);
+		if (ret < 0) {
+			if (ret == -ENOENT && ino == ino2)
+				ret = 0;
+			goto out;
 		}
-
-		btrfs_item_key_to_cpu(leaf, &key, slot);
-		if (key.objectid != ino2)
-			break;
-		if (key.type != BTRFS_INODE_REF_KEY &&
-		    key.type != BTRFS_INODE_EXTREF_KEY)
-			break;
-
-		item_size = btrfs_item_size_nr(leaf, slot);
-		while (cur_offset < item_size) {
-			u64 parent;
-			u64 parent_gen;
-
-			if (key.type == BTRFS_INODE_EXTREF_KEY) {
-				unsigned long ptr;
-				struct btrfs_inode_extref *extref;
-
-				ptr = btrfs_item_ptr_offset(leaf, slot);
-				extref = (struct btrfs_inode_extref *)
-					(ptr + cur_offset);
-				parent = btrfs_inode_extref_parent(leaf,
-								   extref);
-				cur_offset += sizeof(*extref);
-				cur_offset += btrfs_inode_extref_name_len(leaf,
-								  extref);
-			} else {
-				parent = key.offset;
-				cur_offset = item_size;
-			}
-
-			ret = get_inode_info(root, parent, NULL, &parent_gen,
-					     NULL, NULL, NULL, NULL);
-			if (ret < 0)
-				goto out;
-			ret = check_ino_in_path(root, ino1, ino1_gen,
-						parent, parent_gen, fs_path);
-			if (ret)
-				goto out;
+		if (parent == ino1) {
+			ret = parent_gen == ino1_gen ? 1 : 0;
+			goto out;
 		}
-		path->slots[0]++;
+		ino = parent;
 	}
-	ret = 0;
  out:
-	btrfs_free_path(path);
-	if (free_fs_path)
+	if (free_path)
 		fs_path_free(fs_path);
 	return ret;
 }
@@ -4555,10 +4438,6 @@ static int __process_new_xattr(int num, struct btrfs_key *di_key,
 	struct fs_path *p;
 	struct posix_acl_xattr_header dummy_acl;
 
-	/* Capabilities are emitted by finish_inode_if_needed */
-	if (!strncmp(name, XATTR_NAME_CAPS, name_len))
-		return 0;
-
 	p = fs_path_alloc();
 	if (!p)
 		return -ENOMEM;
@@ -5041,15 +4920,6 @@ static int send_hole(struct send_ctx *sctx, u64 end)
 	u64 len;
 	int ret = 0;
 
-	/*
-	 * Don't go beyond the inode's i_size due to prealloc extents that start
-	 * after the i_size.
-	 */
-	end = min_t(u64, end, sctx->cur_inode_size);
-
-	if (sctx->flags & BTRFS_SEND_FLAG_NO_FILE_DATA)
-		return send_update_extent(sctx, offset, end - offset);
-
 	p = fs_path_alloc();
 	if (!p)
 		return -ENOMEM;
@@ -5099,64 +4969,6 @@ static int send_extent_data(struct send_ctx *sctx,
 		sent += ret;
 	}
 	return 0;
-}
-
-/*
- * Search for a capability xattr related to sctx->cur_ino. If the capability is
- * found, call send_set_xattr function to emit it.
- *
- * Return 0 if there isn't a capability, or when the capability was emitted
- * successfully, or < 0 if an error occurred.
- */
-static int send_capabilities(struct send_ctx *sctx)
-{
-	struct fs_path *fspath = NULL;
-	struct btrfs_path *path;
-	struct btrfs_dir_item *di;
-	struct extent_buffer *leaf;
-	unsigned long data_ptr;
-	char *buf = NULL;
-	int buf_len;
-	int ret = 0;
-
-	path = alloc_path_for_send();
-	if (!path)
-		return -ENOMEM;
-
-	di = btrfs_lookup_xattr(NULL, sctx->send_root, path, sctx->cur_ino,
-				XATTR_NAME_CAPS, strlen(XATTR_NAME_CAPS), 0);
-	if (!di) {
-		/* There is no xattr for this inode */
-		goto out;
-	} else if (IS_ERR(di)) {
-		ret = PTR_ERR(di);
-		goto out;
-	}
-
-	leaf = path->nodes[0];
-	buf_len = btrfs_dir_data_len(leaf, di);
-
-	fspath = fs_path_alloc();
-	buf = kmalloc(buf_len, GFP_KERNEL);
-	if (!fspath || !buf) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	ret = get_cur_path(sctx, sctx->cur_ino, sctx->cur_inode_gen, fspath);
-	if (ret < 0)
-		goto out;
-
-	data_ptr = (unsigned long)(di + 1) + btrfs_dir_name_len(leaf, di);
-	read_extent_buffer(leaf, buf, data_ptr, buf_len);
-
-	ret = send_set_xattr(sctx, fspath, XATTR_NAME_CAPS,
-			strlen(XATTR_NAME_CAPS), buf, buf_len);
-out:
-	kfree(buf);
-	fs_path_free(fspath);
-	btrfs_free_path(path);
-	return ret;
 }
 
 static int clone_range(struct send_ctx *sctx,
@@ -5258,7 +5070,7 @@ static int clone_range(struct send_ctx *sctx,
 		ei = btrfs_item_ptr(leaf, slot, struct btrfs_file_extent_item);
 		type = btrfs_file_extent_type(leaf, ei);
 		if (type == BTRFS_FILE_EXTENT_INLINE) {
-			ext_len = btrfs_file_extent_ram_bytes(leaf, ei);
+			ext_len = btrfs_file_extent_inline_len(leaf, slot, ei);
 			ext_len = PAGE_ALIGN(ext_len);
 		} else {
 			ext_len = btrfs_file_extent_num_bytes(leaf, ei);
@@ -5334,7 +5146,8 @@ static int send_write_or_clone(struct send_ctx *sctx,
 			struct btrfs_file_extent_item);
 	type = btrfs_file_extent_type(path->nodes[0], ei);
 	if (type == BTRFS_FILE_EXTENT_INLINE) {
-		len = btrfs_file_extent_ram_bytes(path->nodes[0], ei);
+		len = btrfs_file_extent_inline_len(path->nodes[0],
+						   path->slots[0], ei);
 		/*
 		 * it is possible the inline item won't cover the whole page,
 		 * but there may be items after this page.  Make
@@ -5467,7 +5280,7 @@ static int is_extent_unchanged(struct send_ctx *sctx,
 		}
 
 		if (right_type == BTRFS_FILE_EXTENT_INLINE) {
-			right_len = btrfs_file_extent_ram_bytes(eb, ei);
+			right_len = btrfs_file_extent_inline_len(eb, slot, ei);
 			right_len = PAGE_ALIGN(right_len);
 		} else {
 			right_len = btrfs_file_extent_num_bytes(eb, ei);
@@ -5588,7 +5401,8 @@ static int get_last_extent(struct send_ctx *sctx, u64 offset)
 			    struct btrfs_file_extent_item);
 	type = btrfs_file_extent_type(path->nodes[0], fi);
 	if (type == BTRFS_FILE_EXTENT_INLINE) {
-		u64 size = btrfs_file_extent_ram_bytes(path->nodes[0], fi);
+		u64 size = btrfs_file_extent_inline_len(path->nodes[0],
+							path->slots[0], fi);
 		extent_end = ALIGN(key.offset + size,
 				   sctx->send_root->fs_info->sectorsize);
 	} else {
@@ -5651,7 +5465,7 @@ static int range_is_hole_in_parent(struct send_ctx *sctx,
 		fi = btrfs_item_ptr(leaf, slot, struct btrfs_file_extent_item);
 		if (btrfs_file_extent_type(leaf, fi) ==
 		    BTRFS_FILE_EXTENT_INLINE) {
-			u64 size = btrfs_file_extent_ram_bytes(leaf, fi);
+			u64 size = btrfs_file_extent_inline_len(leaf, slot, fi);
 
 			extent_end = ALIGN(key.offset + size,
 					   root->fs_info->sectorsize);
@@ -5697,7 +5511,8 @@ static int maybe_send_hole(struct send_ctx *sctx, struct btrfs_path *path,
 			    struct btrfs_file_extent_item);
 	type = btrfs_file_extent_type(path->nodes[0], fi);
 	if (type == BTRFS_FILE_EXTENT_INLINE) {
-		u64 size = btrfs_file_extent_ram_bytes(path->nodes[0], fi);
+		u64 size = btrfs_file_extent_inline_len(path->nodes[0],
+							path->slots[0], fi);
 		extent_end = ALIGN(key->offset + size,
 				   sctx->send_root->fs_info->sectorsize);
 	} else {
@@ -5970,10 +5785,6 @@ static int finish_inode_if_needed(struct send_ctx *sctx, int at_end)
 			goto out;
 	}
 
-	ret = send_capabilities(sctx);
-	if (ret < 0)
-		goto out;
-
 	/*
 	 * If other directory inodes depended on our current directory
 	 * inode's move/rename, now do their move/rename operations.
@@ -6217,21 +6028,68 @@ static int changed_extent(struct send_ctx *sctx,
 {
 	int ret = 0;
 
-	/*
-	 * We have found an extent item that changed without the inode item
-	 * having changed. This can happen either after relocation (where the
-	 * disk_bytenr of an extent item is replaced at
-	 * relocation.c:replace_file_extents()) or after deduplication into a
-	 * file in both the parent and send snapshots (where an extent item can
-	 * get modified or replaced with a new one). Note that deduplication
-	 * updates the inode item, but it only changes the iversion (sequence
-	 * field in the inode item) of the inode, so if a file is deduplicated
-	 * the same amount of times in both the parent and send snapshots, its
-	 * iversion becames the same in both snapshots, whence the inode item is
-	 * the same on both snapshots.
-	 */
-	if (sctx->cur_ino != sctx->cmp_key->objectid)
-		return 0;
+	if (sctx->cur_ino != sctx->cmp_key->objectid) {
+
+		if (result == BTRFS_COMPARE_TREE_CHANGED) {
+			struct extent_buffer *leaf_l;
+			struct extent_buffer *leaf_r;
+			struct btrfs_file_extent_item *ei_l;
+			struct btrfs_file_extent_item *ei_r;
+
+			leaf_l = sctx->left_path->nodes[0];
+			leaf_r = sctx->right_path->nodes[0];
+			ei_l = btrfs_item_ptr(leaf_l,
+					      sctx->left_path->slots[0],
+					      struct btrfs_file_extent_item);
+			ei_r = btrfs_item_ptr(leaf_r,
+					      sctx->right_path->slots[0],
+					      struct btrfs_file_extent_item);
+
+			/*
+			 * We may have found an extent item that has changed
+			 * only its disk_bytenr field and the corresponding
+			 * inode item was not updated. This case happens due to
+			 * very specific timings during relocation when a leaf
+			 * that contains file extent items is COWed while
+			 * relocation is ongoing and its in the stage where it
+			 * updates data pointers. So when this happens we can
+			 * safely ignore it since we know it's the same extent,
+			 * but just at different logical and physical locations
+			 * (when an extent is fully replaced with a new one, we
+			 * know the generation number must have changed too,
+			 * since snapshot creation implies committing the current
+			 * transaction, and the inode item must have been updated
+			 * as well).
+			 * This replacement of the disk_bytenr happens at
+			 * relocation.c:replace_file_extents() through
+			 * relocation.c:btrfs_reloc_cow_block().
+			 */
+			if (btrfs_file_extent_generation(leaf_l, ei_l) ==
+			    btrfs_file_extent_generation(leaf_r, ei_r) &&
+			    btrfs_file_extent_ram_bytes(leaf_l, ei_l) ==
+			    btrfs_file_extent_ram_bytes(leaf_r, ei_r) &&
+			    btrfs_file_extent_compression(leaf_l, ei_l) ==
+			    btrfs_file_extent_compression(leaf_r, ei_r) &&
+			    btrfs_file_extent_encryption(leaf_l, ei_l) ==
+			    btrfs_file_extent_encryption(leaf_r, ei_r) &&
+			    btrfs_file_extent_other_encoding(leaf_l, ei_l) ==
+			    btrfs_file_extent_other_encoding(leaf_r, ei_r) &&
+			    btrfs_file_extent_type(leaf_l, ei_l) ==
+			    btrfs_file_extent_type(leaf_r, ei_r) &&
+			    btrfs_file_extent_disk_bytenr(leaf_l, ei_l) !=
+			    btrfs_file_extent_disk_bytenr(leaf_r, ei_r) &&
+			    btrfs_file_extent_disk_num_bytes(leaf_l, ei_l) ==
+			    btrfs_file_extent_disk_num_bytes(leaf_r, ei_r) &&
+			    btrfs_file_extent_offset(leaf_l, ei_l) ==
+			    btrfs_file_extent_offset(leaf_r, ei_r) &&
+			    btrfs_file_extent_num_bytes(leaf_l, ei_l) ==
+			    btrfs_file_extent_num_bytes(leaf_r, ei_r))
+				return 0;
+		}
+
+		inconsistent_snapshot_error(sctx, result, "extent");
+		return -EIO;
+	}
 
 	if (!sctx->cur_inode_new_gen && !sctx->cur_inode_deleted) {
 		if (result != BTRFS_COMPARE_TREE_DELETED)

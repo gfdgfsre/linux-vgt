@@ -120,12 +120,8 @@ struct nd_percpu_lane {
 	spinlock_t lock;
 };
 
-enum nd_label_flags {
-	ND_LABEL_REAP,
-};
 struct nd_label_ent {
 	struct list_head list;
-	unsigned long flags;
 	struct nd_namespace_label *label;
 };
 
@@ -258,7 +254,6 @@ long nvdimm_clear_poison(struct device *dev, phys_addr_t phys,
 		unsigned int len);
 void nvdimm_set_aliasing(struct device *dev);
 void nvdimm_set_locked(struct device *dev);
-void nvdimm_clear_locked(struct device *dev);
 struct nd_btt *to_nd_btt(struct device *dev);
 
 struct nd_gen_sb {

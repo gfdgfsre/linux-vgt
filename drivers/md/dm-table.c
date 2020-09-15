@@ -883,7 +883,9 @@ EXPORT_SYMBOL_GPL(dm_table_set_type);
 static int device_supports_dax(struct dm_target *ti, struct dm_dev *dev,
 			       sector_t start, sector_t len, void *data)
 {
-	return bdev_dax_supported(dev->bdev, PAGE_SIZE);
+	struct request_queue *q = bdev_get_queue(dev->bdev);
+
+	return q && blk_queue_dax(q);
 }
 
 static bool dm_table_supports_dax(struct dm_table *t)
@@ -1308,7 +1310,7 @@ void dm_table_event(struct dm_table *t)
 }
 EXPORT_SYMBOL(dm_table_event);
 
-inline sector_t dm_table_get_size(struct dm_table *t)
+sector_t dm_table_get_size(struct dm_table *t)
 {
 	return t->num_targets ? (t->highs[t->num_targets - 1] + 1) : 0;
 }
@@ -1332,9 +1334,6 @@ struct dm_target *dm_table_find_target(struct dm_table *t, sector_t sector)
 {
 	unsigned int l, n = 0, k = 0;
 	sector_t *node;
-
-	if (unlikely(sector >= dm_table_get_size(t)))
-		return &t->targets[t->num_targets];
 
 	for (l = 0; l < t->depth; l++) {
 		n = get_child(n, k);
@@ -1759,12 +1758,13 @@ static bool dm_table_supports_write_zeroes(struct dm_table *t)
 	return true;
 }
 
-static int device_not_discard_capable(struct dm_target *ti, struct dm_dev *dev,
-				      sector_t start, sector_t len, void *data)
+
+static int device_discard_capable(struct dm_target *ti, struct dm_dev *dev,
+				  sector_t start, sector_t len, void *data)
 {
 	struct request_queue *q = bdev_get_queue(dev->bdev);
 
-	return q && !blk_queue_discard(q);
+	return q && blk_queue_discard(q);
 }
 
 static bool dm_table_supports_discards(struct dm_table *t)
@@ -1772,50 +1772,24 @@ static bool dm_table_supports_discards(struct dm_table *t)
 	struct dm_target *ti;
 	unsigned i;
 
+	/*
+	 * Unless any target used by the table set discards_supported,
+	 * require at least one underlying device to support discards.
+	 * t->devices includes internal dm devices such as mirror logs
+	 * so we need to use iterate_devices here, which targets
+	 * supporting discard selectively must provide.
+	 */
 	for (i = 0; i < dm_table_get_num_targets(t); i++) {
 		ti = dm_table_get_target(t, i);
 
 		if (!ti->num_discard_bios)
-			return false;
+			continue;
 
-		/*
-		 * Either the target provides discard support (as implied by setting
-		 * 'discards_supported') or it relies on _all_ data devices having
-		 * discard support.
-		 */
-		if (!ti->discards_supported &&
-		    (!ti->type->iterate_devices ||
-		     ti->type->iterate_devices(ti, device_not_discard_capable, NULL)))
-			return false;
-	}
-
-	return true;
-}
-
-static int device_requires_stable_pages(struct dm_target *ti,
-					struct dm_dev *dev, sector_t start,
-					sector_t len, void *data)
-{
-	struct request_queue *q = bdev_get_queue(dev->bdev);
-
-	return q && bdi_cap_stable_pages_required(q->backing_dev_info);
-}
-
-/*
- * If any underlying device requires stable pages, a table must require
- * them as well.  Only targets that support iterate_devices are considered:
- * don't want error, zero, etc to require stable pages.
- */
-static bool dm_table_requires_stable_pages(struct dm_table *t)
-{
-	struct dm_target *ti;
-	unsigned i;
-
-	for (i = 0; i < dm_table_get_num_targets(t); i++) {
-		ti = dm_table_get_target(t, i);
+		if (ti->discards_supported)
+			return true;
 
 		if (ti->type->iterate_devices &&
-		    ti->type->iterate_devices(ti, device_requires_stable_pages, NULL))
+		    ti->type->iterate_devices(ti, device_discard_capable, NULL))
 			return true;
 	}
 
@@ -1844,11 +1818,6 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 	}
 	blk_queue_write_cache(q, wc, fua);
 
-	if (dm_table_supports_dax(t))
-		queue_flag_set_unlocked(QUEUE_FLAG_DAX, q);
-	else
-		queue_flag_clear_unlocked(QUEUE_FLAG_DAX, q);
-
 	if (dm_table_supports_dax_write_cache(t))
 		dax_write_cache(t->md->dax_dev, true);
 
@@ -1869,15 +1838,6 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q,
 		queue_flag_set_unlocked(QUEUE_FLAG_NO_SG_MERGE, q);
 
 	dm_table_verify_integrity(t);
-
-	/*
-	 * Some devices don't use blk_integrity but still want stable pages
-	 * because they do their own checksumming.
-	 */
-	if (dm_table_requires_stable_pages(t))
-		q->backing_dev_info->capabilities |= BDI_CAP_STABLE_WRITES;
-	else
-		q->backing_dev_info->capabilities &= ~BDI_CAP_STABLE_WRITES;
 
 	/*
 	 * Determine whether or not this queue's I/O timings contribute
