@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
@@ -953,7 +954,6 @@ static int vc_do_resize(struct tty_struct *tty, struct vc_data *vc,
 	if (con_is_visible(vc))
 		update_screen(vc);
 	vt_event_post(VT_EVENT_RESIZE, vc->vc_num, vc->vc_num);
-	notify_update(vc);
 	return err;
 }
 
@@ -2435,8 +2435,8 @@ rescan_last_byte:
 	}
 	con_flush(vc, draw_from, draw_to, &draw_x);
 	console_conditional_schedule();
-	notify_update(vc);
 	console_unlock();
+	notify_update(vc);
 	return n;
 }
 
@@ -3840,6 +3840,8 @@ void do_blank_screen(int entering_gfx)
 		return;
 	}
 
+	if (blank_state != blank_normal_wait)
+		return;
 	blank_state = blank_off;
 
 	/* don't blank graphics */

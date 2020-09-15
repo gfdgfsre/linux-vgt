@@ -1239,7 +1239,7 @@ static u32 user_flags(const struct v4l2_ctrl *ctrl)
 
 static void fill_event(struct v4l2_event *ev, struct v4l2_ctrl *ctrl, u32 changes)
 {
-	memset(ev, 0, sizeof(*ev));
+	memset(ev->reserved, 0, sizeof(ev->reserved));
 	ev->type = V4L2_EVENT_CTRL;
 	ev->id = ctrl->id;
 	ev->u.ctrl.changes = changes;
@@ -2013,10 +2013,6 @@ static struct v4l2_ctrl *v4l2_ctrl_new(struct v4l2_ctrl_handler *hdl,
 		handler_set_err(hdl, err);
 		return NULL;
 	}
-	if (type == V4L2_CTRL_TYPE_BITMASK && ((def & ~max) || min || step)) {
-		handler_set_err(hdl, -ERANGE);
-		return NULL;
-	}
 	if (is_array &&
 	    (type == V4L2_CTRL_TYPE_BUTTON ||
 	     type == V4L2_CTRL_TYPE_CTRL_CLASS)) {
@@ -2113,15 +2109,16 @@ struct v4l2_ctrl *v4l2_ctrl_new_custom(struct v4l2_ctrl_handler *hdl,
 		v4l2_ctrl_fill(cfg->id, &name, &type, &min, &max, &step,
 								&def, &flags);
 
-	is_menu = (type == V4L2_CTRL_TYPE_MENU ||
-		   type == V4L2_CTRL_TYPE_INTEGER_MENU);
+	is_menu = (cfg->type == V4L2_CTRL_TYPE_MENU ||
+		   cfg->type == V4L2_CTRL_TYPE_INTEGER_MENU);
 	if (is_menu)
 		WARN_ON(step);
 	else
 		WARN_ON(cfg->menu_skip_mask);
-	if (type == V4L2_CTRL_TYPE_MENU && !qmenu) {
+	if (cfg->type == V4L2_CTRL_TYPE_MENU && qmenu == NULL)
 		qmenu = v4l2_ctrl_get_menu(cfg->id);
-	} else if (type == V4L2_CTRL_TYPE_INTEGER_MENU && !qmenu_int) {
+	else if (cfg->type == V4L2_CTRL_TYPE_INTEGER_MENU &&
+		 qmenu_int == NULL) {
 		handler_set_err(hdl, -EINVAL);
 		return NULL;
 	}
@@ -2825,7 +2822,7 @@ static int prepare_ext_ctrls(struct v4l2_ctrl_handler *hdl,
 static int class_check(struct v4l2_ctrl_handler *hdl, u32 which)
 {
 	if (which == 0 || which == V4L2_CTRL_WHICH_DEF_VAL)
-		return list_empty(&hdl->ctrl_refs) ? -EINVAL : 0;
+		return 0;
 	return find_ref_lock(hdl, which | 1) ? 0 : -EINVAL;
 }
 

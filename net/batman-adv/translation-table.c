@@ -614,26 +614,14 @@ static void batadv_tt_global_free(struct batadv_priv *bat_priv,
 				  struct batadv_tt_global_entry *tt_global,
 				  const char *message)
 {
-	struct batadv_tt_global_entry *tt_removed_entry;
-	struct hlist_node *tt_removed_node;
-
 	batadv_dbg(BATADV_DBG_TT, bat_priv,
 		   "Deleting global tt entry %pM (vid: %d): %s\n",
 		   tt_global->common.addr,
 		   batadv_print_vid(tt_global->common.vid), message);
 
-	tt_removed_node = batadv_hash_remove(bat_priv->tt.global_hash,
-					     batadv_compare_tt,
-					     batadv_choose_tt,
-					     &tt_global->common);
-	if (!tt_removed_node)
-		return;
-
-	/* drop reference of remove hash entry */
-	tt_removed_entry = hlist_entry(tt_removed_node,
-				       struct batadv_tt_global_entry,
-				       common.hash_entry);
-	batadv_tt_global_entry_put(tt_removed_entry);
+	batadv_hash_remove(bat_priv->tt.global_hash, batadv_compare_tt,
+			   batadv_choose_tt, &tt_global->common);
+	batadv_tt_global_entry_put(tt_global);
 }
 
 /**
@@ -1325,10 +1313,9 @@ u16 batadv_tt_local_remove(struct batadv_priv *bat_priv, const u8 *addr,
 			   unsigned short vid, const char *message,
 			   bool roaming)
 {
-	struct batadv_tt_local_entry *tt_removed_entry;
 	struct batadv_tt_local_entry *tt_local_entry;
 	u16 flags, curr_flags = BATADV_NO_FLAGS;
-	struct hlist_node *tt_removed_node;
+	void *tt_entry_exists;
 
 	tt_local_entry = batadv_tt_local_hash_find(bat_priv, addr, vid);
 	if (!tt_local_entry)
@@ -1357,18 +1344,15 @@ u16 batadv_tt_local_remove(struct batadv_priv *bat_priv, const u8 *addr,
 	 */
 	batadv_tt_local_event(bat_priv, tt_local_entry, BATADV_TT_CLIENT_DEL);
 
-	tt_removed_node = batadv_hash_remove(bat_priv->tt.local_hash,
+	tt_entry_exists = batadv_hash_remove(bat_priv->tt.local_hash,
 					     batadv_compare_tt,
 					     batadv_choose_tt,
 					     &tt_local_entry->common);
-	if (!tt_removed_node)
+	if (!tt_entry_exists)
 		goto out;
 
-	/* drop reference of remove hash entry */
-	tt_removed_entry = hlist_entry(tt_removed_node,
-				       struct batadv_tt_local_entry,
-				       common.hash_entry);
-	batadv_tt_local_entry_put(tt_removed_entry);
+	/* extra call to free the local tt entry */
+	batadv_tt_local_entry_put(tt_local_entry);
 
 out:
 	if (tt_local_entry)
@@ -1603,8 +1587,6 @@ batadv_tt_global_orig_entry_add(struct batadv_tt_global_entry *tt_global,
 {
 	struct batadv_tt_orig_list_entry *orig_entry;
 
-	spin_lock_bh(&tt_global->list_lock);
-
 	orig_entry = batadv_tt_global_orig_entry_find(tt_global, orig_node);
 	if (orig_entry) {
 		/* refresh the ttvn: the current value could be a bogus one that
@@ -1627,9 +1609,11 @@ batadv_tt_global_orig_entry_add(struct batadv_tt_global_entry *tt_global,
 	orig_entry->flags = flags;
 	kref_init(&orig_entry->refcount);
 
+	spin_lock_bh(&tt_global->list_lock);
 	kref_get(&orig_entry->refcount);
 	hlist_add_head_rcu(&orig_entry->list,
 			   &tt_global->orig_list);
+	spin_unlock_bh(&tt_global->list_lock);
 	atomic_inc(&tt_global->orig_list_count);
 
 sync_flags:
@@ -1637,8 +1621,6 @@ sync_flags:
 out:
 	if (orig_entry)
 		batadv_tt_orig_list_entry_put(orig_entry);
-
-	spin_unlock_bh(&tt_global->list_lock);
 }
 
 /**
@@ -3750,8 +3732,6 @@ static void batadv_tt_purge(struct work_struct *work)
 
 void batadv_tt_free(struct batadv_priv *bat_priv)
 {
-	batadv_tvlv_handler_unregister(bat_priv, BATADV_TVLV_ROAM, 1);
-
 	batadv_tvlv_container_unregister(bat_priv, BATADV_TVLV_TT, 1);
 	batadv_tvlv_handler_unregister(bat_priv, BATADV_TVLV_TT, 1);
 

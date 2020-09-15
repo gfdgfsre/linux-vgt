@@ -925,7 +925,7 @@ int kernel_read_file(struct file *file, void **buf, loff_t *size,
 		bytes = kernel_read(file, *buf + pos, i_size - pos, &pos);
 		if (bytes < 0) {
 			ret = bytes;
-			goto out_free;
+			goto out;
 		}
 
 		if (bytes == 0)
@@ -1303,7 +1303,7 @@ EXPORT_SYMBOL(flush_old_exec);
 void would_dump(struct linux_binprm *bprm, struct file *file)
 {
 	struct inode *inode = file_inode(file);
-	if (inode_permission2(file->f_path.mnt, inode, MAY_READ) < 0) {
+	if (inode_permission(inode, MAY_READ) < 0) {
 		struct user_namespace *old, *user_ns;
 		bprm->interp_flags |= BINPRM_FLAGS_ENFORCE_NONDUMP;
 
@@ -1808,7 +1808,7 @@ static int do_execveat_common(int fd, struct filename *filename,
 	current->in_execve = 0;
 	membarrier_execve(current);
 	acct_update_integrals(current);
-	task_numa_free(current, false);
+	task_numa_free(current);
 	free_bprm(bprm);
 	kfree(pathbuf);
 	putname(filename);

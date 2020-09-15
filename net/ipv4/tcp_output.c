@@ -194,7 +194,7 @@ u32 tcp_default_init_rwnd(u32 mss)
 	 * (RFC 3517, Section 4, NextSeg() rule (2)). Further place a
 	 * limit when mss is larger than 1460.
 	 */
-	u32 init_rwnd = sysctl_tcp_default_init_rwnd;
+	u32 init_rwnd = TCP_INIT_CWND * 2;
 
 	if (mss > 1460)
 		init_rwnd = max((1460 * init_rwnd) / mss, 2U);
@@ -1264,7 +1264,6 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *buff;
 	int nsize, old_factor;
-	long limit;
 	int nlen;
 	u8 flags;
 
@@ -1274,19 +1273,6 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	nsize = skb_headlen(skb) - len;
 	if (nsize < 0)
 		nsize = 0;
-
-	/* tcp_sendmsg() can overshoot sk_wmem_queued by one full size skb.
-	 * We need some allowance to not penalize applications setting small
-	 * SO_SNDBUF values.
-	 * Also allow first and last skb in retransmit queue to be split.
-	 */
-	limit = sk->sk_sndbuf + 2 * SKB_TRUESIZE(GSO_MAX_SIZE);
-	if (unlikely((sk->sk_wmem_queued >> 1) > limit &&
-		     skb != tcp_rtx_queue_head(sk) &&
-		     skb != tcp_rtx_queue_tail(sk))) {
-		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPWQUEUETOOBIG);
-		return -ENOMEM;
-	}
 
 	if (skb_unclone(skb, gfp))
 		return -ENOMEM;
@@ -1456,7 +1442,8 @@ static inline int __tcp_mtu_to_mss(struct sock *sk, int pmtu)
 	mss_now -= icsk->icsk_ext_hdr_len;
 
 	/* Then reserve room for full set of TCP options and 8 bytes of data */
-	mss_now = max(mss_now, sock_net(sk)->ipv4.sysctl_tcp_min_snd_mss);
+	if (mss_now < 48)
+		mss_now = 48;
 	return mss_now;
 }
 
@@ -1898,15 +1885,16 @@ static int tso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
  * This algorithm is from John Heffner.
  */
 static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
-				 bool *is_cwnd_limited,
-				 bool *is_rwnd_limited,
-				 u32 max_segs)
+				 bool *is_cwnd_limited, u32 max_segs)
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 	u32 age, send_win, cong_win, limit, in_flight;
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *head;
 	int win_divisor;
+
+	if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+		goto send_now;
 
 	if (icsk->icsk_ca_state >= TCP_CA_Recovery)
 		goto send_now;
@@ -1963,27 +1951,10 @@ static bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb,
 	if (age < (tp->srtt_us >> 4))
 		goto send_now;
 
-	/* Ok, it looks like it is advisable to defer.
-	 * Three cases are tracked :
-	 * 1) We are cwnd-limited
-	 * 2) We are rwnd-limited
-	 * 3) We are application limited.
-	 */
-	if (cong_win < send_win) {
-		if (cong_win <= skb->len) {
-			*is_cwnd_limited = true;
-			return true;
-		}
-	} else {
-		if (send_win <= skb->len) {
-			*is_rwnd_limited = true;
-			return true;
-		}
-	}
+	/* Ok, it looks like it is advisable to defer. */
 
-	/* If this packet won't get more data, do not wait. */
-	if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
-		goto send_now;
+	if (cong_win < send_win && cong_win <= skb->len)
+		*is_cwnd_limited = true;
 
 	return true;
 
@@ -2357,7 +2328,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 		} else {
 			if (!push_one &&
 			    tcp_tso_should_defer(sk, skb, &is_cwnd_limited,
-						 &is_rwnd_limited, max_segs))
+						 max_segs))
 				break;
 		}
 
@@ -2502,16 +2473,12 @@ void tcp_send_loss_probe(struct sock *sk)
 		skb = tcp_write_queue_tail(sk);
 	}
 
-	if (unlikely(!skb)) {
-		WARN_ONCE(tp->packets_out,
-			  "invalid inflight: %u state %u cwnd %u mss %d\n",
-			  tp->packets_out, sk->sk_state, tp->snd_cwnd, mss);
-		inet_csk(sk)->icsk_pending = 0;
-		return;
-	}
-
 	/* At most one outstanding TLP retransmission. */
 	if (tp->tlp_high_seq)
+		goto rearm_timer;
+
+	/* Retransmit last segment. */
+	if (WARN_ON(!skb))
 		goto rearm_timer;
 
 	if (skb_still_in_host_queue(sk, skb))
@@ -2737,7 +2704,7 @@ static bool tcp_collapse_retrans(struct sock *sk, struct sk_buff *skb)
 		if (next_skb_size <= skb_availroom(skb))
 			skb_copy_bits(next_skb, 0, skb_put(skb, next_skb_size),
 				      next_skb_size);
-		else if (!tcp_skb_shift(skb, next_skb, 1, next_skb_size))
+		else if (!skb_shift(skb, next_skb, next_skb_size))
 			return false;
 	}
 	tcp_highest_sack_replace(sk, next_skb, skb);

@@ -19,7 +19,6 @@
 
 #include <linux/cpu.h>
 #include <linux/cpufreq.h>
-#include <linux/cpufreq_times.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/init.h>
@@ -161,6 +160,12 @@ u64 get_cpu_idle_time(unsigned int cpu, u64 *wall, int io_busy)
 	return idle_time;
 }
 EXPORT_SYMBOL_GPL(get_cpu_idle_time);
+
+__weak void arch_set_freq_scale(struct cpumask *cpus, unsigned long cur_freq,
+		unsigned long max_freq)
+{
+}
+EXPORT_SYMBOL_GPL(arch_set_freq_scale);
 
 /*
  * This is a generic cpufreq init() routine which can be used by cpufreq
@@ -340,7 +345,6 @@ static void __cpufreq_notify_transition(struct cpufreq_policy *policy,
 			 (unsigned long)freqs->new, (unsigned long)freqs->cpu);
 		trace_cpu_frequency(freqs->new, freqs->cpu);
 		cpufreq_stats_record_transition(policy, freqs->new);
-		cpufreq_times_record_transition(policy, freqs->new);
 		srcu_notifier_call_chain(&cpufreq_transition_notifier_list,
 				CPUFREQ_POSTCHANGE, freqs);
 		if (likely(policy) && likely(policy->cpu == freqs->cpu))
@@ -556,13 +560,13 @@ EXPORT_SYMBOL_GPL(cpufreq_policy_transition_delay_us);
  *                          SYSFS INTERFACE                          *
  *********************************************************************/
 static ssize_t show_boost(struct kobject *kobj,
-			  struct kobj_attribute *attr, char *buf)
+				 struct attribute *attr, char *buf)
 {
 	return sprintf(buf, "%d\n", cpufreq_driver->boost_enabled);
 }
 
-static ssize_t store_boost(struct kobject *kobj, struct kobj_attribute *attr,
-			   const char *buf, size_t count)
+static ssize_t store_boost(struct kobject *kobj, struct attribute *attr,
+				  const char *buf, size_t count)
 {
 	int ret, enable;
 
@@ -1103,7 +1107,6 @@ static struct cpufreq_policy *cpufreq_policy_alloc(unsigned int cpu)
 				   cpufreq_global_kobject, "policy%u", cpu);
 	if (ret) {
 		pr_err("%s: failed to init policy->kobj: %d\n", __func__, ret);
-		kobject_put(&policy->kobj);
 		goto err_free_real_cpus;
 	}
 
@@ -1292,7 +1295,6 @@ static int cpufreq_online(unsigned int cpu)
 			goto out_exit_policy;
 
 		cpufreq_stats_create_table(policy);
-		cpufreq_times_create_policy(policy);
 
 		write_lock_irqsave(&cpufreq_driver_lock, flags);
 		list_add(&policy->policy_list, &cpufreq_policy_list);
@@ -1527,16 +1529,17 @@ static unsigned int __cpufreq_get(struct cpufreq_policy *policy)
 {
 	unsigned int ret_freq = 0;
 
-	if (unlikely(policy_is_inactive(policy)) || !cpufreq_driver->get)
+	if (!cpufreq_driver->get)
 		return ret_freq;
 
 	ret_freq = cpufreq_driver->get(policy->cpu);
 
 	/*
-	 * If fast frequency switching is used with the given policy, the check
+	 * Updating inactive policies is invalid, so avoid doing that.  Also
+	 * if fast frequency switching is used with the given policy, the check
 	 * against policy->cur is pointless, so skip it in that case too.
 	 */
-	if (policy->fast_switch_enabled)
+	if (unlikely(policy_is_inactive(policy)) || policy->fast_switch_enabled)
 		return ret_freq;
 
 	if (ret_freq && policy->cur &&
@@ -1565,7 +1568,10 @@ unsigned int cpufreq_get(unsigned int cpu)
 
 	if (policy) {
 		down_read(&policy->rwsem);
-		ret_freq = __cpufreq_get(policy);
+
+		if (!policy_is_inactive(policy))
+			ret_freq = __cpufreq_get(policy);
+
 		up_read(&policy->rwsem);
 
 		cpufreq_cpu_put(policy);
@@ -1853,14 +1859,9 @@ EXPORT_SYMBOL(cpufreq_unregister_notifier);
 unsigned int cpufreq_driver_fast_switch(struct cpufreq_policy *policy,
 					unsigned int target_freq)
 {
-	int ret;
 	target_freq = clamp_val(target_freq, policy->min, policy->max);
 
-        ret = cpufreq_driver->fast_switch(policy, target_freq);
-	if (ret)
-		cpufreq_times_record_transition(policy, ret);
-
-	return ret;
+	return cpufreq_driver->fast_switch(policy, target_freq);
 }
 EXPORT_SYMBOL_GPL(cpufreq_driver_fast_switch);
 
@@ -2240,10 +2241,6 @@ static int cpufreq_set_policy(struct cpufreq_policy *policy,
 	policy->min = new_policy->min;
 	policy->max = new_policy->max;
 
-	arch_set_max_freq_scale(policy->cpus, policy->max);
-
-	trace_cpu_frequency_limits(policy->max, policy->min, policy->cpu);
-
 	policy->cached_target_freq = UINT_MAX;
 
 	pr_debug("new min and max freqs are %u - %u kHz\n",
@@ -2440,23 +2437,6 @@ int cpufreq_boost_enabled(void)
 	return cpufreq_driver->boost_enabled;
 }
 EXPORT_SYMBOL_GPL(cpufreq_boost_enabled);
-
-/*********************************************************************
- *               FREQUENCY INVARIANT ACCOUNTING SUPPORT              *
- *********************************************************************/
-
-__weak void arch_set_freq_scale(struct cpumask *cpus,
-				unsigned long cur_freq,
-				unsigned long max_freq)
-{
-}
-EXPORT_SYMBOL_GPL(arch_set_freq_scale);
-
-__weak void arch_set_max_freq_scale(struct cpumask *cpus,
-				    unsigned long policy_max_freq)
-{
-}
-EXPORT_SYMBOL_GPL(arch_set_max_freq_scale);
 
 /*********************************************************************
  *               REGISTER / UNREGISTER CPUFREQ DRIVER                *

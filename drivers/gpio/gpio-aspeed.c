@@ -536,12 +536,12 @@ static int aspeed_gpio_request(struct gpio_chip *chip, unsigned int offset)
 	if (!have_gpio(gpiochip_get_data(chip), offset))
 		return -ENODEV;
 
-	return pinctrl_request_gpio(chip->base + offset);
+	return pinctrl_gpio_request(chip->base + offset);
 }
 
 static void aspeed_gpio_free(struct gpio_chip *chip, unsigned int offset)
 {
-	pinctrl_free_gpio(chip->base + offset);
+	pinctrl_gpio_free(chip->base + offset);
 }
 
 static inline void __iomem *bank_debounce_reg(struct aspeed_gpio *gpio,
@@ -861,8 +861,6 @@ static int __init aspeed_gpio_probe(struct platform_device *pdev)
 
 	gpio->offset_timer =
 		devm_kzalloc(&pdev->dev, gpio->chip.ngpio, GFP_KERNEL);
-	if (!gpio->offset_timer)
-		return -ENOMEM;
 
 	return aspeed_gpio_setup_irqs(gpio, pdev);
 }

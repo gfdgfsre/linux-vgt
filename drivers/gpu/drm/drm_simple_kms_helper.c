@@ -139,10 +139,11 @@ static int drm_simple_kms_plane_atomic_check(struct drm_plane *plane,
 	crtc_state = drm_atomic_get_new_crtc_state(plane_state->state,
 						   &pipe->crtc);
 
-	ret = drm_plane_helper_check_state(plane_state, &clip,
-					   DRM_PLANE_HELPER_NO_SCALING,
-					   DRM_PLANE_HELPER_NO_SCALING,
-					   false, true);
+	ret = drm_atomic_helper_check_plane_state(plane_state, crtc_state,
+						  &clip,
+						  DRM_PLANE_HELPER_NO_SCALING,
+						  DRM_PLANE_HELPER_NO_SCALING,
+						  false, true);
 	if (ret)
 		return ret;
 

@@ -280,6 +280,7 @@ int of_resolve_phandles(struct device_node *overlay)
 		err = -EINVAL;
 		goto out;
 	}
+
 	if (!of_node_check_flag(overlay, OF_DETACHED)) {
 		pr_err("overlay not detached\n");
 		err = -EINVAL;

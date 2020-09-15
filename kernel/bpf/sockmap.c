@@ -41,9 +41,6 @@
 #include <net/strparser.h>
 #include <net/tcp.h>
 
-#define SOCK_CREATE_FLAG_MASK \
-	(BPF_F_NUMA_NODE | BPF_F_RDONLY | BPF_F_WRONLY)
-
 struct bpf_stab {
 	struct bpf_map map;
 	struct sock **sock_map;
@@ -514,7 +511,7 @@ static struct bpf_map *sock_map_alloc(union bpf_attr *attr)
 
 	/* check sanity of attributes */
 	if (attr->max_entries == 0 || attr->key_size != 4 ||
-	    attr->value_size != 4 || attr->map_flags & ~SOCK_CREATE_FLAG_MASK)
+	    attr->value_size != 4 || attr->map_flags & ~BPF_F_NUMA_NODE)
 		return ERR_PTR(-EINVAL);
 
 	if (attr->value_size > KMALLOC_MAX_SIZE)
@@ -878,7 +875,7 @@ static int sock_map_update_elem(struct bpf_map *map,
 	return err;
 }
 
-static void sock_map_release(struct bpf_map *map)
+static void sock_map_release(struct bpf_map *map, struct file *map_file)
 {
 	struct bpf_stab *stab = container_of(map, struct bpf_stab, map);
 	struct bpf_prog *orig;
@@ -898,7 +895,7 @@ const struct bpf_map_ops sock_map_ops = {
 	.map_get_next_key = sock_map_get_next_key,
 	.map_update_elem = sock_map_update_elem,
 	.map_delete_elem = sock_map_delete_elem,
-	.map_release_uref = sock_map_release,
+	.map_release = sock_map_release,
 };
 
 BPF_CALL_4(bpf_sock_map_update, struct bpf_sock_ops_kern *, bpf_sock,

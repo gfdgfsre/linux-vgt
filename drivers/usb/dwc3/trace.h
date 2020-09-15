@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /**
  * trace.h - DesignWare USB3 DRD Controller Trace Support
  *
@@ -262,11 +263,9 @@ DECLARE_EVENT_CLASS(dwc3_log_trb,
 				s = "2x ";
 				break;
 			case 3:
-			default:
 				s = "3x ";
 				break;
 			}
-			break;
 		default:
 			s = "";
 		} s; }),

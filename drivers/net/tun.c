@@ -831,7 +831,17 @@ static void tun_net_uninit(struct net_device *dev)
 /* Net device open. */
 static int tun_net_open(struct net_device *dev)
 {
+	struct tun_struct *tun = netdev_priv(dev);
+	int i;
+
 	netif_tx_start_all_queues(dev);
+
+	for (i = 0; i < tun->numqueues; i++) {
+		struct tun_file *tfile;
+
+		tfile = rtnl_dereference(tun->tfiles[i]);
+		tfile->socket.sk->sk_write_space(tfile->socket.sk);
+	}
 
 	return 0;
 }
@@ -1204,7 +1214,6 @@ static void tun_rx_batched(struct tun_struct *tun, struct tun_file *tfile,
 
 	if (!rx_batched || (!more && skb_queue_empty(queue))) {
 		local_bh_disable();
-		skb_record_rx_queue(skb, tfile->queue_index);
 		netif_receive_skb(skb);
 		local_bh_enable();
 		return;
@@ -1224,11 +1233,8 @@ static void tun_rx_batched(struct tun_struct *tun, struct tun_file *tfile,
 		struct sk_buff *nskb;
 
 		local_bh_disable();
-		while ((nskb = __skb_dequeue(&process_queue))) {
-			skb_record_rx_queue(nskb, tfile->queue_index);
+		while ((nskb = __skb_dequeue(&process_queue)))
 			netif_receive_skb(nskb);
-		}
-		skb_record_rx_queue(skb, tfile->queue_index);
 		netif_receive_skb(skb);
 		local_bh_enable();
 	}
@@ -1350,7 +1356,6 @@ static struct sk_buff *tun_build_skb(struct tun_struct *tun,
 
 	skb_reserve(skb, pad - delta);
 	skb_put(skb, len + delta);
-	skb_set_owner_w(skb, tfile->socket.sk);
 	get_page(alloc_frag->page);
 	alloc_frag->offset += buflen;
 
@@ -1393,6 +1398,9 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	int err;
 	u32 rxhash;
 	int skb_xdp = 1;
+
+	if (!(tun->dev->flags & IFF_UP))
+		return -EIO;
 
 	if (!(tun->flags & IFF_NO_PI)) {
 		if (len < sizeof(pi))
@@ -1481,11 +1489,9 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 			err = skb_copy_datagram_from_iter(skb, 0, from, len);
 
 		if (err) {
-			err = -EFAULT;
-drop:
 			this_cpu_inc(tun->pcpu_stats->rx_dropped);
 			kfree_skb(skb);
-			return err;
+			return -EFAULT;
 		}
 	}
 
@@ -1556,20 +1562,11 @@ drop:
 	}
 
 	rxhash = __skb_get_hash_symmetric(skb);
-
-	rcu_read_lock();
-	if (unlikely(!(tun->dev->flags & IFF_UP))) {
-		err = -EIO;
-		rcu_read_unlock();
-		goto drop;
-	}
-
 #ifndef CONFIG_4KSTACKS
 	tun_rx_batched(tun, tfile, skb, more);
 #else
 	netif_rx_ni(skb);
 #endif
-	rcu_read_unlock();
 
 	stats = get_cpu_ptr(tun->pcpu_stats);
 	u64_stats_update_begin(&stats->syncp);
@@ -1713,9 +1710,9 @@ static struct sk_buff *tun_ring_recv(struct tun_file *tfile, int noblock,
 	}
 
 	add_wait_queue(&tfile->wq.wait, &wait);
+	current->state = TASK_INTERRUPTIBLE;
 
 	while (1) {
-		set_current_state(TASK_INTERRUPTIBLE);
 		skb = skb_array_consume(&tfile->tx_array);
 		if (skb)
 			break;
@@ -1731,7 +1728,7 @@ static struct sk_buff *tun_ring_recv(struct tun_file *tfile, int noblock,
 		schedule();
 	}
 
-	__set_current_state(TASK_RUNNING);
+	current->state = TASK_RUNNING;
 	remove_wait_queue(&tfile->wq.wait, &wait);
 
 out:
@@ -1817,9 +1814,7 @@ static void tun_setup(struct net_device *dev)
 static int tun_validate(struct nlattr *tb[], struct nlattr *data[],
 			struct netlink_ext_ack *extack)
 {
-	NL_SET_ERR_MSG(extack,
-		       "tun/tap creation via rtnetlink is not supported.");
-	return -EOPNOTSUPP;
+	return -EINVAL;
 }
 
 static struct rtnl_link_ops tun_link_ops __read_mostly = {
@@ -2281,12 +2276,6 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 	unsigned int ifindex;
 	int le;
 	int ret;
-
-#ifdef CONFIG_ANDROID_PARANOID_NETWORK
-	if (cmd != TUNGETIFF && !capable(CAP_NET_ADMIN)) {
-		return -EPERM;
-	}
-#endif
 
 	if (cmd == TUNSETIFF || cmd == TUNSETQUEUE || _IOC_TYPE(cmd) == SOCK_IOC_TYPE) {
 		if (copy_from_user(&ifr, argp, ifreq_len))
@@ -2823,7 +2812,6 @@ static int tun_device_event(struct notifier_block *unused,
 {
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct tun_struct *tun = netdev_priv(dev);
-	int i;
 
 	if (dev->rtnl_link_ops != &tun_link_ops)
 		return NOTIFY_DONE;
@@ -2832,14 +2820,6 @@ static int tun_device_event(struct notifier_block *unused,
 	case NETDEV_CHANGE_TX_QUEUE_LEN:
 		if (tun_queue_resize(tun))
 			return NOTIFY_BAD;
-		break;
-	case NETDEV_UP:
-		for (i = 0; i < tun->numqueues; i++) {
-			struct tun_file *tfile;
-
-			tfile = rtnl_dereference(tun->tfiles[i]);
-			tfile->socket.sk->sk_write_space(tfile->socket.sk);
-		}
 		break;
 	default:
 		break;

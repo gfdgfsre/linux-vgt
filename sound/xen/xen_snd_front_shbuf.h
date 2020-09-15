@@ -18,15 +18,16 @@
 struct xen_snd_front_shbuf {
 	int num_grefs;
 	grant_ref_t *grefs;
-	uint8_t *directory;
-	uint8_t *buffer;
+	u8 *directory;
+	u8 *buffer;
 	size_t buffer_sz;
 };
 
 grant_ref_t xen_snd_front_shbuf_get_dir_start(struct xen_snd_front_shbuf *buf);
 
 int xen_snd_front_shbuf_alloc(struct xenbus_device *xb_dev,
-		struct xen_snd_front_shbuf *buf, unsigned int buffer_sz);
+			      struct xen_snd_front_shbuf *buf,
+			      unsigned int buffer_sz);
 
 void xen_snd_front_shbuf_clear(struct xen_snd_front_shbuf *buf);
 

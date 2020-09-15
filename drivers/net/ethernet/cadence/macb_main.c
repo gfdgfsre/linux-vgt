@@ -60,8 +60,7 @@
 #define MACB_TX_ERR_FLAGS	(MACB_BIT(ISR_TUND)			\
 					| MACB_BIT(ISR_RLE)		\
 					| MACB_BIT(TXERR))
-#define MACB_TX_INT_FLAGS	(MACB_TX_ERR_FLAGS | MACB_BIT(TCOMP)	\
-					| MACB_BIT(TXUBR))
+#define MACB_TX_INT_FLAGS	(MACB_TX_ERR_FLAGS | MACB_BIT(TCOMP))
 
 /* Max length of transmit frame must be a multiple of 8 bytes */
 #define MACB_TX_LEN_ALIGN	8
@@ -675,11 +674,6 @@ static void macb_set_addr(struct macb *bp, struct macb_dma_desc *desc, dma_addr_
 	if (bp->hw_dma_cap & HW_DMA_CAP_64B) {
 		desc_64 = macb_64b_desc(bp, desc);
 		desc_64->addrh = upper_32_bits(addr);
-		/* The low bits of RX address contain the RX_USED bit, clearing
-		 * of which allows packet RX. Make sure the high bits are also
-		 * visible to HW at that point.
-		 */
-		dma_wmb();
 	}
 #endif
 	desc->addr = lower_32_bits(addr);
@@ -923,19 +917,14 @@ static void gem_rx_refill(struct macb *bp)
 
 			if (entry == bp->rx_ring_size - 1)
 				paddr |= MACB_BIT(RX_WRAP);
-			desc->ctrl = 0;
-			/* Setting addr clears RX_USED and allows reception,
-			 * make sure ctrl is cleared first to avoid a race.
-			 */
-			dma_wmb();
 			macb_set_addr(bp, desc, paddr);
+			desc->ctrl = 0;
 
 			/* properly align Ethernet header */
 			skb_reserve(skb, NET_IP_ALIGN);
 		} else {
-			desc->ctrl = 0;
-			dma_wmb();
 			desc->addr &= ~MACB_BIT(RX_USED);
+			desc->ctrl = 0;
 		}
 	}
 
@@ -1254,21 +1243,6 @@ static int macb_poll(struct napi_struct *napi, int budget)
 	return work_done;
 }
 
-static void macb_tx_restart(struct macb_queue *queue)
-{
-	unsigned int head = queue->tx_head;
-	unsigned int tail = queue->tx_tail;
-	struct macb *bp = queue->bp;
-
-	if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
-		queue_writel(queue, ISR, MACB_BIT(TXUBR));
-
-	if (head == tail)
-		return;
-
-	macb_writel(bp, NCR, macb_readl(bp, NCR) | MACB_BIT(TSTART));
-}
-
 static irqreturn_t macb_interrupt(int irq, void *dev_id)
 {
 	struct macb_queue *queue = dev_id;
@@ -1325,9 +1299,6 @@ static irqreturn_t macb_interrupt(int irq, void *dev_id)
 
 		if (status & MACB_BIT(TCOMP))
 			macb_tx_interrupt(queue);
-
-		if (status & MACB_BIT(TXUBR))
-			macb_tx_restart(queue);
 
 		/* Link change detection isn't possible with RMII, so we'll
 		 * add that if/when we get our hands on a full-blown MII PHY.
@@ -2029,7 +2000,6 @@ static void macb_configure_dma(struct macb *bp)
 		else
 			dmacfg &= ~GEM_BIT(TXCOEN);
 
-		dmacfg &= ~GEM_BIT(ADDR64);
 #ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
 		if (bp->hw_dma_cap & HW_DMA_CAP_64B)
 			dmacfg |= GEM_BIT(ADDR64);
@@ -2817,20 +2787,14 @@ static int macb_clk_init(struct platform_device *pdev, struct clk **pclk,
 		*hclk = devm_clk_get(&pdev->dev, "hclk");
 	}
 
-	if (IS_ERR_OR_NULL(*pclk)) {
+	if (IS_ERR(*pclk)) {
 		err = PTR_ERR(*pclk);
-		if (!err)
-			err = -ENODEV;
-
 		dev_err(&pdev->dev, "failed to get macb_clk (%u)\n", err);
 		return err;
 	}
 
-	if (IS_ERR_OR_NULL(*hclk)) {
+	if (IS_ERR(*hclk)) {
 		err = PTR_ERR(*hclk);
-		if (!err)
-			err = -ENODEV;
-
 		dev_err(&pdev->dev, "failed to get hclk (%u)\n", err);
 		return err;
 	}
@@ -3337,13 +3301,6 @@ static const struct macb_config at91sam9260_config = {
 	.init = macb_init,
 };
 
-static const struct macb_config sama5d3macb_config = {
-	.caps = MACB_CAPS_SG_DISABLED
-	      | MACB_CAPS_USRIO_HAS_CLKEN | MACB_CAPS_USRIO_DEFAULT_IS_MII_GMII,
-	.clk_init = macb_clk_init,
-	.init = macb_init,
-};
-
 static const struct macb_config pc302gem_config = {
 	.caps = MACB_CAPS_SG_DISABLED | MACB_CAPS_GIGABIT_MODE_AVAILABLE,
 	.dma_burst_length = 16,
@@ -3411,7 +3368,6 @@ static const struct of_device_id macb_dt_ids[] = {
 	{ .compatible = "cdns,gem", .data = &pc302gem_config },
 	{ .compatible = "atmel,sama5d2-gem", .data = &sama5d2_config },
 	{ .compatible = "atmel,sama5d3-gem", .data = &sama5d3_config },
-	{ .compatible = "atmel,sama5d3-macb", .data = &sama5d3macb_config },
 	{ .compatible = "atmel,sama5d4-gem", .data = &sama5d4_config },
 	{ .compatible = "cdns,at91rm9200-emac", .data = &emac_config },
 	{ .compatible = "cdns,emac", .data = &emac_config },
@@ -3440,7 +3396,6 @@ static int macb_probe(struct platform_device *pdev)
 					      = macb_config->clk_init;
 	int (*init)(struct platform_device *) = macb_config->init;
 	struct device_node *np = pdev->dev.of_node;
-	struct device_node *phy_node;
 	struct clk *pclk, *hclk = NULL, *tx_clk = NULL, *rx_clk = NULL;
 	unsigned int queue_mask, num_queues;
 	struct macb_platform_data *pdata;
@@ -3546,18 +3501,6 @@ static int macb_probe(struct platform_device *pdev)
 	else
 		macb_get_hwaddr(bp);
 
-	/* Power up the PHY if there is a GPIO reset */
-	phy_node =  of_get_next_available_child(np, NULL);
-	if (phy_node) {
-		int gpio = of_get_named_gpio(phy_node, "reset-gpios", 0);
-
-		if (gpio_is_valid(gpio)) {
-			bp->reset_gpio = gpio_to_desc(gpio);
-			gpiod_direction_output(bp->reset_gpio, 1);
-		}
-	}
-	of_node_put(phy_node);
-
 	err = of_get_phy_mode(np);
 	if (err < 0) {
 		pdata = dev_get_platdata(&pdev->dev);
@@ -3601,10 +3544,6 @@ err_out_unregister_mdio:
 	mdiobus_unregister(bp->mii_bus);
 	mdiobus_free(bp->mii_bus);
 
-	/* Shutdown the PHY if there is a GPIO reset */
-	if (bp->reset_gpio)
-		gpiod_set_value(bp->reset_gpio, 0);
-
 err_out_free_netdev:
 	free_netdev(dev);
 
@@ -3631,10 +3570,6 @@ static int macb_remove(struct platform_device *pdev)
 		mdiobus_unregister(bp->mii_bus);
 		dev->phydev = NULL;
 		mdiobus_free(bp->mii_bus);
-
-		/* Shutdown the PHY if there is a GPIO reset */
-		if (bp->reset_gpio)
-			gpiod_set_value(bp->reset_gpio, 0);
 
 		unregister_netdev(dev);
 		clk_disable_unprepare(bp->tx_clk);

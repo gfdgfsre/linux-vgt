@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  *  Universal/legacy driver for 8250/16550-type serial ports
  *
@@ -11,11 +12,6 @@
  *	      userspace-configurable "phantom" ports
  *	      "serial8250" platform devices
  *	      serial8250_register_8250_port() ports
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/module.h>

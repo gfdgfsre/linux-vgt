@@ -735,7 +735,6 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 		break;
 	case SO_DONTROUTE:
 		sock_valbool_flag(sk, SOCK_LOCALROUTE, valbool);
-		sk_dst_reset(sk);
 		break;
 	case SO_BROADCAST:
 		sock_valbool_flag(sk, SOCK_BROADCAST, valbool);
@@ -1357,6 +1356,9 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 	case SO_MEMINFO:
 	{
 		u32 meminfo[SK_MEMINFO_VARS];
+
+		if (get_user(len, optlen))
+			return -EFAULT;
 
 		sk_get_meminfo(sk, meminfo);
 
@@ -2240,7 +2242,7 @@ static void __lock_sock(struct sock *sk)
 	finish_wait(&sk->sk_lock.wq, &wait);
 }
 
-void __release_sock(struct sock *sk)
+static void __release_sock(struct sock *sk)
 	__releases(&sk->sk_lock.slock)
 	__acquires(&sk->sk_lock.slock)
 {
@@ -2728,9 +2730,6 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	sk->sk_sndtimeo		=	MAX_SCHEDULE_TIMEOUT;
 
 	sk->sk_stamp = SK_DEFAULT_STAMP;
-#if BITS_PER_LONG==32
-	seqlock_init(&sk->sk_stamp_seq);
-#endif
 	atomic_set(&sk->sk_zckey, 0);
 
 #ifdef CONFIG_NET_RX_BUSY_POLL

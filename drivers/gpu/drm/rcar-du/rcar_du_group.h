@@ -1,7 +1,7 @@
 /*
  * rcar_du_group.c  --  R-Car Display Unit Planes and CRTCs Group
  *
- * Copyright (C) 2013-2014 Renesas Electronics Corporation
+ * Copyright (C) 2013-2018 Renesas Electronics Corporation
  *
  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
  *
@@ -25,6 +25,7 @@ struct rcar_du_device;
  * @dev: the DU device
  * @mmio_offset: registers offset in the device memory map
  * @index: group index
+ * @channels_mask: bitmask of populated DU channels in this group
  * @num_crtcs: number of CRTCs in this group (1 or 2)
  * @use_count: number of users of the group (rcar_du_group_(get|put))
  * @used_crtcs: number of CRTCs currently in use
@@ -39,6 +40,7 @@ struct rcar_du_group {
 	unsigned int mmio_offset;
 	unsigned int index;
 
+	unsigned int channels_mask;
 	unsigned int num_crtcs;
 	unsigned int use_count;
 	unsigned int used_crtcs;
@@ -59,7 +61,9 @@ void rcar_du_group_put(struct rcar_du_group *rgrp);
 void rcar_du_group_start_stop(struct rcar_du_group *rgrp, bool start);
 void rcar_du_group_restart(struct rcar_du_group *rgrp);
 int rcar_du_group_set_routing(struct rcar_du_group *rgrp);
-
+void rcar_du_pre_group_set_routing(struct rcar_du_group *rgrp,
+				   struct rcar_du_crtc *rcrtc,
+				   unsigned int swindex);
 int rcar_du_set_dpad0_vsp1_routing(struct rcar_du_device *rcdu);
 
 #endif /* __RCAR_DU_GROUP_H__ */

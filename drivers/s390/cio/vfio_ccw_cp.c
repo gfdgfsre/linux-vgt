@@ -119,10 +119,8 @@ static int pfn_array_alloc_pin(struct pfn_array *pa, struct device *mdev,
 				  sizeof(*pa->pa_iova_pfn) +
 				  sizeof(*pa->pa_pfn),
 				  GFP_KERNEL);
-	if (unlikely(!pa->pa_iova_pfn)) {
-		pa->pa_nr = 0;
+	if (unlikely(!pa->pa_iova_pfn))
 		return -ENOMEM;
-	}
 	pa->pa_pfn = pa->pa_iova_pfn + pa->pa_nr;
 
 	ret = pfn_array_pin(pa, mdev);
@@ -174,7 +172,7 @@ static bool pfn_array_table_iova_pinned(struct pfn_array_table *pat,
 
 	for (i = 0; i < pat->pat_nr; i++, pa++)
 		for (j = 0; j < pa->pa_nr; j++)
-			if (pa->pa_iova_pfn[j] == iova_pfn)
+			if (pa->pa_iova_pfn[i] == iova_pfn)
 				return true;
 
 	return false;

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #
 # This test is for checking rtnetlink callpaths, and get as much coverage as possible.
 #

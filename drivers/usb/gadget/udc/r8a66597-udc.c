@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * R8A66597 UDC (USB gadget)
  *
  * Copyright (C) 2006-2009 Renesas Solutions Corp.
  *
  * Author : Yoshihiro Shimoda <yoshihiro.shimoda.uh@renesas.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
  */
 
 #include <linux/module.h>

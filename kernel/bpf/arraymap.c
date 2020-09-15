@@ -19,9 +19,6 @@
 
 #include "map_in_map.h"
 
-#define ARRAY_CREATE_FLAG_MASK \
-	(BPF_F_NUMA_NODE | BPF_F_RDONLY | BPF_F_WRONLY)
-
 static void bpf_array_free_percpu(struct bpf_array *array)
 {
 	int i;
@@ -63,8 +60,7 @@ static struct bpf_map *array_map_alloc(union bpf_attr *attr)
 
 	/* check sanity of attributes */
 	if (attr->max_entries == 0 || attr->key_size != 4 ||
-	    attr->value_size == 0 ||
-	    attr->map_flags & ~ARRAY_CREATE_FLAG_MASK ||
+	    attr->value_size == 0 || attr->map_flags & ~BPF_F_NUMA_NODE ||
 	    (percpu && numa_node != NUMA_NO_NODE))
 		return ERR_PTR(-EINVAL);
 
@@ -471,7 +467,7 @@ static u32 prog_fd_array_sys_lookup_elem(void *ptr)
 }
 
 /* decrement refcnt of all bpf_progs that are stored in this map */
-static void bpf_fd_array_map_clear(struct bpf_map *map)
+void bpf_fd_array_map_clear(struct bpf_map *map)
 {
 	struct bpf_array *array = container_of(map, struct bpf_array, map);
 	int i;
@@ -489,7 +485,6 @@ const struct bpf_map_ops prog_array_map_ops = {
 	.map_fd_get_ptr = prog_fd_array_get_ptr,
 	.map_fd_put_ptr = prog_fd_array_put_ptr,
 	.map_fd_sys_lookup_elem = prog_fd_array_sys_lookup_elem,
-	.map_release_uref = bpf_fd_array_map_clear,
 };
 
 static struct bpf_event_entry *bpf_event_entry_gen(struct file *perf_file,

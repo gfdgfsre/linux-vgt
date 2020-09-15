@@ -775,9 +775,6 @@ static int dcmi_try_fmt(struct stm32_dcmi *dcmi, struct v4l2_format *f,
 
 	sd_fmt = find_format_by_fourcc(dcmi, pix->pixelformat);
 	if (!sd_fmt) {
-		if (!dcmi->num_of_sd_formats)
-			return -ENODATA;
-
 		sd_fmt = dcmi->sd_formats[dcmi->num_of_sd_formats - 1];
 		pix->pixelformat = sd_fmt->fourcc;
 	}
@@ -949,9 +946,6 @@ static int dcmi_set_sensor_format(struct stm32_dcmi *dcmi,
 
 	sd_fmt = find_format_by_fourcc(dcmi, pix->pixelformat);
 	if (!sd_fmt) {
-		if (!dcmi->num_of_sd_formats)
-			return -ENODATA;
-
 		sd_fmt = dcmi->sd_formats[dcmi->num_of_sd_formats - 1];
 		pix->pixelformat = sd_fmt->fourcc;
 	}
@@ -1501,6 +1495,12 @@ static int dcmi_graph_notify_bound(struct v4l2_async_notifier *notifier,
 	return 0;
 }
 
+static const struct v4l2_async_notifier_operations dcmi_graph_notify_ops = {
+	.bound = dcmi_graph_notify_bound,
+	.unbind = dcmi_graph_notify_unbind,
+	.complete = dcmi_graph_notify_complete,
+};
+
 static int dcmi_graph_parse(struct stm32_dcmi *dcmi, struct device_node *node)
 {
 	struct device_node *ep = NULL;
@@ -1548,9 +1548,7 @@ static int dcmi_graph_init(struct stm32_dcmi *dcmi)
 
 	dcmi->notifier.subdevs = subdevs;
 	dcmi->notifier.num_subdevs = 1;
-	dcmi->notifier.bound = dcmi_graph_notify_bound;
-	dcmi->notifier.unbind = dcmi_graph_notify_unbind;
-	dcmi->notifier.complete = dcmi_graph_notify_complete;
+	dcmi->notifier.ops = &dcmi_graph_notify_ops;
 
 	ret = v4l2_async_notifier_register(&dcmi->v4l2_dev, &dcmi->notifier);
 	if (ret < 0) {

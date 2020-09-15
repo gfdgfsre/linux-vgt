@@ -1,16 +1,20 @@
 Renesas MSIOF spi controller
 
 Required properties:
-- compatible           : "renesas,msiof-r8a7790" (R-Car H2)
+- compatible           : "renesas,msiof-r8a7743" (RZ/G1M)
+			 "renesas,msiof-r8a7745" (RZ/G1E)
+			 "renesas,msiof-r8a7790" (R-Car H2)
 			 "renesas,msiof-r8a7791" (R-Car M2-W)
 			 "renesas,msiof-r8a7792" (R-Car V2H)
 			 "renesas,msiof-r8a7793" (R-Car M2-N)
 			 "renesas,msiof-r8a7794" (R-Car E2)
 			 "renesas,msiof-r8a7795" (R-Car H3)
 			 "renesas,msiof-r8a7796" (R-Car M3-W)
+			 "renesas,msiof-r8a77965" (R-Car M3-N)
+			 "renesas,msiof-r8a77990" (R-Car E3)
 			 "renesas,msiof-sh73a0" (SH-Mobile AG5)
 			 "renesas,sh-mobile-msiof" (generic SH-Mobile compatibile device)
-			 "renesas,rcar-gen2-msiof" (generic R-Car Gen2 compatible device)
+			 "renesas,rcar-gen2-msiof" (generic R-Car Gen2 and RZ/G1 compatible device)
 			 "renesas,rcar-gen3-msiof" (generic R-Car Gen3 compatible device)
 			 "renesas,sh-msiof"      (deprecated)
 
@@ -33,8 +37,14 @@ Required properties:
 - #size-cells          : Must be <0>
 
 Optional properties:
-- clocks               : Must contain a reference to the functional clock.
-- num-cs               : Total number of chip-selects (default is 1)
+- clocks               : Specify a clock handling and a module clock.
+			 If HW supports the change of module clock, specify the module clock.
+			 Otherwise, not specify the module clock.
+- num-cs               : Total number of chip selects (default is 1).
+			 Up to 3 native chip selects are supported:
+			   0: MSIOF_SYNC
+			   1: MSIOF_SS1
+			   2: MSIOF_SS2
 - dmas                 : Must contain a list of two references to DMA
 			 specifiers, one for transmission, and one for
 			 reception.

@@ -55,7 +55,7 @@
 #define PRIo64 "o"
 
 /* #define apic_debug(fmt,arg...) printk(KERN_WARNING fmt,##arg) */
-#define apic_debug(fmt, arg...) do {} while (0)
+#define apic_debug(fmt, arg...)
 
 /* 14 is the version for Xeon and Pentium 8.4.8*/
 #define APIC_VERSION			(0x14UL | ((KVM_APIC_LVT_NUM - 1) << 16))
@@ -133,7 +133,6 @@ static inline bool kvm_apic_map_get_logical_dest(struct kvm_apic_map *map,
 		if (offset <= max_apic_id) {
 			u8 cluster_size = min(max_apic_id - offset + 1, 16U);
 
-			offset = array_index_nospec(offset, map->max_apic_id + 1);
 			*cluster = &map->phys_map[offset];
 			*mask = dest_id & (0xffff >> (16 - cluster_size));
 		} else {
@@ -209,9 +208,6 @@ static void recalculate_apic_map(struct kvm *kvm)
 		if (!apic_x2apic_mode(apic) && !new->phys_map[xapic_id])
 			new->phys_map[xapic_id] = apic;
 
-		if (!kvm_apic_sw_enabled(apic))
-			continue;
-
 		ldr = kvm_lapic_get_reg(apic, APIC_LDR);
 
 		if (apic_x2apic_mode(apic)) {
@@ -255,8 +251,6 @@ static inline void apic_set_spiv(struct kvm_lapic *apic, u32 val)
 			recalculate_apic_map(apic->vcpu->kvm);
 		} else
 			static_key_slow_inc(&apic_sw_disabled.key);
-
-		recalculate_apic_map(apic->vcpu->kvm);
 	}
 }
 
@@ -835,8 +829,7 @@ static inline bool kvm_apic_map_get_dest_lapic(struct kvm *kvm,
 		if (irq->dest_id > map->max_apic_id) {
 			*bitmap = 0;
 		} else {
-			u32 dest_id = array_index_nospec(irq->dest_id, map->max_apic_id + 1);
-			*dst = &map->phys_map[dest_id];
+			*dst = &map->phys_map[irq->dest_id];
 			*bitmap = 1;
 		}
 		return true;
@@ -1289,8 +1282,9 @@ EXPORT_SYMBOL_GPL(kvm_lapic_reg_read);
 
 static int apic_mmio_in_range(struct kvm_lapic *apic, gpa_t addr)
 {
-	return addr >= apic->base_address &&
-		addr < apic->base_address + LAPIC_MMIO_LENGTH;
+	return kvm_apic_hw_enabled(apic) &&
+	    addr >= apic->base_address &&
+	    addr < apic->base_address + LAPIC_MMIO_LENGTH;
 }
 
 static int apic_mmio_read(struct kvm_vcpu *vcpu, struct kvm_io_device *this,
@@ -1301,15 +1295,6 @@ static int apic_mmio_read(struct kvm_vcpu *vcpu, struct kvm_io_device *this,
 
 	if (!apic_mmio_in_range(apic, address))
 		return -EOPNOTSUPP;
-
-	if (!kvm_apic_hw_enabled(apic) || apic_x2apic_mode(apic)) {
-		if (!kvm_check_has_quirk(vcpu->kvm,
-					 KVM_X86_QUIRK_LAPIC_MMIO_HOLE))
-			return -EOPNOTSUPP;
-
-		memset(data, 0xff, len);
-		return 0;
-	}
 
 	kvm_lapic_reg_read(apic, offset, len, data);
 
@@ -1821,14 +1806,6 @@ static int apic_mmio_write(struct kvm_vcpu *vcpu, struct kvm_io_device *this,
 	if (!apic_mmio_in_range(apic, address))
 		return -EOPNOTSUPP;
 
-	if (!kvm_apic_hw_enabled(apic) || apic_x2apic_mode(apic)) {
-		if (!kvm_check_has_quirk(vcpu->kvm,
-					 KVM_X86_QUIRK_LAPIC_MMIO_HOLE))
-			return -EOPNOTSUPP;
-
-		return 0;
-	}
-
 	/*
 	 * APIC register must be aligned on 128-bits boundary.
 	 * 32/64/128 bits registers must be accessed thru 32 bits.
@@ -2166,7 +2143,7 @@ int kvm_apic_has_interrupt(struct kvm_vcpu *vcpu)
 	struct kvm_lapic *apic = vcpu->arch.apic;
 	u32 ppr;
 
-	if (!kvm_apic_hw_enabled(apic))
+	if (!apic_enabled(apic))
 		return -1;
 
 	__apic_update_ppr(apic, &ppr);

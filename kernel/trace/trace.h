@@ -273,6 +273,8 @@ struct trace_array {
 	/* function tracing enabled */
 	int			function_enabled;
 #endif
+	int			time_stamp_abs_ref;
+	struct list_head	hist_vars;
 };
 
 enum {
@@ -285,6 +287,11 @@ extern struct mutex trace_types_lock;
 
 extern int trace_array_get(struct trace_array *tr);
 extern void trace_array_put(struct trace_array *tr);
+
+extern int tracing_set_time_stamp_abs(struct trace_array *tr, bool abs);
+extern int tracing_set_clock(struct trace_array *tr, const char *clockstr);
+
+extern bool trace_clock_in_ns(struct trace_array *tr);
 
 /*
  * The global tracer (top) should be the first trace array added,
@@ -504,43 +511,11 @@ enum {
  * can only be modified by current, we can reuse trace_recursion.
  */
 	TRACE_IRQ_BIT,
-
-	/* Set if the function is in the set_graph_function file */
-	TRACE_GRAPH_BIT,
-
-	/*
-	 * In the very unlikely case that an interrupt came in
-	 * at a start of graph tracing, and we want to trace
-	 * the function in that interrupt, the depth can be greater
-	 * than zero, because of the preempted start of a previous
-	 * trace. In an even more unlikely case, depth could be 2
-	 * if a softirq interrupted the start of graph tracing,
-	 * followed by an interrupt preempting a start of graph
-	 * tracing in the softirq, and depth can even be 3
-	 * if an NMI came in at the start of an interrupt function
-	 * that preempted a softirq start of a function that
-	 * preempted normal context!!!! Luckily, it can't be
-	 * greater than 3, so the next two bits are a mask
-	 * of what the depth is when we set TRACE_GRAPH_BIT
-	 */
-
-	TRACE_GRAPH_DEPTH_START_BIT,
-	TRACE_GRAPH_DEPTH_END_BIT,
 };
 
 #define trace_recursion_set(bit)	do { (current)->trace_recursion |= (1<<(bit)); } while (0)
 #define trace_recursion_clear(bit)	do { (current)->trace_recursion &= ~(1<<(bit)); } while (0)
 #define trace_recursion_test(bit)	((current)->trace_recursion & (1<<(bit)))
-
-#define trace_recursion_depth() \
-	(((current)->trace_recursion >> TRACE_GRAPH_DEPTH_START_BIT) & 3)
-#define trace_recursion_set_depth(depth) \
-	do {								\
-		current->trace_recursion &=				\
-			~(3 << TRACE_GRAPH_DEPTH_START_BIT);		\
-		current->trace_recursion |=				\
-			((depth) & 3) << TRACE_GRAPH_DEPTH_START_BIT;	\
-	} while (0)
 
 #define TRACE_CONTEXT_BITS	4
 
@@ -871,9 +846,8 @@ extern void __trace_graph_return(struct trace_array *tr,
 extern struct ftrace_hash *ftrace_graph_hash;
 extern struct ftrace_hash *ftrace_graph_notrace_hash;
 
-static inline int ftrace_graph_addr(struct ftrace_graph_ent *trace)
+static inline int ftrace_graph_addr(unsigned long addr)
 {
-	unsigned long addr = trace->func;
 	int ret = 0;
 
 	preempt_disable_notrace();
@@ -884,14 +858,6 @@ static inline int ftrace_graph_addr(struct ftrace_graph_ent *trace)
 	}
 
 	if (ftrace_lookup_ip(ftrace_graph_hash, addr)) {
-
-		/*
-		 * This needs to be cleared on the return functions
-		 * when the depth is zero.
-		 */
-		trace_recursion_set(TRACE_GRAPH_BIT);
-		trace_recursion_set_depth(trace->depth);
-
 		/*
 		 * If no irqs are to be traced, but a set_graph_function
 		 * is set, and called by an interrupt handler, we still
@@ -909,13 +875,6 @@ out:
 	return ret;
 }
 
-static inline void ftrace_graph_addr_finish(struct ftrace_graph_ret *trace)
-{
-	if (trace_recursion_test(TRACE_GRAPH_BIT) &&
-	    trace->depth == trace_recursion_depth())
-		trace_recursion_clear(TRACE_GRAPH_BIT);
-}
-
 static inline int ftrace_graph_notrace_addr(unsigned long addr)
 {
 	int ret = 0;
@@ -929,7 +888,7 @@ static inline int ftrace_graph_notrace_addr(unsigned long addr)
 	return ret;
 }
 #else
-static inline int ftrace_graph_addr(struct ftrace_graph_ent *trace)
+static inline int ftrace_graph_addr(unsigned long addr)
 {
 	return 1;
 }
@@ -938,8 +897,6 @@ static inline int ftrace_graph_notrace_addr(unsigned long addr)
 {
 	return 0;
 }
-static inline void ftrace_graph_addr_finish(struct ftrace_graph_ret *trace)
-{ }
 #endif /* CONFIG_DYNAMIC_FTRACE */
 
 extern unsigned int fgraph_max_depth;
@@ -947,8 +904,7 @@ extern unsigned int fgraph_max_depth;
 static inline bool ftrace_graph_ignore_func(struct ftrace_graph_ent *trace)
 {
 	/* trace it when it is-nested-in or is a function enabled. */
-	return !(trace_recursion_test(TRACE_GRAPH_BIT) ||
-		 ftrace_graph_addr(trace)) ||
+	return !(trace->depth || ftrace_graph_addr(trace->func)) ||
 		(trace->depth < 0) ||
 		(fgraph_max_depth && trace->depth >= fgraph_max_depth);
 }
@@ -1344,7 +1300,7 @@ __event_trigger_test_discard(struct trace_event_file *file,
 	unsigned long eflags = file->flags;
 
 	if (eflags & EVENT_FILE_FL_TRIGGER_COND)
-		*tt = event_triggers_call(file, entry);
+		*tt = event_triggers_call(file, entry, event);
 
 	if (test_bit(EVENT_FILE_FL_SOFT_DISABLED_BIT, &file->flags) ||
 	    (unlikely(file->flags & EVENT_FILE_FL_FILTERED) &&
@@ -1381,7 +1337,7 @@ event_trigger_unlock_commit(struct trace_event_file *file,
 		trace_buffer_unlock_commit(file->tr, buffer, event, irq_flags, pc);
 
 	if (tt)
-		event_triggers_post_call(file, tt, entry);
+		event_triggers_post_call(file, tt, entry, event);
 }
 
 /**
@@ -1414,7 +1370,7 @@ event_trigger_unlock_commit_regs(struct trace_event_file *file,
 						irq_flags, pc, regs);
 
 	if (tt)
-		event_triggers_post_call(file, tt, entry);
+		event_triggers_post_call(file, tt, entry, event);
 }
 
 #define FILTER_PRED_INVALID	((unsigned short)-1)
@@ -1505,6 +1461,9 @@ extern void trace_event_enable_tgid_record(bool enable);
 extern int event_trace_add_tracer(struct dentry *parent, struct trace_array *tr);
 extern int event_trace_del_tracer(struct trace_array *tr);
 
+extern struct trace_event_file *__find_event_file(struct trace_array *tr,
+						  const char *system,
+						  const char *event);
 extern struct trace_event_file *find_event_file(struct trace_array *tr,
 						const char *system,
 						const char *event);
@@ -1596,6 +1555,8 @@ extern void pause_named_trigger(struct event_trigger_data *data);
 extern void unpause_named_trigger(struct event_trigger_data *data);
 extern void set_named_trigger_data(struct event_trigger_data *data,
 				   struct event_trigger_data *named_data);
+extern struct event_trigger_data *
+get_named_trigger_data(struct event_trigger_data *data);
 extern int register_event_command(struct event_command *cmd);
 extern int unregister_event_command(struct event_command *cmd);
 extern int register_trigger_hist_enable_disable_cmds(void);
@@ -1639,7 +1600,8 @@ extern int register_trigger_hist_enable_disable_cmds(void);
  */
 struct event_trigger_ops {
 	void			(*func)(struct event_trigger_data *data,
-					void *rec);
+					void *rec,
+					struct ring_buffer_event *rbe);
 	int			(*init)(struct event_trigger_ops *ops,
 					struct event_trigger_data *data);
 	void			(*free)(struct event_trigger_ops *ops,
@@ -1806,6 +1768,13 @@ void trace_printk_start_comm(void);
 int trace_keep_overwrite(struct tracer *tracer, u32 mask, int set);
 int set_tracer_flag(struct trace_array *tr, unsigned int mask, int enabled);
 
+#define MAX_EVENT_NAME_LEN	64
+
+extern int trace_run_command(const char *buf, int (*createfn)(int, char**));
+extern ssize_t trace_parse_run_command(struct file *file,
+		const char __user *buffer, size_t count, loff_t *ppos,
+		int (*createfn)(int, char**));
+
 /*
  * Normal trace_printk() and friends allocates special buffers
  * to do the manipulation, as well as saves the print formats
@@ -1870,23 +1839,5 @@ static inline int tracing_alloc_snapshot_instance(struct trace_array *tr)
 #endif
 
 extern struct trace_iterator *tracepoint_print_iter;
-
-/*
- * Reset the state of the trace_iterator so that it can read consumed data.
- * Normally, the trace_iterator is used for reading the data when it is not
- * consumed, and must retain state.
- */
-static __always_inline void trace_iterator_reset(struct trace_iterator *iter)
-{
-	const size_t offset = offsetof(struct trace_iterator, seq);
-
-	/*
-	 * Keep gcc from complaining about overwriting more than just one
-	 * member in the structure.
-	 */
-	memset((char *)iter + offset, 0, sizeof(struct trace_iterator) - offset);
-
-	iter->pos = -1;
-}
 
 #endif /* _LINUX_KERNEL_TRACE_H */

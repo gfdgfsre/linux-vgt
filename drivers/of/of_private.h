@@ -45,8 +45,12 @@ static inline struct device_node *kobj_to_device_node(struct kobject *kobj)
 extern int of_property_notify(int action, struct device_node *np,
 			      struct property *prop, struct property *old_prop);
 extern void of_node_release(struct kobject *kobj);
-extern int __of_changeset_apply(struct of_changeset *ocs);
-extern int __of_changeset_revert(struct of_changeset *ocs);
+extern int __of_changeset_apply_entries(struct of_changeset *ocs,
+					int *ret_revert);
+extern int __of_changeset_apply_notify(struct of_changeset *ocs);
+extern int __of_changeset_revert_entries(struct of_changeset *ocs,
+					 int *ret_apply);
+extern int __of_changeset_revert_notify(struct of_changeset *ocs);
 #else /* CONFIG_OF_DYNAMIC */
 static inline int of_property_notify(int action, struct device_node *np,
 				     struct property *prop, struct property *old_prop)
@@ -54,6 +58,18 @@ static inline int of_property_notify(int action, struct device_node *np,
 	return 0;
 }
 #endif /* CONFIG_OF_DYNAMIC */
+
+#if defined(CONFIG_OF_RESOLVE)
+int of_resolve_phandles(struct device_node *tree);
+#endif
+
+#if defined(CONFIG_OF_OVERLAY)
+void of_overlay_mutex_lock(void);
+void of_overlay_mutex_unlock(void);
+#else
+static inline void of_overlay_mutex_lock(void) {};
+static inline void of_overlay_mutex_unlock(void) {};
+#endif
 
 #if defined(CONFIG_OF_UNITTEST) && defined(CONFIG_OF_OVERLAY)
 extern void __init unittest_unflatten_overlay_base(void);
@@ -77,6 +93,8 @@ extern void *__unflatten_device_tree(const void *blob,
 struct property *__of_prop_dup(const struct property *prop, gfp_t allocflags);
 __printf(2, 3) struct device_node *__of_node_dup(const struct device_node *np, const char *fmt, ...);
 
+struct device_node *__of_find_node_by_path(struct device_node *parent,
+						const char *path);
 struct device_node *__of_find_node_by_full_path(struct device_node *node,
 						const char *path);
 

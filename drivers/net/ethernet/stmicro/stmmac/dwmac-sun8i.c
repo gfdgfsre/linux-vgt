@@ -477,8 +477,7 @@ static int sun8i_dwmac_init(struct platform_device *pdev, void *priv)
 	return 0;
 }
 
-static void sun8i_dwmac_core_init(struct mac_device_info *hw,
-				  struct net_device *dev)
+static void sun8i_dwmac_core_init(struct mac_device_info *hw, int mtu)
 {
 	void __iomem *ioaddr = hw->pcsr;
 	u32 v;
@@ -857,8 +856,6 @@ static struct mac_device_info *sun8i_dwmac_setup(void *ppriv)
 	mac->pcsr = priv->ioaddr;
 	mac->mac = &sun8i_dwmac_ops;
 	mac->dma = &sun8i_dwmac_dma_ops;
-
-	priv->dev->priv_flags |= IFF_UNICAST_FLT;
 
 	/* The loopback bit seems to be re-set when link change
 	 * Simply mask it each time

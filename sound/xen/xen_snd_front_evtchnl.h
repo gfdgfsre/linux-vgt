@@ -24,7 +24,7 @@ struct xen_snd_front_info;
 #define GRANT_INVALID_REF	0
 #endif
 
-/* timeout in ms to wait for backend to respond */
+/* Timeout in ms to wait for backend to respond. */
 #define VSND_WAIT_BACK_MS	3000
 
 enum xen_snd_front_evtchnl_state {
@@ -43,28 +43,31 @@ struct xen_snd_front_evtchnl {
 	int port;
 	int irq;
 	int index;
-	/* state of the event channel */
+	/* State of the event channel. */
 	enum xen_snd_front_evtchnl_state state;
 	enum xen_snd_front_evtchnl_type type;
-	/* either response id or incoming event id */
-	uint16_t evt_id;
-	/* next request id or next expected event id */
-	uint16_t evt_next_id;
+	/* Either response id or incoming event id. */
+	u16 evt_id;
+	/* Next request id or next expected event id. */
+	u16 evt_next_id;
+	/* Shared ring access lock. */
+	struct mutex ring_io_lock;
 	union {
 		struct {
 			struct xen_sndif_front_ring ring;
 			struct completion completion;
-			/* latest response status */
-			int resp_status;
-			/* serializer for backend IO: request/response */
+			/* Serializer for backend IO: request/response. */
 			struct mutex req_io_lock;
+
+			/* Latest response status. */
+			int resp_status;
 			union {
 				struct xensnd_query_hw_param hw_param;
 			} resp;
 		} req;
 		struct {
 			struct xensnd_event_page *page;
-			/* this is needed to handle XENSND_EVT_CUR_POS event */
+			/* This is needed to handle XENSND_EVT_CUR_POS event. */
 			struct snd_pcm_substream *substream;
 		} evt;
 	} u;
@@ -76,7 +79,7 @@ struct xen_snd_front_evtchnl_pair {
 };
 
 int xen_snd_front_evtchnl_create_all(struct xen_snd_front_info *front_info,
-		int num_streams);
+				     int num_streams);
 
 void xen_snd_front_evtchnl_free_all(struct xen_snd_front_info *front_info);
 
@@ -84,11 +87,9 @@ int xen_snd_front_evtchnl_publish_all(struct xen_snd_front_info *front_info);
 
 void xen_snd_front_evtchnl_flush(struct xen_snd_front_evtchnl *evtchnl);
 
-void xen_snd_front_evtchnl_pair_set_connected(
-		struct xen_snd_front_evtchnl_pair *evt_pair,
-		bool is_connected);
+void xen_snd_front_evtchnl_pair_set_connected(struct xen_snd_front_evtchnl_pair *evt_pair,
+					      bool is_connected);
 
-void xen_snd_front_evtchnl_pair_clear(
-		struct xen_snd_front_evtchnl_pair *evt_pair);
+void xen_snd_front_evtchnl_pair_clear(struct xen_snd_front_evtchnl_pair *evt_pair);
 
 #endif /* __XEN_SND_FRONT_EVTCHNL_H */

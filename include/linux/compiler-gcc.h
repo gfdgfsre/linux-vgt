@@ -108,7 +108,7 @@
 #define __weak		__attribute__((weak))
 #define __alias(symbol)	__attribute__((alias(#symbol)))
 
-#ifdef CONFIG_RETPOLINE
+#ifdef RETPOLINE
 #define __noretpoline __attribute__((indirect_branch("keep")))
 #endif
 
@@ -343,10 +343,6 @@
 #define __designated_init __attribute__((designated_init))
 #endif
 
-#if GCC_VERSION >= 90100
-#define __copy(symbol)                 __attribute__((__copy__(symbol)))
-#endif
-
 #endif	/* gcc version >= 40000 specific checks */
 
 #if !defined(__noclone)
@@ -362,7 +358,3 @@
  * code
  */
 #define uninitialized_var(x) x = x
-
-#if GCC_VERSION >= 50100
-#define COMPILER_HAS_GENERIC_BUILTIN_OVERFLOW 1
-#endif

@@ -33,7 +33,6 @@
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
 #include <linux/regmap.h>
-#include <linux/if_vlan.h>
 #include <uapi/linux/ppp_defs.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
@@ -4780,7 +4779,7 @@ static inline void mvpp2_xlg_max_rx_size_set(struct mvpp2_port *port)
 /* Set defaults to the MVPP2 port */
 static void mvpp2_defaults_set(struct mvpp2_port *port)
 {
-	int tx_port_num, val, queue, lrxq;
+	int tx_port_num, val, queue, ptxq, lrxq;
 
 	if (port->priv->hw_version == MVPP21) {
 		/* Configure port to loopback if needed */
@@ -4802,9 +4801,11 @@ static void mvpp2_defaults_set(struct mvpp2_port *port)
 	mvpp2_write(port->priv, MVPP2_TXP_SCHED_CMD_1_REG, 0);
 
 	/* Close bandwidth for all queues */
-	for (queue = 0; queue < MVPP2_MAX_TXQ; queue++)
+	for (queue = 0; queue < MVPP2_MAX_TXQ; queue++) {
+		ptxq = mvpp2_txq_phys(port->id, queue);
 		mvpp2_write(port->priv,
-			    MVPP2_TXQ_SCHED_TOKEN_CNTR_REG(queue), 0);
+			    MVPP2_TXQ_SCHED_TOKEN_CNTR_REG(ptxq), 0);
+	}
 
 	/* Set refill period to 1 usec, refill tokens
 	 * and bucket size to maximum
@@ -5100,7 +5101,7 @@ static void mvpp2_txq_desc_put(struct mvpp2_tx_queue *txq)
 }
 
 /* Set Tx descriptors fields relevant for CSUM calculation */
-static u32 mvpp2_txq_desc_csum(int l3_offs, __be16 l3_proto,
+static u32 mvpp2_txq_desc_csum(int l3_offs, int l3_proto,
 			       int ip_hdr_len, int l4_proto)
 {
 	u32 command;
@@ -5643,7 +5644,7 @@ static void mvpp2_txq_deinit(struct mvpp2_port *port,
 	txq->descs_dma         = 0;
 
 	/* Set minimum bandwidth for disabled TXQs */
-	mvpp2_write(port->priv, MVPP2_TXQ_SCHED_TOKEN_CNTR_REG(txq->log_id), 0);
+	mvpp2_write(port->priv, MVPP2_TXQ_SCHED_TOKEN_CNTR_REG(txq->id), 0);
 
 	/* Set Tx descriptors queue starting address and size */
 	cpu = get_cpu();
@@ -6064,15 +6065,14 @@ static u32 mvpp2_skb_tx_csum(struct mvpp2_port *port, struct sk_buff *skb)
 	if (skb->ip_summed == CHECKSUM_PARTIAL) {
 		int ip_hdr_len = 0;
 		u8 l4_proto;
-		__be16 l3_proto = vlan_get_protocol(skb);
 
-		if (l3_proto == htons(ETH_P_IP)) {
+		if (skb->protocol == htons(ETH_P_IP)) {
 			struct iphdr *ip4h = ip_hdr(skb);
 
 			/* Calculate IPv4 checksum and L4 checksum */
 			ip_hdr_len = ip4h->ihl;
 			l4_proto = ip4h->protocol;
-		} else if (l3_proto == htons(ETH_P_IPV6)) {
+		} else if (skb->protocol == htons(ETH_P_IPV6)) {
 			struct ipv6hdr *ip6h = ipv6_hdr(skb);
 
 			/* Read l4_protocol from one of IPv6 extra headers */
@@ -6084,7 +6084,7 @@ static u32 mvpp2_skb_tx_csum(struct mvpp2_port *port, struct sk_buff *skb)
 		}
 
 		return mvpp2_txq_desc_csum(skb_network_offset(skb),
-					   l3_proto, ip_hdr_len, l4_proto);
+				skb->protocol, ip_hdr_len, l4_proto);
 	}
 
 	return MVPP2_TXD_L4_CSUM_NOT | MVPP2_TXD_IP_CSUM_DISABLE;
@@ -6532,12 +6532,10 @@ static int mvpp2_poll(struct napi_struct *napi, int budget)
 				   cause_rx_tx & ~MVPP2_CAUSE_MISC_SUM_MASK);
 	}
 
-	if (port->has_tx_irqs) {
-		cause_tx = cause_rx_tx & MVPP2_CAUSE_TXQ_OCCUP_DESC_ALL_MASK;
-		if (cause_tx) {
-			cause_tx >>= MVPP2_CAUSE_TXQ_OCCUP_DESC_ALL_OFFSET;
-			mvpp2_tx_done(port, cause_tx, qv->sw_thread_id);
-		}
+	cause_tx = cause_rx_tx & MVPP2_CAUSE_TXQ_OCCUP_DESC_ALL_MASK;
+	if (cause_tx) {
+		cause_tx >>= MVPP2_CAUSE_TXQ_OCCUP_DESC_ALL_OFFSET;
+		mvpp2_tx_done(port, cause_tx, qv->sw_thread_id);
 	}
 
 	/* Process RX packets */
@@ -6952,7 +6950,6 @@ log_error:
 static int mvpp2_change_mtu(struct net_device *dev, int mtu)
 {
 	struct mvpp2_port *port = netdev_priv(dev);
-	bool running = netif_running(dev);
 	int err;
 
 	if (!IS_ALIGNED(MVPP2_RX_PKT_SIZE(mtu), 8)) {
@@ -6961,24 +6958,40 @@ static int mvpp2_change_mtu(struct net_device *dev, int mtu)
 		mtu = ALIGN(MVPP2_RX_PKT_SIZE(mtu), 8);
 	}
 
-	if (running)
-		mvpp2_stop_dev(port);
+	if (!netif_running(dev)) {
+		err = mvpp2_bm_update_mtu(dev, mtu);
+		if (!err) {
+			port->pkt_size =  MVPP2_RX_PKT_SIZE(mtu);
+			return 0;
+		}
+
+		/* Reconfigure BM to the original MTU */
+		err = mvpp2_bm_update_mtu(dev, dev->mtu);
+		if (err)
+			goto log_error;
+	}
+
+	mvpp2_stop_dev(port);
 
 	err = mvpp2_bm_update_mtu(dev, mtu);
-	if (err) {
-		netdev_err(dev, "failed to change MTU\n");
-		/* Reconfigure BM to the original MTU */
-		mvpp2_bm_update_mtu(dev, dev->mtu);
-	} else {
+	if (!err) {
 		port->pkt_size =  MVPP2_RX_PKT_SIZE(mtu);
+		goto out_start;
 	}
 
-	if (running) {
-		mvpp2_start_dev(port);
-		mvpp2_egress_enable(port);
-		mvpp2_ingress_enable(port);
-	}
+	/* Reconfigure BM to the original MTU */
+	err = mvpp2_bm_update_mtu(dev, dev->mtu);
+	if (err)
+		goto log_error;
 
+out_start:
+	mvpp2_start_dev(port);
+	mvpp2_egress_enable(port);
+	mvpp2_ingress_enable(port);
+
+	return 0;
+log_error:
+	netdev_err(dev, "failed to change MTU\n");
 	return err;
 }
 

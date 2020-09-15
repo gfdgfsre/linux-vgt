@@ -1,13 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  *  Serial Port driver for Open Firmware platform devices
  *
  *    Copyright (C) 2006 Arnd Bergmann <arnd@arndb.de>, IBM Corp.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
- *
  */
 #include <linux/console.h>
 #include <linux/module.h>
@@ -104,10 +99,6 @@ static int of_platform_serial_setup(struct platform_device *ofdev,
 	/* Check for shifted address mapping */
 	if (of_property_read_u32(np, "reg-offset", &prop) == 0)
 		port->mapbase += prop;
-
-	/* Compatibility with the deprecated pxa driver and 8250_pxa drivers. */
-	if (of_device_is_compatible(np, "mrvl,mmp-uart"))
-		port->regshift = 2;
 
 	/* Check for registers offset within the devices address range */
 	if (of_property_read_u32(np, "reg-shift", &prop) == 0)

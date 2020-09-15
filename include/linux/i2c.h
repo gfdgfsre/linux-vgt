@@ -63,10 +63,68 @@ struct property_entry;
  * transmit an arbitrary number of messages without interruption.
  * @count must be be less than 64k since msg.len is u16.
  */
-extern int i2c_master_send(const struct i2c_client *client, const char *buf,
-			   int count);
-extern int i2c_master_recv(const struct i2c_client *client, char *buf,
-			   int count);
+extern int i2c_transfer_buffer_flags(const struct i2c_client *client,
+				     char *buf, int count, u16 flags);
+
+/**
+ * i2c_master_recv - issue a single I2C message in master receive mode
+ * @client: Handle to slave device
+ * @buf: Where to store data read from slave
+ * @count: How many bytes to read, must be less than 64k since msg.len is u16
+ *
+ * Returns negative errno, or else the number of bytes read.
+ */
+static inline int i2c_master_recv(const struct i2c_client *client,
+				  char *buf, int count)
+{
+	return i2c_transfer_buffer_flags(client, buf, count, I2C_M_RD);
+};
+
+/**
+ * i2c_master_recv_dmasafe - issue a single I2C message in master receive mode
+ *			     using a DMA safe buffer
+ * @client: Handle to slave device
+ * @buf: Where to store data read from slave, must be safe to use with DMA
+ * @count: How many bytes to read, must be less than 64k since msg.len is u16
+ *
+ * Returns negative errno, or else the number of bytes read.
+ */
+static inline int i2c_master_recv_dmasafe(const struct i2c_client *client,
+					  char *buf, int count)
+{
+	return i2c_transfer_buffer_flags(client, buf, count,
+					 I2C_M_RD | I2C_M_DMA_SAFE);
+};
+
+/**
+ * i2c_master_send - issue a single I2C message in master transmit mode
+ * @client: Handle to slave device
+ * @buf: Data that will be written to the slave
+ * @count: How many bytes to write, must be less than 64k since msg.len is u16
+ *
+ * Returns negative errno, or else the number of bytes written.
+ */
+static inline int i2c_master_send(const struct i2c_client *client,
+				  const char *buf, int count)
+{
+	return i2c_transfer_buffer_flags(client, (char *)buf, count, 0);
+};
+
+/**
+ * i2c_master_send_dmasafe - issue a single I2C message in master transmit mode
+ *			     using a DMA safe buffer
+ * @client: Handle to slave device
+ * @buf: Data that will be written to the slave, must be safe to use with DMA
+ * @count: How many bytes to write, must be less than 64k since msg.len is u16
+ *
+ * Returns negative errno, or else the number of bytes written.
+ */
+static inline int i2c_master_send_dmasafe(const struct i2c_client *client,
+					  const char *buf, int count)
+{
+	return i2c_transfer_buffer_flags(client, (char *)buf, count,
+					 I2C_M_DMA_SAFE);
+};
 
 /* Transfer num messages.
  */
@@ -485,32 +543,43 @@ struct i2c_timings {
  * @recover_bus: Recover routine. Either pass driver's recover_bus() routine, or
  *	i2c_generic_scl_recovery() or i2c_generic_gpio_recovery().
  * @get_scl: This gets current value of SCL line. Mandatory for generic SCL
- *      recovery. Used internally for generic GPIO recovery.
- * @set_scl: This sets/clears SCL line. Mandatory for generic SCL recovery. Used
- *      internally for generic GPIO recovery.
- * @get_sda: This gets current value of SDA line. Optional for generic SCL
- *      recovery. Used internally, if sda_gpio is a valid GPIO, for generic GPIO
- *      recovery.
+ *      recovery. Populated internally for generic GPIO recovery.
+ * @set_scl: This sets/clears the SCL line. Mandatory for generic SCL recovery.
+ *      Populated internally for generic GPIO recovery.
+ * @get_sda: This gets current value of SDA line. This or set_sda() is mandatory
+ *	for generic SCL recovery. Populated internally, if sda_gpio is a valid
+ *	GPIO, for generic GPIO recovery.
+ * @set_sda: This sets/clears the SDA line. This or get_sda() is mandatory for
+ *	generic SCL recovery. Populated internally, if sda_gpio is a valid GPIO,
+ *	for generic GPIO recovery.
+ * @get_bus_free: Returns the bus free state as seen from the IP core in case it
+ *	has a more complex internal logic than just reading SDA. Optional.
  * @prepare_recovery: This will be called before starting recovery. Platform may
  *	configure padmux here for SDA/SCL line or something else they want.
  * @unprepare_recovery: This will be called after completing recovery. Platform
  *	may configure padmux here for SDA/SCL line or something else they want.
  * @scl_gpio: gpio number of the SCL line. Only required for GPIO recovery.
  * @sda_gpio: gpio number of the SDA line. Only required for GPIO recovery.
+ * @scl_gpiod: gpiod of the SCL line. Only required for GPIO recovery.
+ * @sda_gpiod: gpiod of the SDA line. Only required for GPIO recovery.
  */
 struct i2c_bus_recovery_info {
-	int (*recover_bus)(struct i2c_adapter *);
+	int (*recover_bus)(struct i2c_adapter *adap);
 
-	int (*get_scl)(struct i2c_adapter *);
-	void (*set_scl)(struct i2c_adapter *, int val);
-	int (*get_sda)(struct i2c_adapter *);
+	int (*get_scl)(struct i2c_adapter *adap);
+	void (*set_scl)(struct i2c_adapter *adap, int val);
+	int (*get_sda)(struct i2c_adapter *adap);
+	void (*set_sda)(struct i2c_adapter *adap, int val);
+	int (*get_bus_free)(struct i2c_adapter *adap);
 
-	void (*prepare_recovery)(struct i2c_adapter *);
-	void (*unprepare_recovery)(struct i2c_adapter *);
+	void (*prepare_recovery)(struct i2c_adapter *adap);
+	void (*unprepare_recovery)(struct i2c_adapter *adap);
 
 	/* gpio recovery */
 	int scl_gpio;
 	int sda_gpio;
+	struct gpio_desc *scl_gpiod;
+	struct gpio_desc *sda_gpiod;
 };
 
 int i2c_recover_bus(struct i2c_adapter *adap);
@@ -766,6 +835,9 @@ static inline u8 i2c_8bit_addr_from_msg(const struct i2c_msg *msg)
 {
 	return (msg->addr << 1) | (msg->flags & I2C_M_RD ? 1 : 0);
 }
+
+u8 *i2c_get_dma_safe_msg_buf(struct i2c_msg *msg, unsigned int threshold);
+void i2c_put_dma_safe_msg_buf(u8 *buf, struct i2c_msg *msg, bool xferred);
 
 int i2c_handle_smbus_host_notify(struct i2c_adapter *adap, unsigned short addr);
 /**

@@ -26,6 +26,7 @@
 #include <linux/of_fdt.h>
 #include <linux/of_platform.h>
 #include <asm/mach/arch.h>
+#include <asm/secure_cntvoff.h>
 #include "common.h"
 #include "rcar-gen2.h"
 
@@ -70,28 +71,13 @@ void __init rcar_gen2_timer_init(void)
 	void __iomem *base;
 	u32 freq;
 
+	secure_cntvoff_init();
+
 	if (of_machine_is_compatible("renesas,r8a7745") ||
+	    of_machine_is_compatible("renesas,r8a77470") ||
 	    of_machine_is_compatible("renesas,r8a7792") ||
 	    of_machine_is_compatible("renesas,r8a7794")) {
 		freq = 260000000 / 8;	/* ZS / 8 */
-		/* CNTVOFF has to be initialized either from non-secure
-		 * Hypervisor mode or secure Monitor mode with SCR.NS==1.
-		 * If TrustZone is enabled then it should be handled by the
-		 * secure code.
-		 */
-		asm volatile(
-		"	cps	0x16\n"
-		"	mrc	p15, 0, r1, c1, c1, 0\n"
-		"	orr	r0, r1, #1\n"
-		"	mcr	p15, 0, r0, c1, c1, 0\n"
-		"	isb\n"
-		"	mov	r0, #0\n"
-		"	mcrr	p15, 4, r0, r0, c14\n"
-		"	isb\n"
-		"	mcr	p15, 0, r1, c1, c1, 0\n"
-		"	isb\n"
-		"	cps	0x13\n"
-			: : : "r0", "r1");
 	} else {
 		/* At Linux boot time the r8a7790 arch timer comes up
 		 * with the counter disabled. Moreover, it may also report
@@ -221,6 +207,7 @@ MACHINE_END
 static const char * const rz_g1_boards_compat_dt[] __initconst = {
 	"renesas,r8a7743",
 	"renesas,r8a7745",
+	"renesas,r8a77470",
 	NULL,
 };
 

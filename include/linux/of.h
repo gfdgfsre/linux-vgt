@@ -229,8 +229,8 @@ extern struct device_node *of_find_all_nodes(struct device_node *prev);
 static inline u64 of_read_number(const __be32 *cell, int size)
 {
 	u64 r = 0;
-	for (; size--; cell++)
-		r = (r << 32) | be32_to_cpu(*cell);
+	while (size--)
+		r = (r << 32) | be32_to_cpu(*(cell++));
 	return r;
 }
 
@@ -288,8 +288,6 @@ extern struct device_node *of_get_next_child(const struct device_node *node,
 extern struct device_node *of_get_next_available_child(
 	const struct device_node *node, struct device_node *prev);
 
-extern struct device_node *of_get_compatible_child(const struct device_node *parent,
-					const char *compatible);
 extern struct device_node *of_get_child_by_name(const struct device_node *node,
 					const char *name);
 
@@ -625,12 +623,6 @@ static inline struct device_node *of_find_node_with_property(
 static inline bool of_have_populated_dt(void)
 {
 	return false;
-}
-
-static inline struct device_node *of_get_compatible_child(const struct device_node *parent,
-					const char *compatible)
-{
-	return NULL;
 }
 
 static inline struct device_node *of_get_child_by_name(
@@ -1291,9 +1283,6 @@ static inline int of_reconfig_get_state_change(unsigned long action,
 }
 #endif /* CONFIG_OF_DYNAMIC */
 
-/* CONFIG_OF_RESOLVE api */
-extern int of_resolve_phandles(struct device_node *tree);
-
 /**
  * of_device_is_system_power_controller - Tells if system-power-controller is found for device_node
  * @np: Pointer to the given device_node
@@ -1310,7 +1299,7 @@ static inline bool of_device_is_system_power_controller(const struct device_node
  */
 
 enum of_overlay_notify_action {
-	OF_OVERLAY_PRE_APPLY,
+	OF_OVERLAY_PRE_APPLY = 0,
 	OF_OVERLAY_POST_APPLY,
 	OF_OVERLAY_PRE_REMOVE,
 	OF_OVERLAY_POST_REMOVE,
@@ -1323,27 +1312,27 @@ struct of_overlay_notify_data {
 
 #ifdef CONFIG_OF_OVERLAY
 
-/* ID based overlays; the API for external users */
-int of_overlay_create(struct device_node *tree);
-int of_overlay_destroy(int id);
-int of_overlay_destroy_all(void);
+int of_overlay_fdt_apply(const void *overlay_fdt, u32 overlay_fdt_size,
+			 int *ovcs_id);
+int of_overlay_remove(int *ovcs_id);
+int of_overlay_remove_all(void);
 
 int of_overlay_notifier_register(struct notifier_block *nb);
 int of_overlay_notifier_unregister(struct notifier_block *nb);
 
 #else
 
-static inline int of_overlay_create(struct device_node *tree)
+static inline int of_overlay_fdt_apply(void *overlay_fdt, int *ovcs_id)
 {
 	return -ENOTSUPP;
 }
 
-static inline int of_overlay_destroy(int id)
+static inline int of_overlay_remove(int *ovcs_id)
 {
 	return -ENOTSUPP;
 }
 
-static inline int of_overlay_destroy_all(void)
+static inline int of_overlay_remove_all(void)
 {
 	return -ENOTSUPP;
 }

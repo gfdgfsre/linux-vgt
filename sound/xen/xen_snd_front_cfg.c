@@ -15,7 +15,7 @@
 #include "xen_snd_front.h"
 #include "xen_snd_front_cfg.h"
 
-/* maximum number of supported streams */
+/* Maximum number of supported streams. */
 #define VSND_MAX_STREAM		8
 
 struct cfg_hw_sample_rate {
@@ -148,7 +148,7 @@ static const struct cfg_hw_sample_format CFG_HW_SUPPORTED_FORMATS[] = {
 };
 
 static void cfg_hw_rates(char *list, unsigned int len,
-		const char *path, struct snd_pcm_hardware *pcm_hw)
+			 const char *path, struct snd_pcm_hardware *pcm_hw)
 {
 	char *cur_rate;
 	unsigned int cur_mask;
@@ -164,8 +164,8 @@ static void cfg_hw_rates(char *list, unsigned int len,
 	while ((cur_rate = strsep(&list, XENSND_LIST_SEPARATOR))) {
 		for (i = 0; i < ARRAY_SIZE(CFG_HW_SUPPORTED_RATES); i++)
 			if (!strncasecmp(cur_rate,
-					CFG_HW_SUPPORTED_RATES[i].name,
-					XENSND_SAMPLE_RATE_MAX_LEN)) {
+					 CFG_HW_SUPPORTED_RATES[i].name,
+					 XENSND_SAMPLE_RATE_MAX_LEN)) {
 				cur_mask = CFG_HW_SUPPORTED_RATES[i].mask;
 				cur_value = CFG_HW_SUPPORTED_RATES[i].value;
 				rates |= cur_mask;
@@ -184,7 +184,7 @@ static void cfg_hw_rates(char *list, unsigned int len,
 }
 
 static void cfg_formats(char *list, unsigned int len,
-		const char *path, struct snd_pcm_hardware *pcm_hw)
+			const char *path, struct snd_pcm_hardware *pcm_hw)
 {
 	u64 formats;
 	char *cur_format;
@@ -194,8 +194,8 @@ static void cfg_formats(char *list, unsigned int len,
 	while ((cur_format = strsep(&list, XENSND_LIST_SEPARATOR))) {
 		for (i = 0; i < ARRAY_SIZE(CFG_HW_SUPPORTED_FORMATS); i++)
 			if (!strncasecmp(cur_format,
-					CFG_HW_SUPPORTED_FORMATS[i].name,
-					XENSND_SAMPLE_FORMAT_MAX_LEN))
+					 CFG_HW_SUPPORTED_FORMATS[i].name,
+					 XENSND_SAMPLE_FORMAT_MAX_LEN))
 				formats |= CFG_HW_SUPPORTED_FORMATS[i].mask;
 	}
 
@@ -237,20 +237,19 @@ static const struct snd_pcm_hardware SND_DRV_PCM_HW_DEFAULT = {
 };
 
 static void cfg_read_pcm_hw(const char *path,
-		struct snd_pcm_hardware *parent_pcm_hw,
-		struct snd_pcm_hardware *pcm_hw)
+			    struct snd_pcm_hardware *parent_pcm_hw,
+			    struct snd_pcm_hardware *pcm_hw)
 {
 	char *list;
 	int val;
 	size_t buf_sz;
 	unsigned int len;
 
-	/* inherit parent's PCM HW and read overrides from XenStore */
+	/* Inherit parent's PCM HW and read overrides from XenStore. */
 	if (parent_pcm_hw)
 		*pcm_hw = *parent_pcm_hw;
 	else
 		*pcm_hw = SND_DRV_PCM_HW_DEFAULT;
-
 
 	val = xenbus_read_unsigned(path, XENSND_FIELD_CHANNELS_MIN, 0);
 	if (val)
@@ -276,7 +275,7 @@ static void cfg_read_pcm_hw(const char *path,
 	if (buf_sz)
 		pcm_hw->buffer_bytes_max = buf_sz;
 
-	/* update configuration to match new values */
+	/* Update configuration to match new values. */
 	if (pcm_hw->channels_min > pcm_hw->channels_max)
 		pcm_hw->channels_min = pcm_hw->channels_max;
 
@@ -290,7 +289,7 @@ static void cfg_read_pcm_hw(const char *path,
 }
 
 static int cfg_get_stream_type(const char *path, int index,
-		int *num_pb, int *num_cap)
+			       int *num_pb, int *num_cap)
 {
 	char *str = NULL;
 	char *stream_path;
@@ -306,17 +305,18 @@ static int cfg_get_stream_type(const char *path, int index,
 
 	str = xenbus_read(XBT_NIL, stream_path, XENSND_FIELD_TYPE, NULL);
 	if (IS_ERR(str)) {
-		ret = -EINVAL;
+		ret = PTR_ERR(str);
+		str = NULL;
 		goto fail;
 	}
 
 	if (!strncasecmp(str, XENSND_STREAM_TYPE_PLAYBACK,
-			sizeof(XENSND_STREAM_TYPE_PLAYBACK)))
+			 sizeof(XENSND_STREAM_TYPE_PLAYBACK))) {
 		(*num_pb)++;
-	else if (!strncasecmp(str, XENSND_STREAM_TYPE_CAPTURE,
-			sizeof(XENSND_STREAM_TYPE_CAPTURE)))
+	} else if (!strncasecmp(str, XENSND_STREAM_TYPE_CAPTURE,
+			      sizeof(XENSND_STREAM_TYPE_CAPTURE))) {
 		(*num_cap)++;
-	else {
+	} else {
 		ret = -EINVAL;
 		goto fail;
 	}
@@ -329,9 +329,9 @@ fail:
 }
 
 static int cfg_stream(struct xen_snd_front_info *front_info,
-		struct xen_front_cfg_pcm_instance *pcm_instance,
-		const char *path, int index, int *cur_pb, int *cur_cap,
-	int *stream_cnt)
+		      struct xen_front_cfg_pcm_instance *pcm_instance,
+		      const char *path, int index, int *cur_pb, int *cur_cap,
+		      int *stream_cnt)
 {
 	char *str = NULL;
 	char *stream_path;
@@ -339,7 +339,7 @@ static int cfg_stream(struct xen_snd_front_info *front_info,
 	int ret;
 
 	stream_path = devm_kasprintf(&front_info->xb_dev->dev,
-			GFP_KERNEL, "%s/%d", path, index);
+				     GFP_KERNEL, "%s/%d", path, index);
 	if (!stream_path) {
 		ret = -ENOMEM;
 		goto fail;
@@ -347,28 +347,29 @@ static int cfg_stream(struct xen_snd_front_info *front_info,
 
 	str = xenbus_read(XBT_NIL, stream_path, XENSND_FIELD_TYPE, NULL);
 	if (IS_ERR(str)) {
-		ret = -EINVAL;
+		ret = PTR_ERR(str);
+		str = NULL;
 		goto fail;
 	}
 
 	if (!strncasecmp(str, XENSND_STREAM_TYPE_PLAYBACK,
-			sizeof(XENSND_STREAM_TYPE_PLAYBACK)))
+			 sizeof(XENSND_STREAM_TYPE_PLAYBACK))) {
 		stream = &pcm_instance->streams_pb[(*cur_pb)++];
-	else if (!strncasecmp(str, XENSND_STREAM_TYPE_CAPTURE,
-			sizeof(XENSND_STREAM_TYPE_CAPTURE)))
+	} else if (!strncasecmp(str, XENSND_STREAM_TYPE_CAPTURE,
+			      sizeof(XENSND_STREAM_TYPE_CAPTURE))) {
 		stream = &pcm_instance->streams_cap[(*cur_cap)++];
-	else {
+	} else {
 		ret = -EINVAL;
 		goto fail;
 	}
 
-	/* get next stream index */
+	/* Get next stream index. */
 	stream->index = (*stream_cnt)++;
 	stream->xenstore_path = stream_path;
 	/*
-	 * check in Xen store if PCM HW configuration exists for this stream
+	 * Check XenStore if PCM HW configuration exists for this stream
 	 * and update if so, e.g. we inherit all values from device's PCM HW,
-	 * but can still override some of the values for the stream
+	 * but can still override some of the values for the stream.
 	 */
 	cfg_read_pcm_hw(stream->xenstore_path,
 			&pcm_instance->pcm_hw, &stream->pcm_hw);
@@ -380,9 +381,9 @@ fail:
 }
 
 static int cfg_device(struct xen_snd_front_info *front_info,
-		struct xen_front_cfg_pcm_instance *pcm_instance,
-		struct snd_pcm_hardware *parent_pcm_hw,
-		const char *path, int node_index, int *stream_cnt)
+		      struct xen_front_cfg_pcm_instance *pcm_instance,
+		      struct snd_pcm_hardware *parent_pcm_hw,
+		      const char *path, int node_index, int *stream_cnt)
 {
 	char *str;
 	char *device_path;
@@ -397,20 +398,20 @@ static int cfg_device(struct xen_snd_front_info *front_info,
 
 	str = xenbus_read(XBT_NIL, device_path, XENSND_FIELD_DEVICE_NAME, NULL);
 	if (!IS_ERR(str)) {
-		strncpy(pcm_instance->name, str, sizeof(pcm_instance->name));
+		strlcpy(pcm_instance->name, str, sizeof(pcm_instance->name));
 		kfree(str);
 	}
 
 	pcm_instance->device_id = node_index;
 
 	/*
-	 * check in Xen store if PCM HW configuration exists for this device
+	 * Check XenStore if PCM HW configuration exists for this device
 	 * and update if so, e.g. we inherit all values from card's PCM HW,
-	 * but can still override some of the values for the device
+	 * but can still override some of the values for the device.
 	 */
 	cfg_read_pcm_hw(device_path, parent_pcm_hw, &pcm_instance->pcm_hw);
 
-	/* find out how many streams were configured in Xen store */
+	/* Find out how many streams were configured in Xen store. */
 	num_streams = 0;
 	do {
 		snprintf(node, sizeof(node), "%d", num_streams);
@@ -422,7 +423,7 @@ static int cfg_device(struct xen_snd_front_info *front_info,
 
 	pcm_instance->num_streams_pb = 0;
 	pcm_instance->num_streams_cap = 0;
-	/* get number of playback and capture streams */
+	/* Get number of playback and capture streams. */
 	for (i = 0; i < num_streams; i++) {
 		ret = cfg_get_stream_type(device_path, i, &num_pb, &num_cap);
 		if (ret < 0)
@@ -433,11 +434,11 @@ static int cfg_device(struct xen_snd_front_info *front_info,
 	}
 
 	if (pcm_instance->num_streams_pb) {
-		pcm_instance->streams_pb = devm_kcalloc(
-				&front_info->xb_dev->dev,
-				pcm_instance->num_streams_pb,
-				sizeof(struct xen_front_cfg_stream),
-				GFP_KERNEL);
+		pcm_instance->streams_pb =
+				devm_kcalloc(&front_info->xb_dev->dev,
+					     pcm_instance->num_streams_pb,
+					     sizeof(struct xen_front_cfg_stream),
+					     GFP_KERNEL);
 		if (!pcm_instance->streams_pb) {
 			ret = -ENOMEM;
 			goto fail;
@@ -445,11 +446,11 @@ static int cfg_device(struct xen_snd_front_info *front_info,
 	}
 
 	if (pcm_instance->num_streams_cap) {
-		pcm_instance->streams_cap = devm_kcalloc(
-				&front_info->xb_dev->dev,
-				pcm_instance->num_streams_cap,
-				sizeof(struct xen_front_cfg_stream),
-				GFP_KERNEL);
+		pcm_instance->streams_cap =
+				devm_kcalloc(&front_info->xb_dev->dev,
+					     pcm_instance->num_streams_cap,
+					     sizeof(struct xen_front_cfg_stream),
+					     GFP_KERNEL);
 		if (!pcm_instance->streams_cap) {
 			ret = -ENOMEM;
 			goto fail;
@@ -459,9 +460,8 @@ static int cfg_device(struct xen_snd_front_info *front_info,
 	cur_pb = 0;
 	cur_cap = 0;
 	for (i = 0; i < num_streams; i++) {
-		ret = cfg_stream(front_info,
-				pcm_instance, device_path, i, &cur_pb, &cur_cap,
-				stream_cnt);
+		ret = cfg_stream(front_info, pcm_instance, device_path, i,
+				 &cur_pb, &cur_cap, stream_cnt);
 		if (ret < 0)
 			goto fail;
 	}
@@ -473,7 +473,7 @@ fail:
 }
 
 int xen_snd_front_cfg_card(struct xen_snd_front_info *front_info,
-		int *stream_cnt)
+			   int *stream_cnt)
 {
 	struct xenbus_device *xb_dev = front_info->xb_dev;
 	struct xen_front_cfg_card *cfg = &front_info->cfg;
@@ -492,26 +492,28 @@ int xen_snd_front_cfg_card(struct xen_snd_front_info *front_info,
 
 	if (!num_devices) {
 		dev_warn(&xb_dev->dev,
-				"No devices configured for sound card at %s\n",
-				xb_dev->nodename);
+			 "No devices configured for sound card at %s\n",
+			 xb_dev->nodename);
 		return -ENODEV;
 	}
 
-	/* start from default PCM HW configuration for the card */
+	/* Start from default PCM HW configuration for the card. */
 	cfg_read_pcm_hw(xb_dev->nodename, NULL, &cfg->pcm_hw);
 
-	cfg->pcm_instances = devm_kcalloc(&front_info->xb_dev->dev, num_devices,
-			sizeof(struct xen_front_cfg_pcm_instance), GFP_KERNEL);
+	cfg->pcm_instances =
+			devm_kcalloc(&front_info->xb_dev->dev, num_devices,
+				     sizeof(struct xen_front_cfg_pcm_instance),
+				     GFP_KERNEL);
 	if (!cfg->pcm_instances)
 		return -ENOMEM;
 
 	for (i = 0; i < num_devices; i++) {
-		ret = cfg_device(front_info,
-				&cfg->pcm_instances[i], &cfg->pcm_hw,
-				xb_dev->nodename, i, stream_cnt);
+		ret = cfg_device(front_info, &cfg->pcm_instances[i],
+				 &cfg->pcm_hw, xb_dev->nodename, i, stream_cnt);
 		if (ret < 0)
 			return ret;
 	}
 	cfg->num_pcm_instances = num_devices;
 	return 0;
 }
+

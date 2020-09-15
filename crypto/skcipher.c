@@ -131,13 +131,8 @@ unmap_src:
 		memcpy(walk->dst.virt.addr, walk->page, n);
 		skcipher_unmap_dst(walk);
 	} else if (unlikely(walk->flags & SKCIPHER_WALK_SLOW)) {
-		if (err) {
-			/*
-			 * Didn't process all bytes.  Either the algorithm is
-			 * broken, or this was the last step and it turned out
-			 * the message wasn't evenly divisible into blocks but
-			 * the algorithm requires it.
-			 */
+		if (WARN_ON(err)) {
+			/* unexpected case; didn't process all bytes */
 			err = -EINVAL;
 			goto finish;
 		}

@@ -173,7 +173,6 @@ enum rdatm_res_state {
 
 struct resp_res {
 	int			type;
-	int			replay;
 	u32			first_psn;
 	u32			last_psn;
 	u32			cur_psn;
@@ -198,7 +197,6 @@ struct rxe_resp_info {
 	enum rxe_qp_state	state;
 	u32			msn;
 	u32			psn;
-	u32			ack_psn;
 	int			opcode;
 	int			drop_msg;
 	int			goto_error;
@@ -214,7 +212,6 @@ struct rxe_resp_info {
 	struct rxe_mem		*mr;
 	u32			resid;
 	u32			rkey;
-	u32			length;
 	u64			atomic_orig;
 
 	/* SRQ only */

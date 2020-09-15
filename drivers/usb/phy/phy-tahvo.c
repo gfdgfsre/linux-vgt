@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Tahvo USB transceiver driver
  *
@@ -23,7 +24,7 @@
 #include <linux/io.h>
 #include <linux/clk.h>
 #include <linux/usb.h>
-#include <linux/extcon.h>
+#include <linux/extcon-provider.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/usb/otg.h>
@@ -318,7 +319,7 @@ static ssize_t otg_mode_store(struct device *device,
 
 	return r;
 }
-static DEVICE_ATTR(otg_mode, 0644, otg_mode_show, otg_mode_store);
+static DEVICE_ATTR_RW(otg_mode);
 
 static struct attribute *tahvo_attributes[] = {
 	&dev_attr_vbus.attr,

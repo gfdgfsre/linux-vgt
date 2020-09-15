@@ -8,6 +8,7 @@
  * Author: Oleksandr Andrushchenko <oleksandr_andrushchenko@epam.com>
  */
 
+#include <linux/kernel.h>
 #include <xen/xen.h>
 #include <xen/xenbus.h>
 
@@ -34,7 +35,7 @@ void xen_snd_front_shbuf_free(struct xen_snd_front_shbuf *buf)
 		for (i = 0; i < buf->num_grefs; i++)
 			if (buf->grefs[i] != GRANT_INVALID_REF)
 				gnttab_end_foreign_access(buf->grefs[i],
-						0, 0UL);
+							  0, 0UL);
 		kfree(buf->grefs);
 	}
 	kfree(buf->directory);
@@ -47,11 +48,11 @@ void xen_snd_front_shbuf_free(struct xen_snd_front_shbuf *buf)
  * xensnd_page_directory header
  */
 #define XENSND_NUM_GREFS_PER_PAGE ((XEN_PAGE_SIZE - \
-	offsetof(struct xensnd_page_directory, gref)) / \
-	sizeof(grant_ref_t))
+		offsetof(struct xensnd_page_directory, gref)) / \
+		sizeof(grant_ref_t))
 
 static void fill_page_dir(struct xen_snd_front_shbuf *buf,
-		int num_pages_dir)
+			  int num_pages_dir)
 {
 	struct xensnd_page_directory *page_dir;
 	unsigned char *ptr;
@@ -75,7 +76,7 @@ static void fill_page_dir(struct xen_snd_front_shbuf *buf,
 		}
 
 		memcpy(&page_dir->gref, &buf->grefs[cur_gref],
-				to_copy * sizeof(grant_ref_t));
+		       to_copy * sizeof(grant_ref_t));
 
 		ptr += XEN_PAGE_SIZE;
 		grefs_left -= to_copy;
@@ -84,10 +85,12 @@ static void fill_page_dir(struct xen_snd_front_shbuf *buf,
 }
 
 static int grant_references(struct xenbus_device *xb_dev,
-		struct xen_snd_front_shbuf *buf,
-		int num_pages_dir, int num_pages_buffer, int num_grefs)
+			    struct xen_snd_front_shbuf *buf,
+			    int num_pages_dir, int num_pages_buffer,
+			    int num_grefs)
 {
 	grant_ref_t priv_gref_head;
+	unsigned long frame;
 	int ret, i, j, cur_ref;
 	int otherend_id;
 
@@ -106,10 +109,9 @@ static int grant_references(struct xenbus_device *xb_dev,
 			goto fail;
 		}
 
-		gnttab_grant_foreign_access_ref(cur_ref, otherend_id,
-				xen_page_to_gfn(virt_to_page(buf->directory +
-				XEN_PAGE_SIZE * i)), 0);
-
+		frame = xen_page_to_gfn(virt_to_page(buf->directory +
+						     XEN_PAGE_SIZE * i));
+		gnttab_grant_foreign_access_ref(cur_ref, otherend_id, frame, 0);
 		buf->grefs[j++] = cur_ref;
 	}
 
@@ -120,10 +122,9 @@ static int grant_references(struct xenbus_device *xb_dev,
 			goto fail;
 		}
 
-		gnttab_grant_foreign_access_ref(cur_ref, otherend_id,
-				xen_page_to_gfn(virt_to_page(buf->buffer +
-				XEN_PAGE_SIZE * i)), 0);
-
+		frame = xen_page_to_gfn(virt_to_page(buf->buffer +
+						     XEN_PAGE_SIZE * i));
+		gnttab_grant_foreign_access_ref(cur_ref, otherend_id, frame, 0);
 		buf->grefs[j++] = cur_ref;
 	}
 
@@ -137,7 +138,8 @@ fail:
 }
 
 static int alloc_int_buffers(struct xen_snd_front_shbuf *buf,
-		int num_pages_dir, int num_pages_buffer, int num_grefs)
+			     int num_pages_dir, int num_pages_buffer,
+			     int num_grefs)
 {
 	buf->grefs = kcalloc(num_grefs, sizeof(*buf->grefs), GFP_KERNEL);
 	if (!buf->grefs)
@@ -163,7 +165,8 @@ fail:
 }
 
 int xen_snd_front_shbuf_alloc(struct xenbus_device *xb_dev,
-		struct xen_snd_front_shbuf *buf, unsigned int buffer_sz)
+			      struct xen_snd_front_shbuf *buf,
+			      unsigned int buffer_sz)
 {
 	int num_pages_buffer, num_pages_dir, num_grefs;
 	int ret;
@@ -173,16 +176,16 @@ int xen_snd_front_shbuf_alloc(struct xenbus_device *xb_dev,
 	num_pages_buffer = DIV_ROUND_UP(buffer_sz, XEN_PAGE_SIZE);
 	/* number of pages the page directory consumes itself */
 	num_pages_dir = DIV_ROUND_UP(num_pages_buffer,
-			XENSND_NUM_GREFS_PER_PAGE);
+				     XENSND_NUM_GREFS_PER_PAGE);
 	num_grefs = num_pages_buffer + num_pages_dir;
 
 	ret = alloc_int_buffers(buf, num_pages_dir,
-			num_pages_buffer, num_grefs);
+				num_pages_buffer, num_grefs);
 	if (ret < 0)
 		return ret;
 
 	ret = grant_references(xb_dev, buf, num_pages_dir, num_pages_buffer,
-			num_grefs);
+			       num_grefs);
 	if (ret < 0)
 		return ret;
 

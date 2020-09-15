@@ -446,11 +446,6 @@ struct pmu {
 	 * Filter events for PMU-specific reasons.
 	 */
 	int (*filter_match)		(struct perf_event *event); /* optional */
-
-	/*
-	 * Check period value for PERF_EVENT_IOC_PERIOD ioctl.
-	 */
-	int (*check_period)		(struct perf_event *event, u64 value); /* optional */
 };
 
 /**
@@ -1169,11 +1164,6 @@ extern int perf_cpu_time_max_percent_handler(struct ctl_table *table, int write,
 
 int perf_event_max_stack_handler(struct ctl_table *table, int write,
 				 void __user *buffer, size_t *lenp, loff_t *ppos);
-
-static inline bool perf_paranoid_any(void)
-{
-	return sysctl_perf_event_paranoid > 2;
-}
 
 static inline bool perf_paranoid_tracepoint_raw(void)
 {

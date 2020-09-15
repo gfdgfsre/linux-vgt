@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * MediaTek xHCI Host Controller Driver
  *
  * Copyright (c) 2015 MediaTek Inc.
  * Author:
  *  Chunfeng Yun <chunfeng.yun@mediatek.com>
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/clk.h>
@@ -670,6 +661,15 @@ static int xhci_mtk_probe(struct platform_device *pdev)
 
 	xhci = hcd_to_xhci(hcd);
 	xhci->main_hcd = hcd;
+
+	/*
+	 * imod_interval is the interrupt moderation value in nanoseconds.
+	 * The increment interval is 8 times as much as that defined in
+	 * the xHCI spec on MTK's controller.
+	 */
+	xhci->imod_interval = 5000;
+	device_property_read_u32(dev, "imod-interval-ns", &xhci->imod_interval);
+
 	xhci->shared_hcd = usb_create_shared_hcd(driver, dev,
 			dev_name(dev), hcd);
 	if (!xhci->shared_hcd) {
@@ -724,16 +724,14 @@ static int xhci_mtk_remove(struct platform_device *dev)
 	struct xhci_hcd_mtk *mtk = platform_get_drvdata(dev);
 	struct usb_hcd	*hcd = mtk->hcd;
 	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
-	struct usb_hcd  *shared_hcd = xhci->shared_hcd;
 
-	usb_remove_hcd(shared_hcd);
-	xhci->shared_hcd = NULL;
+	usb_remove_hcd(xhci->shared_hcd);
 	xhci_mtk_phy_power_off(mtk);
 	xhci_mtk_phy_exit(mtk);
 	device_init_wakeup(&dev->dev, false);
 
 	usb_remove_hcd(hcd);
-	usb_put_hcd(shared_hcd);
+	usb_put_hcd(xhci->shared_hcd);
 	usb_put_hcd(hcd);
 	xhci_mtk_sch_exit(mtk);
 	xhci_mtk_clks_disable(mtk);
@@ -782,10 +780,10 @@ static int __maybe_unused xhci_mtk_resume(struct device *dev)
 	xhci_mtk_host_enable(mtk);
 
 	xhci_dbg(xhci, "%s: restart port polling\n", __func__);
-	set_bit(HCD_FLAG_POLL_RH, &xhci->shared_hcd->flags);
-	usb_hcd_poll_rh_status(xhci->shared_hcd);
 	set_bit(HCD_FLAG_POLL_RH, &hcd->flags);
 	usb_hcd_poll_rh_status(hcd);
+	set_bit(HCD_FLAG_POLL_RH, &xhci->shared_hcd->flags);
+	usb_hcd_poll_rh_status(xhci->shared_hcd);
 	return 0;
 }
 

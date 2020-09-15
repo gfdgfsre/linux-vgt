@@ -876,10 +876,10 @@ rio_dma_transfer(struct file *filp, u32 transfer_mode,
 	 * offset within the internal buffer specified by handle parameter.
 	 */
 	if (xfer->loc_addr) {
-		unsigned long offset;
+		unsigned int offset;
 		long pinned;
 
-		offset = (unsigned long)(uintptr_t)xfer->loc_addr & ~PAGE_MASK;
+		offset = lower_32_bits(offset_in_page(xfer->loc_addr));
 		nr_pages = PAGE_ALIGN(xfer->length + offset) >> PAGE_SHIFT;
 
 		page_list = kmalloc_array(nr_pages,
@@ -1742,7 +1742,6 @@ static int rio_mport_add_riodev(struct mport_cdev_priv *priv,
 
 	if (copy_from_user(&dev_info, arg, sizeof(dev_info)))
 		return -EFAULT;
-	dev_info.name[sizeof(dev_info.name) - 1] = '\0';
 
 	rmcd_debug(RDEV, "name:%s ct:0x%x did:0x%x hc:0x%x", dev_info.name,
 		   dev_info.comptag, dev_info.destid, dev_info.hopcount);
@@ -1874,7 +1873,6 @@ static int rio_mport_del_riodev(struct mport_cdev_priv *priv, void __user *arg)
 
 	if (copy_from_user(&dev_info, arg, sizeof(dev_info)))
 		return -EFAULT;
-	dev_info.name[sizeof(dev_info.name) - 1] = '\0';
 
 	mport = priv->md->mport;
 

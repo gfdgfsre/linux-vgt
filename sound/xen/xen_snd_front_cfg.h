@@ -41,6 +41,6 @@ struct xen_front_cfg_card {
 };
 
 int xen_snd_front_cfg_card(struct xen_snd_front_info *front_info,
-		int *stream_cnt);
+			   int *stream_cnt);
 
 #endif /* __XEN_SND_FRONT_CFG_H */

@@ -24,18 +24,22 @@ static irqreturn_t evtchnl_interrupt_req(int irq, void *dev_id)
 	struct xen_snd_front_info *front_info = channel->front_info;
 	struct xensnd_resp *resp;
 	RING_IDX i, rp;
-	unsigned long flags;
 
 	if (unlikely(channel->state != EVTCHNL_STATE_CONNECTED))
 		return IRQ_HANDLED;
 
-	spin_lock_irqsave(&front_info->io_lock, flags);
+	mutex_lock(&channel->ring_io_lock);
 
 again:
 	rp = channel->u.req.ring.sring->rsp_prod;
-	/* ensure we see queued responses up to rp */
+	/* Ensure we see queued responses up to rp. */
 	rmb();
 
+	/*
+	 * Assume that the backend is trusted to always write sane values
+	 * to the ring counters, so no overflow checks on frontend side
+	 * are required.
+	 */
 	for (i = channel->u.req.ring.rsp_cons; i != rp; i++) {
 		resp = RING_GET_RESPONSE(&channel->u.req.ring, i);
 		if (resp->id != channel->evt_id)
@@ -62,8 +66,8 @@ again:
 
 		default:
 			dev_err(&front_info->xb_dev->dev,
-					"Operation %d is not supported\n",
-					resp->operation);
+				"Operation %d is not supported\n",
+				resp->operation);
 			break;
 		}
 	}
@@ -73,35 +77,39 @@ again:
 		int more_to_do;
 
 		RING_FINAL_CHECK_FOR_RESPONSES(&channel->u.req.ring,
-				more_to_do);
+					       more_to_do);
 		if (more_to_do)
 			goto again;
-	} else
+	} else {
 		channel->u.req.ring.sring->rsp_event = i + 1;
+	}
 
-	spin_unlock_irqrestore(&front_info->io_lock, flags);
+	mutex_unlock(&channel->ring_io_lock);
 	return IRQ_HANDLED;
 }
 
 static irqreturn_t evtchnl_interrupt_evt(int irq, void *dev_id)
 {
 	struct xen_snd_front_evtchnl *channel = dev_id;
-	struct xen_snd_front_info *front_info = channel->front_info;
 	struct xensnd_event_page *page = channel->u.evt.page;
-	uint32_t cons, prod;
-	unsigned long flags;
+	u32 cons, prod;
 
 	if (unlikely(channel->state != EVTCHNL_STATE_CONNECTED))
 		return IRQ_HANDLED;
 
-	spin_lock_irqsave(&front_info->io_lock, flags);
+	mutex_lock(&channel->ring_io_lock);
 
 	prod = page->in_prod;
-	/* ensure we see ring contents up to prod */
+	/* Ensure we see ring contents up to prod. */
 	virt_rmb();
 	if (prod == page->in_cons)
 		goto out;
 
+	/*
+	 * Assume that the backend is trusted to always write sane values
+	 * to the ring counters, so no overflow checks on frontend side
+	 * are required.
+	 */
 	for (cons = page->in_cons; cons != prod; cons++) {
 		struct xensnd_evt *event;
 
@@ -111,20 +119,18 @@ static irqreturn_t evtchnl_interrupt_evt(int irq, void *dev_id)
 
 		switch (event->type) {
 		case XENSND_EVT_CUR_POS:
-			spin_unlock_irqrestore(&front_info->io_lock, flags);
 			xen_snd_front_alsa_handle_cur_pos(channel,
-					event->op.cur_pos.position);
-			spin_lock_irqsave(&front_info->io_lock, flags);
+							  event->op.cur_pos.position);
 			break;
 		}
 	}
 
 	page->in_cons = cons;
-	/* ensure ring contents */
+	/* Ensure ring contents. */
 	virt_wmb();
 
 out:
-	spin_unlock_irqrestore(&front_info->io_lock, flags);
+	mutex_unlock(&channel->ring_io_lock);
 	return IRQ_HANDLED;
 }
 
@@ -139,7 +145,7 @@ void xen_snd_front_evtchnl_flush(struct xen_snd_front_evtchnl *channel)
 }
 
 static void evtchnl_free(struct xen_snd_front_info *front_info,
-		struct xen_snd_front_evtchnl *channel)
+			 struct xen_snd_front_evtchnl *channel)
 {
 	unsigned long page = 0;
 
@@ -153,7 +159,7 @@ static void evtchnl_free(struct xen_snd_front_info *front_info,
 
 	channel->state = EVTCHNL_STATE_DISCONNECTED;
 	if (channel->type == EVTCHNL_TYPE_REQ) {
-		/* release all who still waits for response if any */
+		/* Release all who still waits for response if any. */
 		channel->u.req.resp_status = -EIO;
 		complete_all(&channel->u.req.completion);
 	}
@@ -164,9 +170,11 @@ static void evtchnl_free(struct xen_snd_front_info *front_info,
 	if (channel->port)
 		xenbus_free_evtchn(front_info->xb_dev, channel->port);
 
-	/* end access and free the page */
+	/* End access and free the page. */
 	if (channel->gref != GRANT_INVALID_REF)
 		gnttab_end_foreign_access(channel->gref, 0, page);
+	else
+		free_page(page);
 
 	memset(channel, 0, sizeof(*channel));
 }
@@ -188,8 +196,8 @@ void xen_snd_front_evtchnl_free_all(struct xen_snd_front_info *front_info)
 }
 
 static int evtchnl_alloc(struct xen_snd_front_info *front_info, int index,
-		struct xen_snd_front_evtchnl *channel,
-		enum xen_snd_front_evtchnl_type type)
+			 struct xen_snd_front_evtchnl *channel,
+			 enum xen_snd_front_evtchnl_type type)
 {
 	struct xenbus_device *xb_dev = front_info->xb_dev;
 	unsigned long page;
@@ -204,19 +212,22 @@ static int evtchnl_alloc(struct xen_snd_front_info *front_info, int index,
 	channel->front_info = front_info;
 	channel->state = EVTCHNL_STATE_DISCONNECTED;
 	channel->gref = GRANT_INVALID_REF;
-	page = get_zeroed_page(GFP_NOIO | __GFP_HIGH);
+	page = get_zeroed_page(GFP_KERNEL);
 	if (!page) {
 		ret = -ENOMEM;
 		goto fail;
 	}
 
 	handler_name = kasprintf(GFP_KERNEL, "%s-%s", XENSND_DRIVER_NAME,
-			type == EVTCHNL_TYPE_REQ ? XENSND_FIELD_RING_REF :
-			XENSND_FIELD_EVT_RING_REF);
+				 type == EVTCHNL_TYPE_REQ ?
+				 XENSND_FIELD_RING_REF :
+				 XENSND_FIELD_EVT_RING_REF);
 	if (!handler_name) {
 		ret = -ENOMEM;
 		goto fail;
 	}
+
+	mutex_init(&channel->ring_io_lock);
 
 	if (type == EVTCHNL_TYPE_REQ) {
 		struct xen_sndif_sring *sring = (struct xen_sndif_sring *)page;
@@ -227,17 +238,19 @@ static int evtchnl_alloc(struct xen_snd_front_info *front_info, int index,
 		FRONT_RING_INIT(&channel->u.req.ring, sring, XEN_PAGE_SIZE);
 
 		ret = xenbus_grant_ring(xb_dev, sring, 1, &gref);
-		if (ret < 0)
+		if (ret < 0) {
+			channel->u.req.ring.sring = NULL;
 			goto fail;
+		}
 
 		handler = evtchnl_interrupt_req;
 	} else {
-		channel->u.evt.page = (struct xensnd_event_page *)page;
 		ret = gnttab_grant_foreign_access(xb_dev->otherend_id,
-				virt_to_gfn((void *)page), 0);
+						  virt_to_gfn((void *)page), 0);
 		if (ret < 0)
 			goto fail;
 
+		channel->u.evt.page = (struct xensnd_event_page *)page;
 		gref = ret;
 		handler = evtchnl_interrupt_evt;
 	}
@@ -251,19 +264,18 @@ static int evtchnl_alloc(struct xen_snd_front_info *front_info, int index,
 	ret = bind_evtchn_to_irq(channel->port);
 	if (ret < 0) {
 		dev_err(&xb_dev->dev,
-				"Failed to bind IRQ for domid %d port %d: %d\n",
-				front_info->xb_dev->otherend_id, channel->port,
-				ret);
+			"Failed to bind IRQ for domid %d port %d: %d\n",
+			front_info->xb_dev->otherend_id, channel->port, ret);
 		goto fail;
 	}
 
 	channel->irq = ret;
 
 	ret = request_threaded_irq(channel->irq, NULL, handler,
-			IRQF_ONESHOT, handler_name, channel);
+				   IRQF_ONESHOT, handler_name, channel);
 	if (ret < 0) {
 		dev_err(&xb_dev->dev, "Failed to request IRQ %d: %d\n",
-				channel->irq, ret);
+			channel->irq, ret);
 		goto fail;
 	}
 
@@ -271,24 +283,28 @@ static int evtchnl_alloc(struct xen_snd_front_info *front_info, int index,
 	return 0;
 
 fail:
+	if (page)
+		free_page(page);
 	kfree(handler_name);
 	dev_err(&xb_dev->dev, "Failed to allocate ring: %d\n", ret);
 	return ret;
 }
 
 int xen_snd_front_evtchnl_create_all(struct xen_snd_front_info *front_info,
-		int num_streams)
+				     int num_streams)
 {
 	struct xen_front_cfg_card *cfg = &front_info->cfg;
 	struct device *dev = &front_info->xb_dev->dev;
 	int d, ret = 0;
 
-	front_info->evt_pairs = kcalloc(num_streams,
-			sizeof(struct xen_snd_front_evtchnl_pair), GFP_KERNEL);
+	front_info->evt_pairs =
+			kcalloc(num_streams,
+				sizeof(struct xen_snd_front_evtchnl_pair),
+				GFP_KERNEL);
 	if (!front_info->evt_pairs)
 		return -ENOMEM;
 
-	/* iterate over devices and their streams and create event channels */
+	/* Iterate over devices and their streams and create event channels. */
 	for (d = 0; d < cfg->num_pcm_instances; d++) {
 		struct xen_front_cfg_pcm_instance *pcm_instance;
 		int s, index;
@@ -299,16 +315,16 @@ int xen_snd_front_evtchnl_create_all(struct xen_snd_front_info *front_info,
 			index = pcm_instance->streams_pb[s].index;
 
 			ret = evtchnl_alloc(front_info, index,
-					&front_info->evt_pairs[index].req,
-					EVTCHNL_TYPE_REQ);
+					    &front_info->evt_pairs[index].req,
+					    EVTCHNL_TYPE_REQ);
 			if (ret < 0) {
 				dev_err(dev, "Error allocating control channel\n");
 				goto fail;
 			}
 
 			ret = evtchnl_alloc(front_info, index,
-					&front_info->evt_pairs[index].evt,
-					EVTCHNL_TYPE_EVT);
+					    &front_info->evt_pairs[index].evt,
+					    EVTCHNL_TYPE_EVT);
 			if (ret < 0) {
 				dev_err(dev, "Error allocating in-event channel\n");
 				goto fail;
@@ -319,24 +335,22 @@ int xen_snd_front_evtchnl_create_all(struct xen_snd_front_info *front_info,
 			index = pcm_instance->streams_cap[s].index;
 
 			ret = evtchnl_alloc(front_info, index,
-					&front_info->evt_pairs[index].req,
-					EVTCHNL_TYPE_REQ);
+					    &front_info->evt_pairs[index].req,
+					    EVTCHNL_TYPE_REQ);
 			if (ret < 0) {
 				dev_err(dev, "Error allocating control channel\n");
 				goto fail;
 			}
 
 			ret = evtchnl_alloc(front_info, index,
-					&front_info->evt_pairs[index].evt,
-					EVTCHNL_TYPE_EVT);
+					    &front_info->evt_pairs[index].evt,
+					    EVTCHNL_TYPE_EVT);
 			if (ret < 0) {
 				dev_err(dev, "Error allocating in-event channel\n");
 				goto fail;
 			}
 		}
 	}
-	if (ret < 0)
-		goto fail;
 
 	front_info->num_evt_pairs = num_streams;
 	return 0;
@@ -347,21 +361,21 @@ fail:
 }
 
 static int evtchnl_publish(struct xenbus_transaction xbt,
-		struct xen_snd_front_evtchnl *channel,
-		const char *path, const char *node_ring,
-		const char *node_chnl)
+			   struct xen_snd_front_evtchnl *channel,
+			   const char *path, const char *node_ring,
+			   const char *node_chnl)
 {
 	struct xenbus_device *xb_dev = channel->front_info->xb_dev;
 	int ret;
 
-	/* write control channel ring reference */
+	/* Write control channel ring reference. */
 	ret = xenbus_printf(xbt, path, node_ring, "%u", channel->gref);
 	if (ret < 0) {
 		dev_err(&xb_dev->dev, "Error writing ring-ref: %d\n", ret);
 		return ret;
 	}
 
-	/* write event channel ring reference */
+	/* Write event channel ring reference. */
 	ret = xenbus_printf(xbt, path, node_chnl, "%u", channel->port);
 	if (ret < 0) {
 		dev_err(&xb_dev->dev, "Error writing event channel: %d\n", ret);
@@ -381,7 +395,7 @@ again:
 	ret = xenbus_transaction_start(&xbt);
 	if (ret < 0) {
 		xenbus_dev_fatal(front_info->xb_dev, ret,
-				"starting transaction");
+				 "starting transaction");
 		return ret;
 	}
 
@@ -395,18 +409,18 @@ again:
 			index = pcm_instance->streams_pb[s].index;
 
 			ret = evtchnl_publish(xbt,
-					&front_info->evt_pairs[index].req,
-					pcm_instance->streams_pb[s].xenstore_path,
-					XENSND_FIELD_RING_REF,
-					XENSND_FIELD_EVT_CHNL);
+					      &front_info->evt_pairs[index].req,
+					      pcm_instance->streams_pb[s].xenstore_path,
+					      XENSND_FIELD_RING_REF,
+					      XENSND_FIELD_EVT_CHNL);
 			if (ret < 0)
 				goto fail;
 
 			ret = evtchnl_publish(xbt,
-					&front_info->evt_pairs[index].evt,
-					pcm_instance->streams_pb[s].xenstore_path,
-					XENSND_FIELD_EVT_RING_REF,
-					XENSND_FIELD_EVT_EVT_CHNL);
+					      &front_info->evt_pairs[index].evt,
+					      pcm_instance->streams_pb[s].xenstore_path,
+					      XENSND_FIELD_EVT_RING_REF,
+					      XENSND_FIELD_EVT_EVT_CHNL);
 			if (ret < 0)
 				goto fail;
 		}
@@ -415,18 +429,18 @@ again:
 			index = pcm_instance->streams_cap[s].index;
 
 			ret = evtchnl_publish(xbt,
-					&front_info->evt_pairs[index].req,
-					pcm_instance->streams_cap[s].xenstore_path,
-					XENSND_FIELD_RING_REF,
-					XENSND_FIELD_EVT_CHNL);
+					      &front_info->evt_pairs[index].req,
+					      pcm_instance->streams_cap[s].xenstore_path,
+					      XENSND_FIELD_RING_REF,
+					      XENSND_FIELD_EVT_CHNL);
 			if (ret < 0)
 				goto fail;
 
 			ret = evtchnl_publish(xbt,
-					&front_info->evt_pairs[index].evt,
-					pcm_instance->streams_cap[s].xenstore_path,
-					XENSND_FIELD_EVT_RING_REF,
-					XENSND_FIELD_EVT_EVT_CHNL);
+					      &front_info->evt_pairs[index].evt,
+					      pcm_instance->streams_cap[s].xenstore_path,
+					      XENSND_FIELD_EVT_RING_REF,
+					      XENSND_FIELD_EVT_EVT_CHNL);
 			if (ret < 0)
 				goto fail;
 		}
@@ -437,7 +451,7 @@ again:
 			goto again;
 
 		xenbus_dev_fatal(front_info->xb_dev, ret,
-				"completing transaction");
+				 "completing transaction");
 		goto fail_to_end;
 	}
 	return 0;
@@ -448,9 +462,8 @@ fail_to_end:
 	return ret;
 }
 
-void xen_snd_front_evtchnl_pair_set_connected(
-		struct xen_snd_front_evtchnl_pair *evt_pair,
-		bool is_connected)
+void xen_snd_front_evtchnl_pair_set_connected(struct xen_snd_front_evtchnl_pair *evt_pair,
+					      bool is_connected)
 {
 	enum xen_snd_front_evtchnl_state state;
 
@@ -459,13 +472,23 @@ void xen_snd_front_evtchnl_pair_set_connected(
 	else
 		state = EVTCHNL_STATE_DISCONNECTED;
 
+	mutex_lock(&evt_pair->req.ring_io_lock);
 	evt_pair->req.state = state;
+	mutex_unlock(&evt_pair->req.ring_io_lock);
+
+	mutex_lock(&evt_pair->evt.ring_io_lock);
 	evt_pair->evt.state = state;
+	mutex_unlock(&evt_pair->evt.ring_io_lock);
 }
 
-void xen_snd_front_evtchnl_pair_clear(
-		struct xen_snd_front_evtchnl_pair *evt_pair)
+void xen_snd_front_evtchnl_pair_clear(struct xen_snd_front_evtchnl_pair *evt_pair)
 {
+	mutex_lock(&evt_pair->req.ring_io_lock);
 	evt_pair->req.evt_next_id = 0;
+	mutex_unlock(&evt_pair->req.ring_io_lock);
+
+	mutex_lock(&evt_pair->evt.ring_io_lock);
 	evt_pair->evt.evt_next_id = 0;
+	mutex_unlock(&evt_pair->evt.ring_io_lock);
 }
+

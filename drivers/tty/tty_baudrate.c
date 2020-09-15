@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
  */
@@ -76,7 +77,7 @@ speed_t tty_termios_baud_rate(struct ktermios *termios)
 		else
 			cbaud += 15;
 	}
-	return cbaud >= n_baud_table ? 0 : baud_table[cbaud];
+	return baud_table[cbaud];
 }
 EXPORT_SYMBOL(tty_termios_baud_rate);
 
@@ -112,7 +113,7 @@ speed_t tty_termios_input_baud_rate(struct ktermios *termios)
 		else
 			cbaud += 15;
 	}
-	return cbaud >= n_baud_table ? 0 : baud_table[cbaud];
+	return baud_table[cbaud];
 #else
 	return tty_termios_baud_rate(termios);
 #endif

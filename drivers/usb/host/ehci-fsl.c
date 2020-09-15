@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright 2005-2009 MontaVista Software, Inc.
  * Copyright 2008,2012,2015      Freescale Semiconductor, Inc.
@@ -168,6 +169,8 @@ static int fsl_ehci_drv_probe(struct platform_device *pdev)
 			retval = -ENODEV;
 			goto err2;
 		}
+
+		hcd->skip_phy_initialization = 1;
 	}
 #endif
 	return retval;

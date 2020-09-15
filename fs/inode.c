@@ -1794,7 +1794,7 @@ int dentry_needs_remove_privs(struct dentry *dentry)
 	return mask;
 }
 
-static int __remove_privs(struct vfsmount *mnt, struct dentry *dentry, int kill)
+static int __remove_privs(struct dentry *dentry, int kill)
 {
 	struct iattr newattrs;
 
@@ -1803,7 +1803,7 @@ static int __remove_privs(struct vfsmount *mnt, struct dentry *dentry, int kill)
 	 * Note we call this on write, so notify_change will not
 	 * encounter any conflicting delegations:
 	 */
-	return notify_change2(mnt, dentry, &newattrs, NULL);
+	return notify_change(dentry, &newattrs, NULL);
 }
 
 /*
@@ -1817,20 +1817,15 @@ int file_remove_privs(struct file *file)
 	int kill;
 	int error = 0;
 
-	/*
-	 * Fast path for nothing security related.
-	 * As well for non-regular files, e.g. blkdev inodes.
-	 * For example, blkdev_write_iter() might get here
-	 * trying to remove privs which it is not allowed to.
-	 */
-	if (IS_NOSEC(inode) || !S_ISREG(inode->i_mode))
+	/* Fast path for nothing security related */
+	if (IS_NOSEC(inode))
 		return 0;
 
 	kill = dentry_needs_remove_privs(dentry);
 	if (kill < 0)
 		return kill;
 	if (kill)
-		error = __remove_privs(file->f_path.mnt, dentry, kill);
+		error = __remove_privs(dentry, kill);
 	if (!error)
 		inode_has_no_xattr(inode);
 

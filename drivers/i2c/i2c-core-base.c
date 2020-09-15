@@ -28,6 +28,7 @@
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/idr.h>
 #include <linux/init.h>
@@ -133,17 +134,17 @@ static int i2c_device_uevent(struct device *dev, struct kobj_uevent_env *env)
 /* i2c bus recovery routines */
 static int get_scl_gpio_value(struct i2c_adapter *adap)
 {
-	return gpio_get_value(adap->bus_recovery_info->scl_gpio);
+	return gpiod_get_value_cansleep(adap->bus_recovery_info->scl_gpiod);
 }
 
 static void set_scl_gpio_value(struct i2c_adapter *adap, int val)
 {
-	gpio_set_value(adap->bus_recovery_info->scl_gpio, val);
+	gpiod_set_value_cansleep(adap->bus_recovery_info->scl_gpiod, val);
 }
 
 static int get_sda_gpio_value(struct i2c_adapter *adap)
 {
-	return gpio_get_value(adap->bus_recovery_info->sda_gpio);
+	return gpiod_get_value_cansleep(adap->bus_recovery_info->sda_gpiod);
 }
 
 static int i2c_get_gpios_for_recovery(struct i2c_adapter *adap)
@@ -158,6 +159,7 @@ static int i2c_get_gpios_for_recovery(struct i2c_adapter *adap)
 		dev_warn(dev, "Can't get SCL gpio: %d\n", bri->scl_gpio);
 		return ret;
 	}
+	bri->scl_gpiod = gpio_to_desc(bri->scl_gpio);
 
 	if (bri->get_sda) {
 		if (gpio_request_one(bri->sda_gpio, GPIOF_IN, "i2c-sda")) {
@@ -166,6 +168,7 @@ static int i2c_get_gpios_for_recovery(struct i2c_adapter *adap)
 					bri->sda_gpio);
 			bri->get_sda = NULL;
 		}
+		bri->sda_gpiod = gpio_to_desc(bri->sda_gpio);
 	}
 
 	return ret;
@@ -175,10 +178,34 @@ static void i2c_put_gpios_for_recovery(struct i2c_adapter *adap)
 {
 	struct i2c_bus_recovery_info *bri = adap->bus_recovery_info;
 
-	if (bri->get_sda)
+	if (bri->get_sda) {
 		gpio_free(bri->sda_gpio);
+		bri->sda_gpiod = NULL;
+	}
 
 	gpio_free(bri->scl_gpio);
+	bri->scl_gpiod = NULL;
+}
+
+static void set_sda_gpio_value(struct i2c_adapter *adap, int val)
+{
+	gpiod_set_value_cansleep(adap->bus_recovery_info->sda_gpiod, val);
+}
+
+static int i2c_generic_bus_free(struct i2c_adapter *adap)
+{
+	struct i2c_bus_recovery_info *bri = adap->bus_recovery_info;
+	int ret = -EOPNOTSUPP;
+
+	if (bri->get_bus_free)
+		ret = bri->get_bus_free(adap);
+	else if (bri->get_sda)
+		ret = bri->get_sda(adap);
+
+	if (ret < 0)
+		return ret;
+
+	return ret ? 0 : -EBUSY;
 }
 
 /*
@@ -192,22 +219,28 @@ static void i2c_put_gpios_for_recovery(struct i2c_adapter *adap)
 static int i2c_generic_recovery(struct i2c_adapter *adap)
 {
 	struct i2c_bus_recovery_info *bri = adap->bus_recovery_info;
-	int i = 0, val = 1, ret = 0;
+	int i = 0, scl = 1, ret;
 
 	if (bri->prepare_recovery)
 		bri->prepare_recovery(adap);
 
-	bri->set_scl(adap, val);
-	ndelay(RECOVERY_NDELAY);
+	/*
+	 * If we can set SDA, we will always create a STOP to ensure additional
+	 * pulses will do no harm. This is achieved by letting SDA follow SCL
+	 * half a cycle later. Check the 'incomplete_write_byte' fault injector
+	 * for details.
+	 */
+	bri->set_scl(adap, scl);
+	ndelay(RECOVERY_NDELAY / 2);
+	if (bri->set_sda)
+		bri->set_sda(adap, scl);
+	ndelay(RECOVERY_NDELAY / 2);
 
 	/*
 	 * By this time SCL is high, as we need to give 9 falling-rising edges
 	 */
 	while (i++ < RECOVERY_CLK_CNT * 2) {
-		if (val) {
-			/* Break if SDA is high */
-			if (bri->get_sda && bri->get_sda(adap))
-					break;
+		if (scl) {
 			/* SCL shouldn't be low here */
 			if (!bri->get_scl(adap)) {
 				dev_err(&adap->dev,
@@ -217,10 +250,24 @@ static int i2c_generic_recovery(struct i2c_adapter *adap)
 			}
 		}
 
-		val = !val;
-		bri->set_scl(adap, val);
-		ndelay(RECOVERY_NDELAY);
+		scl = !scl;
+		bri->set_scl(adap, scl);
+		/* Creating STOP again, see above */
+		ndelay(RECOVERY_NDELAY / 2);
+		if (bri->set_sda)
+			bri->set_sda(adap, scl);
+		ndelay(RECOVERY_NDELAY / 2);
+
+		if (scl) {
+			ret = i2c_generic_bus_free(adap);
+			if (ret == 0)
+				break;
+		}
 	}
+
+	/* If we can't check bus status, assume recovery worked */
+	if (ret == -EOPNOTSUPP)
+		ret = 0;
 
 	if (bri->unprepare_recovery)
 		bri->unprepare_recovery(adap);
@@ -272,6 +319,18 @@ static void i2c_init_recovery(struct i2c_adapter *adap)
 		goto err;
 	}
 
+	if (bri->scl_gpiod && bri->recover_bus == i2c_generic_scl_recovery) {
+		bri->get_scl = get_scl_gpio_value;
+		bri->set_scl = set_scl_gpio_value;
+		if (bri->sda_gpiod) {
+			bri->get_sda = get_sda_gpio_value;
+			/* FIXME: add proper flag instead of '0' once available */
+			if (gpiod_get_direction(bri->sda_gpiod) == 0)
+				bri->set_sda = set_sda_gpio_value;
+		}
+		return;
+	}
+
 	/* Generic GPIO recovery */
 	if (bri->recover_bus == i2c_generic_gpio_recovery) {
 		if (!gpio_is_valid(bri->scl_gpio)) {
@@ -290,6 +349,10 @@ static void i2c_init_recovery(struct i2c_adapter *adap)
 		/* Generic SCL recovery */
 		if (!bri->set_scl || !bri->get_scl) {
 			err_str = "no {get|set}_scl() found";
+			goto err;
+		}
+		if (!bri->set_sda && !bri->get_sda) {
+			err_str = "either get_sda() or set_sda() needed";
 			goto err;
 		}
 	}
@@ -808,6 +871,8 @@ EXPORT_SYMBOL_GPL(i2c_new_device);
  */
 void i2c_unregister_device(struct i2c_client *client)
 {
+	if (!client)
+		return;
 	if (client->dev.of_node) {
 		of_node_clear_flag(client->dev.of_node, OF_POPULATED);
 		of_node_put(client->dev.of_node);
@@ -1420,8 +1485,7 @@ static int __unregister_client(struct device *dev, void *dummy)
 static int __unregister_dummy(struct device *dev, void *dummy)
 {
 	struct i2c_client *client = i2c_verify_client(dev);
-	if (client)
-		i2c_unregister_device(client);
+	i2c_unregister_device(client);
 	return 0;
 }
 
@@ -1955,63 +2019,35 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 EXPORT_SYMBOL(i2c_transfer);
 
 /**
- * i2c_master_send - issue a single I2C message in master transmit mode
+ * i2c_transfer_buffer_flags - issue a single I2C message transferring data
+ *			       to/from a buffer
  * @client: Handle to slave device
- * @buf: Data that will be written to the slave
- * @count: How many bytes to write, must be less than 64k since msg.len is u16
+ * @buf: Where the data is stored
+ * @count: How many bytes to transfer, must be less than 64k since msg.len is u16
+ * @flags: The flags to be used for the message, e.g. I2C_M_RD for reads
  *
- * Returns negative errno, or else the number of bytes written.
+ * Returns negative errno, or else the number of bytes transferred.
  */
-int i2c_master_send(const struct i2c_client *client, const char *buf, int count)
+int i2c_transfer_buffer_flags(const struct i2c_client *client, char *buf,
+			      int count, u16 flags)
 {
 	int ret;
-	struct i2c_adapter *adap = client->adapter;
-	struct i2c_msg msg;
+	struct i2c_msg msg = {
+		.addr = client->addr,
+		.flags = flags | (client->flags & I2C_M_TEN),
+		.len = count,
+		.buf = buf,
+	};
 
-	msg.addr = client->addr;
-	msg.flags = client->flags & I2C_M_TEN;
-	msg.len = count;
-	msg.buf = (char *)buf;
-
-	ret = i2c_transfer(adap, &msg, 1);
+	ret = i2c_transfer(client->adapter, &msg, 1);
 
 	/*
-	 * If everything went ok (i.e. 1 msg transmitted), return #bytes
-	 * transmitted, else error code.
+	 * If everything went ok (i.e. 1 msg transferred), return #bytes
+	 * transferred, else error code.
 	 */
 	return (ret == 1) ? count : ret;
 }
-EXPORT_SYMBOL(i2c_master_send);
-
-/**
- * i2c_master_recv - issue a single I2C message in master receive mode
- * @client: Handle to slave device
- * @buf: Where to store data read from slave
- * @count: How many bytes to read, must be less than 64k since msg.len is u16
- *
- * Returns negative errno, or else the number of bytes read.
- */
-int i2c_master_recv(const struct i2c_client *client, char *buf, int count)
-{
-	struct i2c_adapter *adap = client->adapter;
-	struct i2c_msg msg;
-	int ret;
-
-	msg.addr = client->addr;
-	msg.flags = client->flags & I2C_M_TEN;
-	msg.flags |= I2C_M_RD;
-	msg.len = count;
-	msg.buf = buf;
-
-	ret = i2c_transfer(adap, &msg, 1);
-
-	/*
-	 * If everything went ok (i.e. 1 msg received), return #bytes received,
-	 * else error code.
-	 */
-	return (ret == 1) ? count : ret;
-}
-EXPORT_SYMBOL(i2c_master_recv);
+EXPORT_SYMBOL(i2c_transfer_buffer_flags);
 
 /* ----------------------------------------------------
  * the i2c address scanning function
@@ -2243,6 +2279,53 @@ void i2c_put_adapter(struct i2c_adapter *adap)
 	module_put(adap->owner);
 }
 EXPORT_SYMBOL(i2c_put_adapter);
+
+/**
+ * i2c_get_dma_safe_msg_buf() - get a DMA safe buffer for the given i2c_msg
+ * @msg: the message to be checked
+ * @threshold: the minimum number of bytes for which using DMA makes sense
+ *
+ * Return: NULL if a DMA safe buffer was not obtained. Use msg->buf with PIO.
+ *	   Or a valid pointer to be used with DMA. After use, release it by
+ *	   calling i2c_release_dma_safe_msg_buf().
+ *
+ * This function must only be called from process context!
+ */
+u8 *i2c_get_dma_safe_msg_buf(struct i2c_msg *msg, unsigned int threshold)
+{
+	if (msg->len < threshold)
+		return NULL;
+
+	if (msg->flags & I2C_M_DMA_SAFE)
+		return msg->buf;
+
+	pr_debug("using bounce buffer for addr=0x%02x, len=%d\n",
+		 msg->addr, msg->len);
+
+	if (msg->flags & I2C_M_RD)
+		return kzalloc(msg->len, GFP_KERNEL);
+	else
+		return kmemdup(msg->buf, msg->len, GFP_KERNEL);
+}
+EXPORT_SYMBOL_GPL(i2c_get_dma_safe_msg_buf);
+
+/**
+ * i2c_put_dma_safe_msg_buf - release DMA safe buffer and sync with i2c_msg
+ * @buf: the buffer obtained from i2c_get_dma_safe_msg_buf(). May be NULL.
+ * @msg: the message which the buffer corresponds to
+ * @xferred: bool saying if the message was transferred
+ */
+void i2c_put_dma_safe_msg_buf(u8 *buf, struct i2c_msg *msg, bool xferred)
+{
+	if (!buf || buf == msg->buf)
+		return;
+
+	if (xferred && msg->flags & I2C_M_RD)
+		memcpy(msg->buf, buf, msg->len);
+
+	kfree(buf);
+}
+EXPORT_SYMBOL_GPL(i2c_put_dma_safe_msg_buf);
 
 MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C-Bus main module");

@@ -1,15 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * vsp1_drv.c  --  R-Car VSP1 Driver
  *
- * Copyright (C) 2013-2015 Renesas Electronics Corporation
+ * Copyright (C) 2013-2018 Renesas Electronics Corporation
  *
  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
+
+#ifdef CONFIG_VIDEO_RENESAS_DEBUG
+#define DEBUG
+#endif
 
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -20,13 +20,14 @@
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/sys_soc.h>
 #include <linux/videodev2.h>
 
 #include <media/rcar-fcp.h>
 #include <media/v4l2-subdev.h>
 
 #include "vsp1.h"
-#include "vsp1_bru.h"
+#include "vsp1_brx.h"
 #include "vsp1_clu.h"
 #include "vsp1_dl.h"
 #include "vsp1_drm.h"
@@ -39,7 +40,114 @@
 #include "vsp1_rwpf.h"
 #include "vsp1_sru.h"
 #include "vsp1_uds.h"
+#include "vsp1_uif.h"
 #include "vsp1_video.h"
+
+#define VSP1_UT_IRQ	0x01
+
+static unsigned int vsp1_debug;	/* 1 to enable debug output */
+module_param_named(debug, vsp1_debug, int, 0600);
+static int underrun_vspd[4];
+module_param_array(underrun_vspd, int, NULL, 0600);
+
+#ifdef CONFIG_VIDEO_RENESAS_DEBUG
+#define VSP1_IRQ_DEBUG(fmt, args...)					\
+	do {								\
+		if (unlikely(vsp1_debug & VSP1_UT_IRQ))			\
+			vsp1_ut_debug_printk(__func__, fmt, ##args);	\
+	} while (0)
+
+static void vsp1_ut_debug_printk(const char *function_name,
+				 const char *format, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	va_start(args, format);
+	vaf.fmt = format;
+	vaf.va = &args;
+
+	pr_debug("[vsp1 :%s] %pV", function_name, &vaf);
+
+	va_end(args);
+}
+#else
+#define VSP1_IRQ_DEBUG(fmt, args...)
+#endif
+
+static void __iomem *fcpv_reg[4];
+static const unsigned int fcpvd_offset[] = {
+	FCPVD0_REG, FCPVD1_REG, FCPVD2_REG, FCPVD3_REG
+};
+
+static const struct soc_device_attribute ths_quirks_match[]  = {
+	{ .soc_id = "r8a7795", .revision = "ES1.*",
+	  .data = (void *)(VSP1_UNDERRUN_WORKAROUND |
+			   VSP1_AUTO_FLD_NOT_SUPPORT), },
+	{ .soc_id = "r8a7795", .revision = "ES2.0",
+	  .data = NULL, },
+	{ .soc_id = "r8a7796",
+	  .data = NULL, },
+	{/*sentinel*/}
+};
+
+void vsp1_underrun_workaround(struct vsp1_device *vsp1, bool reset)
+{
+	unsigned int timeout = 0;
+
+	/* 1. Disable clock stop of VSP */
+	vsp1_write(vsp1, VI6_CLK_CTRL0, VI6_CLK_CTRL0_WORKAROUND);
+	vsp1_write(vsp1, VI6_CLK_CTRL1, VI6_CLK_CTRL1_WORKAROUND);
+	vsp1_write(vsp1, VI6_CLK_DCSWT, VI6_CLK_DCSWT_WORKAROUND1);
+	vsp1_write(vsp1, VI6_CLK_DCSM0, VI6_CLK_DCSM0_WORKAROUND);
+	vsp1_write(vsp1, VI6_CLK_DCSM1, VI6_CLK_DCSM1_WORKAROUND);
+
+	/* 2. Stop operation of VSP except bus access with module reset */
+	vsp1_write(vsp1, VI6_MRESET_ENB0, VI6_MRESET_ENB0_WORKAROUND1);
+	vsp1_write(vsp1, VI6_MRESET_ENB1, VI6_MRESET_ENB1_WORKAROUND);
+	vsp1_write(vsp1, VI6_MRESET, VI6_MRESET_WORKAROUND);
+
+	/* 3. Stop operation of FCPV with software reset */
+	iowrite32(FCP_RST_SOFTRST, fcpv_reg[vsp1->index] + FCP_RST_REG);
+
+	/* 4. Wait until FCP_STA.ACT become 0. */
+	while (1) {
+		if ((ioread32(fcpv_reg[vsp1->index] + FCP_STA_REG) &
+			FCP_STA_ACT) != FCP_STA_ACT)
+			break;
+
+		if (timeout == 100)
+			break;
+
+		timeout++;
+		udelay(1);
+	}
+
+	/* 5. Initialize the whole FCPV with module reset */
+	iowrite32(FCP_RST_WORKAROUND, fcpv_reg[vsp1->index] + FCP_RST_REG);
+
+	/* 6. Stop the whole operation of VSP with module reset */
+	/*    (note that register setting is not cleared) */
+	vsp1_write(vsp1, VI6_MRESET_ENB0, VI6_MRESET_ENB0_WORKAROUND2);
+	vsp1_write(vsp1, VI6_MRESET_ENB1, VI6_MRESET_ENB1_WORKAROUND);
+	vsp1_write(vsp1, VI6_MRESET, VI6_MRESET_WORKAROUND);
+
+	/* 7. Enable clock stop of VSP */
+	vsp1_write(vsp1, VI6_CLK_CTRL0, 0);
+	vsp1_write(vsp1, VI6_CLK_CTRL1, 0);
+	vsp1_write(vsp1, VI6_CLK_DCSWT, VI6_CLK_DCSWT_WORKAROUND2);
+	vsp1_write(vsp1, VI6_CLK_DCSM0, 0);
+	vsp1_write(vsp1, VI6_CLK_DCSM1, 0);
+
+	/* 8. Restart VSPD */
+	if (!reset) {
+		/* Necessary when headerless display list */
+		vsp1_write(vsp1, VI6_DL_HDR_ADDR(0), vsp1->dl_addr);
+		if (vsp1->dl_body)
+			vsp1_write(vsp1, VI6_DL_BODY_SIZE, vsp1->dl_body);
+		vsp1_write(vsp1, VI6_CMD(0), VI6_CMD_STRCMD);
+	}
+}
 
 /* -----------------------------------------------------------------------------
  * Interrupt Handling
@@ -47,7 +155,8 @@
 
 static irqreturn_t vsp1_irq_handler(int irq, void *data)
 {
-	u32 mask = VI6_WFP_IRQ_STA_DFE | VI6_WFP_IRQ_STA_FRE;
+	u32 mask = VI6_WFP_IRQ_STA_DFE | VI6_WFP_IRQ_STA_FRE |
+		   VI6_WFP_IRQ_STA_UND;
 	struct vsp1_device *vsp1 = data;
 	irqreturn_t ret = IRQ_NONE;
 	unsigned int i;
@@ -55,6 +164,8 @@ static irqreturn_t vsp1_irq_handler(int irq, void *data)
 
 	for (i = 0; i < vsp1->info->wpf_count; ++i) {
 		struct vsp1_rwpf *wpf = vsp1->wpf[i];
+		bool underrun = false, disp_access = false;
+		u32 disp_st = 0;
 
 		if (wpf == NULL)
 			continue;
@@ -62,10 +173,43 @@ static irqreturn_t vsp1_irq_handler(int irq, void *data)
 		status = vsp1_read(vsp1, VI6_WPF_IRQ_STA(i));
 		vsp1_write(vsp1, VI6_WPF_IRQ_STA(i), ~status & mask);
 
+		if (vsp1->info->lif_count == 2 && (i == 0 || i == 1))
+			disp_access = true;
+		else if (vsp1->info->lif_count == 1 && i == 0)
+			disp_access = true;
+
+		if (disp_access) {
+			disp_st = vsp1_read(vsp1, VI6_DISP_IRQ_STA(i));
+			vsp1_write(vsp1, VI6_DISP_IRQ_STA(i),
+				   ~disp_st & VI6_DISP_IRQ_STA_DST);
+		}
+
+		if (status & VI6_WFP_IRQ_STA_UND)
+			underrun = true;
+
+		if (vsp1_debug && underrun) {
+			VSP1_IRQ_DEBUG(
+			   "Underrun occurred num[%d] at VSPD (%s) LIF%d\n",
+			   ++underrun_vspd[vsp1->index],
+			   dev_name(vsp1->dev), i);
+		}
+
 		if (status & VI6_WFP_IRQ_STA_DFE) {
-			vsp1_pipeline_frame_end(wpf->pipe);
+			vsp1_pipeline_frame_end(wpf->entity.pipe);
 			ret = IRQ_HANDLED;
 		}
+
+		if (disp_st & VI6_DISP_IRQ_STA_DST) {
+			vsp1_drm_display_start(vsp1, i, wpf->entity.pipe);
+			ret = IRQ_HANDLED;
+			if (wpf->entity.pipe->dst_cnt) {
+				if (--wpf->entity.pipe->dst_cnt == 0)
+					wake_up(&wpf->entity.pipe->dst_wait);
+			}
+		}
+
+		if ((vsp1->ths_quirks & VSP1_UNDERRUN_WORKAROUND) && underrun)
+			vsp1_underrun_workaround(vsp1, false);
 	}
 
 	return ret;
@@ -269,7 +413,7 @@ static int vsp1_create_entities(struct vsp1_device *vsp1)
 
 	/* Instantiate all the entities. */
 	if (vsp1->info->features & VSP1_HAS_BRS) {
-		vsp1->brs = vsp1_bru_create(vsp1, VSP1_ENTITY_BRS);
+		vsp1->brs = vsp1_brx_create(vsp1, VSP1_ENTITY_BRS);
 		if (IS_ERR(vsp1->brs)) {
 			ret = PTR_ERR(vsp1->brs);
 			goto done;
@@ -279,7 +423,7 @@ static int vsp1_create_entities(struct vsp1_device *vsp1)
 	}
 
 	if (vsp1->info->features & VSP1_HAS_BRU) {
-		vsp1->bru = vsp1_bru_create(vsp1, VSP1_ENTITY_BRU);
+		vsp1->bru = vsp1_brx_create(vsp1, VSP1_ENTITY_BRU);
 		if (IS_ERR(vsp1->bru)) {
 			ret = PTR_ERR(vsp1->bru);
 			goto done;
@@ -413,6 +557,19 @@ static int vsp1_create_entities(struct vsp1_device *vsp1)
 		list_add_tail(&uds->entity.list_dev, &vsp1->entities);
 	}
 
+	for (i = 0; i < vsp1->info->uif_count; ++i) {
+		struct vsp1_uif *uif;
+
+		uif = vsp1_uif_create(vsp1, i);
+		if (IS_ERR(uif)) {
+			ret = PTR_ERR(uif);
+			goto done;
+		}
+
+		vsp1->uif[i] = uif;
+		list_add_tail(&uif->entity.list_dev, &vsp1->entities);
+	}
+
 	for (i = 0; i < vsp1->info->wpf_count; ++i) {
 		struct vsp1_rwpf *wpf;
 
@@ -479,7 +636,11 @@ int vsp1_reset_wpf(struct vsp1_device *vsp1, unsigned int index)
 	if (!(status & VI6_STATUS_SYS_ACT(index)))
 		return 0;
 
-	vsp1_write(vsp1, VI6_SRESET, VI6_SRESET_SRTS(index));
+	if (vsp1->ths_quirks & VSP1_UNDERRUN_WORKAROUND)
+		vsp1_underrun_workaround(vsp1, true);
+	else
+		vsp1_write(vsp1, VI6_SRESET, VI6_SRESET_SRTS(index));
+
 	for (timeout = 10; timeout > 0; --timeout) {
 		status = vsp1_read(vsp1, VI6_STATUS);
 		if (!(status & VI6_STATUS_SYS_ACT(index)))
@@ -517,6 +678,9 @@ static int vsp1_device_init(struct vsp1_device *vsp1)
 	for (i = 0; i < vsp1->info->uds_count; ++i)
 		vsp1_write(vsp1, VI6_DPR_UDS_ROUTE(i), VI6_DPR_NODE_UNUSED);
 
+	for (i = 0; i < vsp1->info->uif_count; ++i)
+		vsp1_write(vsp1, VI6_DPR_UIF_ROUTE(i), VI6_DPR_NODE_UNUSED);
+
 	vsp1_write(vsp1, VI6_DPR_SRU_ROUTE, VI6_DPR_NODE_UNUSED);
 	vsp1_write(vsp1, VI6_DPR_LUT_ROUTE, VI6_DPR_NODE_UNUSED);
 	vsp1_write(vsp1, VI6_DPR_CLU_ROUTE, VI6_DPR_NODE_UNUSED);
@@ -532,7 +696,12 @@ static int vsp1_device_init(struct vsp1_device *vsp1)
 	vsp1_write(vsp1, VI6_DPR_HGT_SMPPT, (7 << VI6_DPR_SMPPT_TGW_SHIFT) |
 		   (VI6_DPR_NODE_UNUSED << VI6_DPR_SMPPT_PT_SHIFT));
 
-	vsp1_dlm_setup(vsp1);
+	if (vsp1->info->lif_count == 2) {
+		vsp1_dlm_setup(vsp1, 0);
+		vsp1_dlm_setup(vsp1, 1);
+	} else {
+		vsp1_dlm_setup(vsp1, 0);
+	}
 
 	return 0;
 }
@@ -576,7 +745,7 @@ static int __maybe_unused vsp1_pm_suspend(struct device *dev)
 	 * restarted explicitly by the DU.
 	 */
 	if (!vsp1->drm)
-		vsp1_pipelines_suspend(vsp1);
+		vsp1_video_suspend(vsp1);
 
 	pm_runtime_force_suspend(vsp1->dev);
 
@@ -594,7 +763,7 @@ static int __maybe_unused vsp1_pm_resume(struct device *dev)
 	 * restarted explicitly by the DU.
 	 */
 	if (!vsp1->drm)
-		vsp1_pipelines_resume(vsp1);
+		vsp1_video_resume(vsp1);
 
 	return 0;
 }
@@ -744,6 +913,7 @@ static const struct vsp1_device_info vsp1_device_infos[] = {
 		.features = VSP1_HAS_BRU | VSP1_HAS_WPF_VFLIP,
 		.lif_count = 1,
 		.rpf_count = 5,
+		.uif_count = 1,
 		.wpf_count = 2,
 		.num_bru_inputs = 5,
 	}, {
@@ -753,6 +923,7 @@ static const struct vsp1_device_info vsp1_device_infos[] = {
 		.features = VSP1_HAS_BRS | VSP1_HAS_BRU,
 		.lif_count = 1,
 		.rpf_count = 5,
+		.uif_count = 1,
 		.wpf_count = 1,
 		.num_bru_inputs = 5,
 	}, {
@@ -762,6 +933,7 @@ static const struct vsp1_device_info vsp1_device_infos[] = {
 		.features = VSP1_HAS_BRS | VSP1_HAS_BRU,
 		.lif_count = 2,
 		.rpf_count = 5,
+		.uif_count = 2,
 		.wpf_count = 2,
 		.num_bru_inputs = 5,
 	},
@@ -775,6 +947,7 @@ static int vsp1_probe(struct platform_device *pdev)
 	struct resource *io;
 	unsigned int i;
 	int ret;
+	const struct soc_device_attribute *attr;
 
 	vsp1 = devm_kzalloc(&pdev->dev, sizeof(*vsp1), GFP_KERNEL);
 	if (vsp1 == NULL)
@@ -796,13 +969,6 @@ static int vsp1_probe(struct platform_device *pdev)
 	if (!irq) {
 		dev_err(&pdev->dev, "missing IRQ\n");
 		return -EINVAL;
-	}
-
-	ret = devm_request_irq(&pdev->dev, irq->start, vsp1_irq_handler,
-			      IRQF_SHARED, dev_name(&pdev->dev), vsp1);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to request IRQ\n");
-		return ret;
 	}
 
 	/* FCP (optional) */
@@ -836,6 +1002,12 @@ static int vsp1_probe(struct platform_device *pdev)
 	vsp1->version = vsp1_read(vsp1, VI6_IP_VERSION);
 	pm_runtime_put_sync(&pdev->dev);
 
+	attr = soc_device_match(ths_quirks_match);
+	if (attr)
+		vsp1->ths_quirks = (uintptr_t)attr->data;
+
+	pr_debug("%s: ths_quirks: 0x%x\n", __func__, vsp1->ths_quirks);
+
 	for (i = 0; i < ARRAY_SIZE(vsp1_device_infos); ++i) {
 		if ((vsp1->version & VI6_IP_VERSION_MODEL_MASK) ==
 		    vsp1_device_infos[i].version) {
@@ -853,6 +1025,28 @@ static int vsp1_probe(struct platform_device *pdev)
 
 	dev_dbg(&pdev->dev, "IP version 0x%08x\n", vsp1->version);
 
+	/* Disable interrupts before request irq.
+	 * If the interrupt is not cleared and starts up,
+	 * the driver may be malfunctioned.
+	 */
+	ret = pm_runtime_get_sync(&pdev->dev);
+	if (ret < 0)
+		goto done;
+
+	for (i = 0; i < vsp1->info->lif_count; ++i) {
+		vsp1_write(vsp1, VI6_DISP_IRQ_ENB(i), 0);
+		vsp1_write(vsp1, VI6_WPF_IRQ_ENB(i), 0);
+	}
+
+	pm_runtime_put_sync(&pdev->dev);
+
+	ret = devm_request_irq(&pdev->dev, irq->start, vsp1_irq_handler,
+			       IRQF_SHARED, dev_name(&pdev->dev), vsp1);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "failed to request IRQ\n");
+		goto done;
+	}
+
 	/* Instanciate entities */
 	ret = vsp1_create_entities(vsp1);
 	if (ret < 0) {
@@ -860,6 +1054,19 @@ static int vsp1_probe(struct platform_device *pdev)
 		goto done;
 	}
 
+	/* Set VSPD index */
+	if (strcmp(dev_name(vsp1->dev), "fea20000.vsp") == 0)
+		vsp1->index = 0;
+	else if (strcmp(dev_name(vsp1->dev), "fea28000.vsp") == 0)
+		vsp1->index = 1;
+	else if (strcmp(dev_name(vsp1->dev), "fea30000.vsp") == 0)
+		vsp1->index = 2;
+	else if (strcmp(dev_name(vsp1->dev), "fea38000.vsp") == 0)
+		vsp1->index = 3;
+
+	if (vsp1->ths_quirks & VSP1_UNDERRUN_WORKAROUND)
+		fcpv_reg[vsp1->index] =
+			ioremap(fcpvd_offset[vsp1->index], 0x20);
 done:
 	if (ret)
 		pm_runtime_disable(&pdev->dev);
@@ -875,6 +1082,9 @@ static int vsp1_remove(struct platform_device *pdev)
 	rcar_fcp_put(vsp1->fcp);
 
 	pm_runtime_disable(&pdev->dev);
+
+	if (vsp1->ths_quirks & VSP1_UNDERRUN_WORKAROUND)
+		iounmap(fcpv_reg[vsp1->index]);
 
 	return 0;
 }

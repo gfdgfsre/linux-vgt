@@ -559,6 +559,15 @@ static const struct mmu_notifier_ops gntdev_mmu_ops = {
 static int gntdev_open(struct inode *inode, struct file *flip)
 {
 	struct gntdev_priv *priv;
+#ifdef CONFIG_XEN_GRANT_DMA_ALLOC
+	/*
+	 * This is a workaround for 4.14 kernel:
+	 * of_dma_configure needs to access dev->bus->force_dma,
+	 * but misc device doesn't have bus. Provide one,
+	 * so of_dma_configure can complete.
+	 */
+	struct bus_type dma_dev_bus;
+#endif
 	int ret = 0;
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
@@ -570,7 +579,7 @@ static int gntdev_open(struct inode *inode, struct file *flip)
 	mutex_init(&priv->lock);
 
 #ifdef CONFIG_XEN_GNTDEV_DMABUF
-	priv->dmabuf_priv = gntdev_dmabuf_init();
+	priv->dmabuf_priv = gntdev_dmabuf_init(flip);
 	if (IS_ERR(priv->dmabuf_priv)) {
 		ret = PTR_ERR(priv->dmabuf_priv);
 		kfree(priv);
@@ -604,9 +613,10 @@ static int gntdev_open(struct inode *inode, struct file *flip)
 	 * Fix this by calling of_dma_configure() with a NULL node to set
 	 * default DMA ops.
 	 */
-	priv->dma_dev->bus = &priv->dma_dev_bus;
+	priv->dma_dev->bus = &dma_dev_bus;
 	priv->dma_dev->bus->force_dma = true;
 	of_dma_configure(priv->dma_dev, NULL);
+	priv->dma_dev->bus = NULL;
 #endif
 	pr_debug("priv %p\n", priv);
 
@@ -1032,17 +1042,11 @@ static long gntdev_ioctl(struct file *flip,
 	case IOCTL_GNTDEV_DMABUF_EXP_FROM_REFS:
 		return gntdev_ioctl_dmabuf_exp_from_refs(priv, use_ptemod, ptr);
 
-	case IOCTL_GNTDEV_DMABUF_EXP_FROM_REFS_V2:
-		return gntdev_ioctl_dmabuf_exp_from_refs_v2(priv, use_ptemod, ptr);
-
 	case IOCTL_GNTDEV_DMABUF_EXP_WAIT_RELEASED:
 		return gntdev_ioctl_dmabuf_exp_wait_released(priv, ptr);
 
 	case IOCTL_GNTDEV_DMABUF_IMP_TO_REFS:
 		return gntdev_ioctl_dmabuf_imp_to_refs(priv, ptr);
-
-	case IOCTL_GNTDEV_DMABUF_IMP_TO_REFS_V2:
-		return gntdev_ioctl_dmabuf_imp_to_refs_v2(priv, ptr);
 
 	case IOCTL_GNTDEV_DMABUF_IMP_RELEASE:
 		return gntdev_ioctl_dmabuf_imp_release(priv, ptr);

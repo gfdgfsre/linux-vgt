@@ -76,7 +76,7 @@ static LIST_HEAD(phy_fixup_list);
 static DEFINE_MUTEX(phy_fixup_lock);
 
 #ifdef CONFIG_PM
-static bool mdio_bus_phy_may_suspend(struct phy_device *phydev)
+static bool mdio_bus_phy_may_suspend(struct phy_device *phydev, bool suspend)
 {
 	struct device_driver *drv = phydev->mdio.dev.driver;
 	struct phy_driver *phydrv = to_phy_driver(drv);
@@ -88,10 +88,11 @@ static bool mdio_bus_phy_may_suspend(struct phy_device *phydev)
 	/* PHY not attached? May suspend if the PHY has not already been
 	 * suspended as part of a prior call to phy_disconnect() ->
 	 * phy_detach() -> phy_suspend() because the parent netdev might be the
-	 * MDIO bus driver and clock gated at this point.
+	 * MDIO bus driver and clock gated at this point. Also may resume if
+	 * PHY is not attached.
 	 */
 	if (!netdev)
-		return !phydev->suspended;
+		return suspend ? !phydev->suspended : phydev->suspended;
 
 	/* Don't suspend PHY if the attached netdev parent may wakeup.
 	 * The parent may point to a PCI device, as in tg3 driver.
@@ -121,7 +122,7 @@ static int mdio_bus_phy_suspend(struct device *dev)
 	if (phydev->attached_dev && phydev->adjust_link)
 		phy_stop_machine(phydev);
 
-	if (!mdio_bus_phy_may_suspend(phydev))
+	if (!mdio_bus_phy_may_suspend(phydev, true))
 		return 0;
 
 	return phy_suspend(phydev);
@@ -132,7 +133,7 @@ static int mdio_bus_phy_resume(struct device *dev)
 	struct phy_device *phydev = to_phy_device(dev);
 	int ret;
 
-	if (!mdio_bus_phy_may_suspend(phydev))
+	if (!mdio_bus_phy_may_suspend(phydev, false))
 		goto no_resume;
 
 	ret = phy_resume(phydev);
@@ -159,8 +160,11 @@ static int mdio_bus_phy_restore(struct device *dev)
 	if (ret < 0)
 		return ret;
 
-	if (phydev->attached_dev && phydev->adjust_link)
-		phy_start_machine(phydev);
+	/* The PHY needs to renegotiate. */
+	phydev->link = 0;
+	phydev->state = PHY_UP;
+
+	phy_start_machine(phydev);
 
 	return 0;
 }
@@ -629,6 +633,9 @@ int phy_device_register(struct phy_device *phydev)
 	if (err)
 		return err;
 
+	/* Deassert the reset signal */
+	phy_device_reset(phydev, 0);
+
 	/* Run all of the fixups for this PHY */
 	err = phy_scan_fixups(phydev);
 	if (err) {
@@ -647,6 +654,9 @@ int phy_device_register(struct phy_device *phydev)
 	return 0;
 
  out:
+	/* Assert the reset signal */
+	phy_device_reset(phydev, 1);
+
 	mdiobus_unregister_device(&phydev->mdio);
 	return err;
 }
@@ -663,6 +673,10 @@ EXPORT_SYMBOL(phy_device_register);
 void phy_device_remove(struct phy_device *phydev)
 {
 	device_del(&phydev->mdio.dev);
+
+	/* Assert the reset signal */
+	phy_device_reset(phydev, 1);
+
 	mdiobus_unregister_device(&phydev->mdio);
 }
 EXPORT_SYMBOL(phy_device_remove);
@@ -728,9 +742,6 @@ int phy_connect_direct(struct net_device *dev, struct phy_device *phydev,
 		       phy_interface_t interface)
 {
 	int rc;
-
-	if (!dev)
-		return -EINVAL;
 
 	rc = phy_attach_direct(dev, phydev, phydev->dev_flags, interface);
 	if (rc)
@@ -848,6 +859,9 @@ static int phy_poll_reset(struct phy_device *phydev)
 int phy_init_hw(struct phy_device *phydev)
 {
 	int ret = 0;
+
+	/* Deassert the reset signal */
+	phy_device_reset(phydev, 0);
 
 	if (!phydev->drv || !phydev->drv->config_init)
 		return 0;
@@ -1070,9 +1084,6 @@ struct phy_device *phy_attach(struct net_device *dev, const char *bus_id,
 	struct device *d;
 	int rc;
 
-	if (!dev)
-		return ERR_PTR(-EINVAL);
-
 	/* Search the list of PHY devices on the mdio bus for the
 	 * PHY with the requested name
 	 */
@@ -1136,6 +1147,9 @@ void phy_detach(struct phy_device *phydev)
 	put_device(&phydev->mdio.dev);
 	if (ndev_owner != bus->owner)
 		module_put(bus->owner);
+
+	/* Assert the reset signal */
+	phy_device_reset(phydev, 1);
 }
 EXPORT_SYMBOL(phy_detach);
 
@@ -1706,17 +1720,20 @@ EXPORT_SYMBOL(genphy_loopback);
 
 static int __set_phy_supported(struct phy_device *phydev, u32 max_speed)
 {
+	phydev->supported &= ~(PHY_1000BT_FEATURES | PHY_100BT_FEATURES |
+			       PHY_10BT_FEATURES);
+
 	switch (max_speed) {
-	case SPEED_10:
-		phydev->supported &= ~PHY_100BT_FEATURES;
-		/* fall through */
-	case SPEED_100:
-		phydev->supported &= ~PHY_1000BT_FEATURES;
-		break;
-	case SPEED_1000:
-		break;
 	default:
 		return -ENOTSUPP;
+	case SPEED_1000:
+		phydev->supported |= PHY_1000BT_FEATURES;
+		/* fall through */
+	case SPEED_100:
+		phydev->supported |= PHY_100BT_FEATURES;
+		/* fall through */
+	case SPEED_10:
+		phydev->supported |= PHY_10BT_FEATURES;
 	}
 
 	return 0;
@@ -1842,8 +1859,16 @@ static int phy_probe(struct device *dev)
 	/* Set the state to READY by default */
 	phydev->state = PHY_READY;
 
-	if (phydev->drv->probe)
+	if (phydev->drv->probe) {
+		/* Deassert the reset signal */
+		phy_device_reset(phydev, 0);
+
 		err = phydev->drv->probe(phydev);
+		if (err) {
+			/* Assert the reset signal */
+			phy_device_reset(phydev, 1);
+		}
+	}
 
 	mutex_unlock(&phydev->lock);
 
@@ -1860,8 +1885,12 @@ static int phy_remove(struct device *dev)
 	phydev->state = PHY_DOWN;
 	mutex_unlock(&phydev->lock);
 
-	if (phydev->drv && phydev->drv->remove)
+	if (phydev->drv && phydev->drv->remove) {
 		phydev->drv->remove(phydev);
+
+		/* Assert the reset signal */
+		phy_device_reset(phydev, 1);
+	}
 	phydev->drv = NULL;
 
 	return 0;

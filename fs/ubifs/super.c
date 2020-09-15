@@ -379,7 +379,9 @@ out:
 	}
 done:
 	clear_inode(inode);
-	fscrypt_put_encryption_info(inode);
+#ifdef CONFIG_UBIFS_FS_ENCRYPTION
+	fscrypt_put_encryption_info(inode, NULL);
+#endif
 }
 
 static void ubifs_dirty_inode(struct inode *inode, int flags)
@@ -1928,9 +1930,6 @@ static struct ubi_volume_desc *open_ubi(const char *name, int mode)
 	int dev, vol;
 	char *endptr;
 
-	if (!name || !*name)
-		return ERR_PTR(-EINVAL);
-
 	/* First, try to open using the device node path method */
 	ubi = ubi_open_volume_path(name, mode);
 	if (!IS_ERR(ubi))
@@ -2014,6 +2013,12 @@ static struct ubifs_info *alloc_ubifs_info(struct ubi_volume_desc *ubi)
 	return c;
 }
 
+#ifndef CONFIG_UBIFS_FS_ENCRYPTION
+const struct fscrypt_operations ubifs_crypt_operations = {
+	.is_encrypted		= __ubifs_crypt_is_encrypted,
+};
+#endif
+
 static int ubifs_fill_super(struct super_block *sb, void *data, int silent)
 {
 	struct ubifs_info *c = sb->s_fs_info;
@@ -2056,9 +2061,7 @@ static int ubifs_fill_super(struct super_block *sb, void *data, int silent)
 		sb->s_maxbytes = c->max_inode_sz = MAX_LFS_FILESIZE;
 	sb->s_op = &ubifs_super_operations;
 	sb->s_xattr = ubifs_xattr_handlers;
-#ifdef CONFIG_UBIFS_FS_ENCRYPTION
 	sb->s_cop = &ubifs_crypt_operations;
-#endif
 
 	mutex_lock(&c->umount_mutex);
 	err = mount_ubifs(c);

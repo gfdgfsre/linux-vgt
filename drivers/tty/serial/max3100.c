@@ -1,12 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  *
  *  Copyright (C) 2008 Christian Pellegrin <chripell@evolware.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
  *
  * Notes: the MAX3100 doesn't provide an interrupt on CTS so we have
  * to use polling for flow control. TX empty IRQ is unusable, since

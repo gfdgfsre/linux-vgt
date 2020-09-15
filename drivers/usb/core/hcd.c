@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * (C) Copyright Linus Torvalds 1999
  * (C) Copyright Johannes Erdfelt 1999-2001
@@ -2741,7 +2742,7 @@ int usb_add_hcd(struct usb_hcd *hcd,
 	int retval;
 	struct usb_device *rhdev;
 
-	if (IS_ENABLED(CONFIG_USB_PHY) && !hcd->usb_phy) {
+	if (IS_ENABLED(CONFIG_USB_PHY) && !hcd->skip_phy_initialization) {
 		struct usb_phy *phy = usb_get_phy_dev(hcd->self.sysdev, 0);
 
 		if (IS_ERR(phy)) {
@@ -2759,7 +2760,7 @@ int usb_add_hcd(struct usb_hcd *hcd,
 		}
 	}
 
-	if (IS_ENABLED(CONFIG_GENERIC_PHY) && !hcd->phy) {
+	if (IS_ENABLED(CONFIG_GENERIC_PHY) && !hcd->skip_phy_initialization) {
 		struct phy *phy = phy_get(hcd->self.sysdev, "usb");
 
 		if (IS_ERR(phy)) {
@@ -3052,9 +3053,6 @@ void
 usb_hcd_platform_shutdown(struct platform_device *dev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(dev);
-
-	/* No need for pm_runtime_put(), we're shutting down */
-	pm_runtime_get_sync(&dev->dev);
 
 	if (hcd->driver->shutdown)
 		hcd->driver->shutdown(hcd);

@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * vsp1_regs.h  --  R-Car VSP1 Registers Definitions
  *
- * Copyright (C) 2013 Renesas Electronics Corporation
+ * Copyright (C) 2013-2018 Renesas Electronics Corporation
  *
  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
  */
 
 #ifndef __VSP1_REGS_H__
@@ -31,22 +28,25 @@
 #define VI6_SRESET_SRTS(n)		(1 << (n))
 
 #define VI6_STATUS			0x0038
+#define VI6_STATUS_FLD_STD(n)		(1 << ((n) + 28))
 #define VI6_STATUS_SYS_ACT(n)		(1 << ((n) + 8))
 
 #define VI6_WPF_IRQ_ENB(n)		(0x0048 + (n) * 12)
+#define VI6_WFP_IRQ_ENB_UNDE		(1 << 16)
 #define VI6_WFP_IRQ_ENB_DFEE		(1 << 1)
 #define VI6_WFP_IRQ_ENB_FREE		(1 << 0)
 
 #define VI6_WPF_IRQ_STA(n)		(0x004c + (n) * 12)
+#define VI6_WFP_IRQ_STA_UND		(1 << 16)
 #define VI6_WFP_IRQ_STA_DFE		(1 << 1)
 #define VI6_WFP_IRQ_STA_FRE		(1 << 0)
 
-#define VI6_DISP_IRQ_ENB		0x0078
+#define VI6_DISP_IRQ_ENB(n)		(0x0078 + (n) * 60)
 #define VI6_DISP_IRQ_ENB_DSTE		(1 << 8)
 #define VI6_DISP_IRQ_ENB_MAEE		(1 << 5)
 #define VI6_DISP_IRQ_ENB_LNEE(n)	(1 << (n))
 
-#define VI6_DISP_IRQ_STA		0x007c
+#define VI6_DISP_IRQ_STA(n)		(0x007c + (n) * 60)
 #define VI6_DISP_IRQ_STA_DST		(1 << 8)
 #define VI6_DISP_IRQ_STA_MAE		(1 << 5)
 #define VI6_DISP_IRQ_STA_LNE(n)		(1 << (n))
@@ -70,12 +70,13 @@
 
 #define VI6_DL_HDR_ADDR(n)		(0x0104 + (n) * 4)
 
-#define VI6_DL_SWAP			0x0114
+#define VI6_DL_SWAP(n)			(0x0114 + (n) * 56)
+#define VI6_DL_SWAP_IND			(1 << 31)
 #define VI6_DL_SWAP_LWS			(1 << 2)
 #define VI6_DL_SWAP_WDS			(1 << 1)
 #define VI6_DL_SWAP_BTS			(1 << 0)
 
-#define VI6_DL_EXT_CTRL			0x011c
+#define VI6_DL_EXT_CTRL(n)		(0x011c + (n) * 36)
 #define VI6_DL_EXT_CTRL_NWE		(1 << 16)
 #define VI6_DL_EXT_CTRL_POLINT_MASK	(0x3f << 8)
 #define VI6_DL_EXT_CTRL_POLINT_SHIFT	8
@@ -225,7 +226,7 @@
 #define VI6_RPF_MULT_ALPHA_P_MMD_RATIO	(1 << 8)
 #define VI6_RPF_MULT_ALPHA_P_MMD_IMAGE	(2 << 8)
 #define VI6_RPF_MULT_ALPHA_P_MMD_BOTH	(3 << 8)
-#define VI6_RPF_MULT_ALPHA_RATIO_MASK	(0xff < 0)
+#define VI6_RPF_MULT_ALPHA_RATIO_MASK	(0xff << 0)
 #define VI6_RPF_MULT_ALPHA_RATIO_SHIFT	0
 
 /* -----------------------------------------------------------------------------
@@ -311,6 +312,44 @@
 #define VI6_WPF_WRBCK_CTRL_WBMD		(1 << 0)
 
 /* -----------------------------------------------------------------------------
+ * UIF Control Registers
+ */
+
+#define VI6_UIF_OFFSET			0x100
+
+#define VI6_UIF_DISCOM_DOCMCR		0x1c00
+#define VI6_UIF_DISCOM_DOCMCR_CMPRU	(1 << 16)
+#define VI6_UIF_DISCOM_DOCMCR_CMPR	(1 << 0)
+
+#define VI6_UIF_DISCOM_DOCMSTR		0x1c04
+#define VI6_UIF_DISCOM_DOCMSTR_CMPPRE	(1 << 1)
+#define VI6_UIF_DISCOM_DOCMSTR_CMPST	(1 << 0)
+
+#define VI6_UIF_DISCOM_DOCMCLSTR	0x1c08
+#define VI6_UIF_DISCOM_DOCMCLSTR_CMPCLPRE	(1 << 1)
+#define VI6_UIF_DISCOM_DOCMCLSTR_CMPCLST	(1 << 0)
+
+#define VI6_UIF_DISCOM_DOCMIENR		0x1c0c
+#define VI6_UIF_DISCOM_DOCMIENR_CMPPREIEN	(1 << 1)
+#define VI6_UIF_DISCOM_DOCMIENR_CMPIEN		(1 << 0)
+
+#define VI6_UIF_DISCOM_DOCMMDR		0x1c10
+#define VI6_UIF_DISCOM_DOCMMDR_INTHRH(n)	((n) << 16)
+
+#define VI6_UIF_DISCOM_DOCMPMR		0x1c14
+#define VI6_UIF_DISCOM_DOCMPMR_CMPDFF(n)	((n) << 17)
+#define VI6_UIF_DISCOM_DOCMPMR_CMPDFA(n)	((n) << 8)
+#define VI6_UIF_DISCOM_DOCMPMR_CMPDAUF		(1 << 7)
+#define VI6_UIF_DISCOM_DOCMPMR_SEL(n)		((n) << 0)
+
+#define VI6_UIF_DISCOM_DOCMECRCR	0x1c18
+#define VI6_UIF_DISCOM_DOCMCCRCR	0x1c1c
+#define VI6_UIF_DISCOM_DOCMSPXR		0x1c20
+#define VI6_UIF_DISCOM_DOCMSPYR		0x1c24
+#define VI6_UIF_DISCOM_DOCMSZXR		0x1c28
+#define VI6_UIF_DISCOM_DOCMSZYR		0x1c2c
+
+/* -----------------------------------------------------------------------------
  * DPR Control Registers
  */
 
@@ -342,7 +381,10 @@
 #define VI6_DPR_SMPPT_PT_MASK		(0x3f << 0)
 #define VI6_DPR_SMPPT_PT_SHIFT		0
 
+#define VI6_DPR_UIF_ROUTE(n)		(0x2074 + (n) * 4)
+
 #define VI6_DPR_NODE_RPF(n)		(n)
+#define VI6_DPR_NODE_UIF(n)		(12 + (n))
 #define VI6_DPR_NODE_SRU		16
 #define VI6_DPR_NODE_UDS(n)		(17 + (n))
 #define VI6_DPR_NODE_LUT		22
@@ -693,6 +735,11 @@
 #define VI6_LIF_CSBTH_LBTH_MASK		(0x7ff << 0)
 #define VI6_LIF_CSBTH_LBTH_SHIFT	0
 
+#define VI6_LIF_LBA			0x3b0c
+#define VI6_LIF_LBA_LBA0		(1 << 31)
+#define VI6_LIF_LBA_LBA1_MASK		(0xfff << 16)
+#define VI6_LIF_LBA_LBA1_SHIFT		16
+
 /* -----------------------------------------------------------------------------
  * Security Control Registers
  */
@@ -705,6 +752,7 @@
  */
 
 #define VI6_IP_VERSION			0x3f00
+#define VI6_IP_VERSION_MASK		(0xffff << 0)
 #define VI6_IP_VERSION_MODEL_MASK	(0xff << 8)
 #define VI6_IP_VERSION_MODEL_VSPS_H2	(0x09 << 8)
 #define VI6_IP_VERSION_MODEL_VSPR_H2	(0x0a << 8)
@@ -800,5 +848,45 @@
 #define VI6_FMT_Y_U_V_444		0x4a
 #define VI6_FMT_Y_U_V_422		0x4b
 #define VI6_FMT_Y_U_V_420		0x4c
+
+/* -----------------------------------------------------------------------------
+ * for workaround in H3(ES1.x)
+ */
+#define	FCPVD0_REG			0xfea27000
+#define	FCPVD1_REG			0xfea2f000
+#define	FCPVD2_REG			0xfea37000
+#define	FCPVD3_REG			0xfea3f000
+
+#define FCP_RST_REG			0x0010
+#define FCP_RST_SOFTRST			0x00000001
+#define FCP_RST_WORKAROUND		0x00000010
+
+#define FCP_STA_REG			0x0018
+#define FCP_STA_ACT			0x00000001
+
+#define VI6_CLK_CTRL0			0x0010
+#define VI6_CLK_CTRL0_WORKAROUND	0x10010f1f
+
+#define VI6_CLK_CTRL1			0x0014
+#define VI6_CLK_CTRL1_WORKAROUND	0xff00ffff
+
+#define VI6_CLK_DCSWT_WORKAROUND1	0x00130808
+#define VI6_CLK_DCSWT_WORKAROUND2	0x00000808
+
+#define VI6_CLK_DCSM0			0x001c
+#define VI6_CLK_DCSM0_WORKAROUND	0x1fff0f1f
+
+#define VI6_CLK_DCSM1			0x0020
+#define VI6_CLK_DCSM1_WORKAROUND	0xff00ffff
+
+#define VI6_MRESET_ENB0			0x002c
+#define VI6_MRESET_ENB0_WORKAROUND1	0x0000001f
+#define VI6_MRESET_ENB0_WORKAROUND2	0x30000f1f
+
+#define VI6_MRESET_ENB1			0x0030
+#define VI6_MRESET_ENB1_WORKAROUND	0xff00ffff
+
+#define VI6_MRESET			0x0034
+#define VI6_MRESET_WORKAROUND		0x00000001
 
 #endif /* __VSP1_REGS_H__ */
