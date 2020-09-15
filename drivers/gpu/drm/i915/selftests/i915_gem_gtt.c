@@ -39,7 +39,8 @@ static void fake_free_pages(struct drm_i915_gem_object *obj,
 	kfree(pages);
 }
 
-static int fake_get_pages(struct drm_i915_gem_object *obj)
+static struct sg_table *
+fake_get_pages(struct drm_i915_gem_object *obj)
 {
 #define GFP (GFP_KERNEL | __GFP_NOWARN | __GFP_NORETRY)
 #define PFN_BIAS 0x1000
@@ -49,12 +50,12 @@ static int fake_get_pages(struct drm_i915_gem_object *obj)
 
 	pages = kmalloc(sizeof(*pages), GFP);
 	if (!pages)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 
 	rem = round_up(obj->base.size, BIT(31)) >> 31;
 	if (sg_alloc_table(pages, rem, GFP)) {
 		kfree(pages);
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	rem = obj->base.size;
@@ -71,10 +72,7 @@ static int fake_get_pages(struct drm_i915_gem_object *obj)
 	GEM_BUG_ON(rem);
 
 	obj->mm.madv = I915_MADV_DONTNEED;
-
-	__i915_gem_object_set_pages(obj, pages);
-
-	return 0;
+	return pages;
 #undef GFP
 }
 

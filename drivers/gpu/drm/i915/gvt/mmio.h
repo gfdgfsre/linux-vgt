@@ -65,17 +65,11 @@ struct intel_gvt_mmio_info {
 	struct hlist_node node;
 };
 
-int intel_gvt_render_mmio_to_ring_id(struct intel_gvt *gvt,
-		unsigned int reg);
 unsigned long intel_gvt_get_device_type(struct intel_gvt *gvt);
 bool intel_gvt_match_device(struct intel_gvt *gvt, unsigned long device);
 
 int intel_gvt_setup_mmio_info(struct intel_gvt *gvt);
 void intel_gvt_clean_mmio_info(struct intel_gvt *gvt);
-int intel_gvt_for_each_tracked_mmio(struct intel_gvt *gvt,
-	int (*handler)(struct intel_gvt *gvt, u32 offset, void *data),
-	void *data);
-
 
 #define INTEL_GVT_MMIO_OFFSET(reg) ({ \
 	typeof(reg) __reg = reg; \
@@ -88,7 +82,6 @@ void intel_vgpu_reset_mmio(struct intel_vgpu *vgpu, bool dmlr);
 void intel_vgpu_clean_mmio(struct intel_vgpu *vgpu);
 
 int intel_vgpu_gpa_to_mmio_offset(struct intel_vgpu *vgpu, u64 gpa);
-int intel_vgpu_mmio_offset_to_gpa(struct intel_vgpu *vgpu, u64 offset);
 
 int intel_vgpu_emulate_mmio_read(struct intel_vgpu *vgpu, u64 pa,
 				void *p_data, unsigned int bytes);

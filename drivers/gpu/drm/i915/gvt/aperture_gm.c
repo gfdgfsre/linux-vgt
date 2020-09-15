@@ -144,10 +144,8 @@ void intel_vgpu_write_fence(struct intel_vgpu *vgpu,
 	I915_WRITE(fence_reg_lo, 0);
 	POSTING_READ(fence_reg_lo);
 
-	I915_WRITE(fence_reg_hi,
-		intel_gvt_reg_g2h(vgpu, upper_32_bits(value), 0xFFFFF000));
-	I915_WRITE(fence_reg_lo,
-		intel_gvt_reg_g2h(vgpu, lower_32_bits(value), 0xFFFFF000));
+	I915_WRITE(fence_reg_hi, upper_32_bits(value));
+	I915_WRITE(fence_reg_lo, lower_32_bits(value));
 	POSTING_READ(fence_reg_lo);
 }
 
@@ -175,8 +173,8 @@ static void free_vgpu_fence(struct intel_vgpu *vgpu)
 	_clear_vgpu_fence(vgpu);
 	for (i = 0; i < vgpu_fence_sz(vgpu); i++) {
 		reg = vgpu->fence.regs[i];
-		i915_unreserve_fence(reg);
-		vgpu->fence.regs[i] = NULL;
+		list_add_tail(&reg->link,
+			      &dev_priv->mm.fence_list);
 	}
 	mutex_unlock(&dev_priv->drm.struct_mutex);
 
@@ -189,19 +187,24 @@ static int alloc_vgpu_fence(struct intel_vgpu *vgpu)
 	struct drm_i915_private *dev_priv = gvt->dev_priv;
 	struct drm_i915_fence_reg *reg;
 	int i;
+	struct list_head *pos, *q;
 
 	intel_runtime_pm_get(dev_priv);
 
 	/* Request fences from host */
 	mutex_lock(&dev_priv->drm.struct_mutex);
-
-	for (i = 0; i < vgpu_fence_sz(vgpu); i++) {
-		reg = i915_reserve_fence(dev_priv);
-		if (IS_ERR(reg))
-			goto out_free_fence;
-
+	i = 0;
+	list_for_each_safe(pos, q, &dev_priv->mm.fence_list) {
+		reg = list_entry(pos, struct drm_i915_fence_reg, link);
+		if (reg->pin_count || reg->vma)
+			continue;
+		list_del(pos);
 		vgpu->fence.regs[i] = reg;
+		if (++i == vgpu_fence_sz(vgpu))
+			break;
 	}
+	if (i != vgpu_fence_sz(vgpu))
+		goto out_free_fence;
 
 	_clear_vgpu_fence(vgpu);
 
@@ -209,14 +212,13 @@ static int alloc_vgpu_fence(struct intel_vgpu *vgpu)
 	intel_runtime_pm_put(dev_priv);
 	return 0;
 out_free_fence:
-	gvt_vgpu_err("Failed to alloc fences\n");
 	/* Return fences to host, if fail */
 	for (i = 0; i < vgpu_fence_sz(vgpu); i++) {
 		reg = vgpu->fence.regs[i];
 		if (!reg)
 			continue;
-		i915_unreserve_fence(reg);
-		vgpu->fence.regs[i] = NULL;
+		list_add_tail(&reg->link,
+			      &dev_priv->mm.fence_list);
 	}
 	mutex_unlock(&dev_priv->drm.struct_mutex);
 	intel_runtime_pm_put(dev_priv);

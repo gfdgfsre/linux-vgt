@@ -54,10 +54,6 @@ static const struct intel_gvt_ops intel_gvt_ops = {
 	.vgpu_reset = intel_gvt_reset_vgpu,
 	.vgpu_activate = intel_gvt_activate_vgpu,
 	.vgpu_deactivate = intel_gvt_deactivate_vgpu,
-	.vgpu_save_restore = intel_gvt_save_restore,
-	.vgpu_query_plane = intel_vgpu_query_plane,
-	.vgpu_get_dmabuf = intel_vgpu_get_dmabuf,
-	.write_protect_handler = intel_vgpu_write_protect_handler,
 };
 
 /**
@@ -115,7 +111,7 @@ static void init_device_info(struct intel_gvt *gvt)
 	if (IS_BROADWELL(gvt->dev_priv) || IS_SKYLAKE(gvt->dev_priv)
 		|| IS_KABYLAKE(gvt->dev_priv)) {
 		info->max_support_vgpus = 8;
-		info->cfg_space_size = PCI_CFG_SPACE_EXP_SIZE;
+		info->cfg_space_size = 256;
 		info->mmio_size = 2 * 1024 * 1024;
 		info->mmio_bar = 0;
 		info->gtt_start_offset = 8 * 1024 * 1024;
@@ -195,11 +191,11 @@ void intel_gvt_clean_device(struct drm_i915_private *dev_priv)
 	if (WARN_ON(!gvt))
 		return;
 
-	intel_gvt_debugfs_clean(gvt);
 	clean_service_thread(gvt);
 	intel_gvt_clean_cmd_parser(gvt);
 	intel_gvt_clean_sched_policy(gvt);
 	intel_gvt_clean_workload_scheduler(gvt);
+	intel_gvt_clean_opregion(gvt);
 	intel_gvt_clean_gtt(gvt);
 	intel_gvt_clean_irq(gvt);
 	intel_gvt_clean_mmio_info(gvt);
@@ -260,8 +256,6 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
 	if (ret)
 		goto out_clean_idr;
 
-	intel_gvt_init_engine_mmio_context(gvt);
-
 	ret = intel_gvt_load_firmware(gvt);
 	if (ret)
 		goto out_clean_mmio_info;
@@ -274,9 +268,13 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
 	if (ret)
 		goto out_clean_irq;
 
-	ret = intel_gvt_init_workload_scheduler(gvt);
+	ret = intel_gvt_init_opregion(gvt);
 	if (ret)
 		goto out_clean_gtt;
+
+	ret = intel_gvt_init_workload_scheduler(gvt);
+	if (ret)
+		goto out_clean_opregion;
 
 	ret = intel_gvt_init_sched_policy(gvt);
 	if (ret)
@@ -309,10 +307,6 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
 	}
 	gvt->idle_vgpu = vgpu;
 
-	ret = intel_gvt_debugfs_init(gvt);
-	if (ret)
-		gvt_err("debugfs registeration failed, go on.\n");
-
 	gvt_dbg_core("gvt device initialization is done\n");
 	dev_priv->gvt = gvt;
 	return 0;
@@ -327,6 +321,8 @@ out_clean_sched_policy:
 	intel_gvt_clean_sched_policy(gvt);
 out_clean_workload_scheduler:
 	intel_gvt_clean_workload_scheduler(gvt);
+out_clean_opregion:
+	intel_gvt_clean_opregion(gvt);
 out_clean_gtt:
 	intel_gvt_clean_gtt(gvt);
 out_clean_irq:

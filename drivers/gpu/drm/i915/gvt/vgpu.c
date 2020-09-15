@@ -44,7 +44,8 @@ void populate_pvinfo_page(struct intel_vgpu *vgpu)
 	vgpu_vreg(vgpu, vgtif_reg(display_ready)) = 0;
 	vgpu_vreg(vgpu, vgtif_reg(vgt_id)) = vgpu->id;
 	vgpu_vreg(vgpu, vgtif_reg(vgt_caps)) = VGT_CAPS_FULL_48BIT_PPGTT;
-	vgpu_vreg(vgpu, vgtif_reg(avail_rs.mappable_gmadr.base)) = 0;
+	vgpu_vreg(vgpu, vgtif_reg(avail_rs.mappable_gmadr.base)) =
+		vgpu_aperture_gmadr_base(vgpu);
 	vgpu_vreg(vgpu, vgtif_reg(avail_rs.mappable_gmadr.size)) =
 		vgpu_aperture_sz(vgpu);
 	vgpu_vreg(vgpu, vgtif_reg(avail_rs.nonmappable_gmadr.base)) =
@@ -206,7 +207,6 @@ void intel_gvt_activate_vgpu(struct intel_vgpu *vgpu)
 {
 	mutex_lock(&vgpu->gvt->lock);
 	vgpu->active = true;
-	intel_vgpu_start_schedule(vgpu);
 	mutex_unlock(&vgpu->gvt->lock);
 }
 
@@ -233,7 +233,6 @@ void intel_gvt_deactivate_vgpu(struct intel_vgpu *vgpu)
 	}
 
 	intel_vgpu_stop_schedule(vgpu);
-	intel_vgpu_dmabuf_cleanup(vgpu);
 
 	mutex_unlock(&gvt->lock);
 }
@@ -253,10 +252,9 @@ void intel_gvt_destroy_vgpu(struct intel_vgpu *vgpu)
 
 	WARN(vgpu->active, "vGPU is still active!\n");
 
-	intel_gvt_debugfs_remove_vgpu(vgpu);
 	idr_remove(&gvt->vgpu_idr, vgpu->id);
 	intel_vgpu_clean_sched_policy(vgpu);
-	intel_vgpu_clean_submission(vgpu);
+	intel_vgpu_clean_gvt_context(vgpu);
 	intel_vgpu_clean_execlist(vgpu);
 	intel_vgpu_clean_display(vgpu);
 	intel_vgpu_clean_opregion(vgpu);
@@ -264,7 +262,6 @@ void intel_gvt_destroy_vgpu(struct intel_vgpu *vgpu)
 	intel_gvt_hypervisor_detach_vgpu(vgpu);
 	intel_vgpu_free_resource(vgpu);
 	intel_vgpu_clean_mmio(vgpu);
-	intel_vgpu_dmabuf_cleanup(vgpu);
 	vfree(vgpu);
 
 	intel_gvt_update_vgpu_types(gvt);
@@ -351,8 +348,6 @@ static struct intel_vgpu *__intel_gvt_create_vgpu(struct intel_gvt *gvt,
 	vgpu->sched_ctl.weight = param->weight;
 	bitmap_zero(vgpu->tlb_handle_pending, I915_NUM_ENGINES);
 
-	INIT_LIST_HEAD(&vgpu->dmabuf_obj_list_head);
-	idr_init(&vgpu->object_idr);
 	intel_vgpu_init_cfg_space(vgpu, param->primary);
 
 	ret = intel_vgpu_init_mmio(vgpu);
@@ -373,44 +368,32 @@ static struct intel_vgpu *__intel_gvt_create_vgpu(struct intel_gvt *gvt,
 	if (ret)
 		goto out_detach_hypervisor_vgpu;
 
-	ret = intel_vgpu_init_opregion(vgpu);
-	if (ret)
-		goto out_clean_gtt;
-
 	ret = intel_vgpu_init_display(vgpu, param->resolution);
 	if (ret)
-		goto out_clean_opregion;
+		goto out_clean_gtt;
 
 	ret = intel_vgpu_init_execlist(vgpu);
 	if (ret)
 		goto out_clean_display;
 
-	ret = intel_vgpu_setup_submission(vgpu);
+	ret = intel_vgpu_init_gvt_context(vgpu);
 	if (ret)
 		goto out_clean_execlist;
 
 	ret = intel_vgpu_init_sched_policy(vgpu);
 	if (ret)
-		goto out_clean_submission;
-
-	ret = intel_gvt_debugfs_add_vgpu(vgpu);
-	if (ret)
-		goto out_clean_sched_policy;
+		goto out_clean_shadow_ctx;
 
 	mutex_unlock(&gvt->lock);
 
 	return vgpu;
 
-out_clean_sched_policy:
-	intel_vgpu_clean_sched_policy(vgpu);
-out_clean_submission:
-	intel_vgpu_clean_submission(vgpu);
+out_clean_shadow_ctx:
+	intel_vgpu_clean_gvt_context(vgpu);
 out_clean_execlist:
 	intel_vgpu_clean_execlist(vgpu);
 out_clean_display:
 	intel_vgpu_clean_display(vgpu);
-out_clean_opregion:
-	intel_vgpu_clean_opregion(vgpu);
 out_clean_gtt:
 	intel_vgpu_clean_gtt(vgpu);
 out_detach_hypervisor_vgpu:
@@ -498,9 +481,6 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
 {
 	struct intel_gvt *gvt = vgpu->gvt;
 	struct intel_gvt_workload_scheduler *scheduler = &gvt->scheduler;
-	u64 maddr = vgpu_vreg(vgpu, vgtif_reg(avail_rs.mappable_gmadr.base));
-	u64 unmaddr = vgpu_vreg(vgpu,
-				vgtif_reg(avail_rs.nonmappable_gmadr.base));
 	unsigned int resetting_eng = dmlr ? ALL_ENGINES : engine_mask;
 
 	gvt_dbg_core("------------------------------------------\n");
@@ -524,7 +504,7 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
 
 	/* full GPU reset or device model level reset */
 	if (engine_mask == ALL_ENGINES || dmlr) {
-		intel_vgpu_invalidate_ppgtt(vgpu);
+
 		/*fence will not be reset during virtual reset */
 		if (dmlr) {
 			intel_vgpu_reset_gtt(vgpu);
@@ -533,10 +513,6 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
 
 		intel_vgpu_reset_mmio(vgpu, dmlr);
 		populate_pvinfo_page(vgpu);
-		vgpu_vreg(vgpu, vgtif_reg(avail_rs.mappable_gmadr.base)) =
-			maddr;
-		vgpu_vreg(vgpu, vgtif_reg(avail_rs.nonmappable_gmadr.base)) =
-			unmaddr;
 		intel_vgpu_reset_display(vgpu);
 
 		if (dmlr) {

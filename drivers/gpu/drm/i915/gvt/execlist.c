@@ -358,8 +358,9 @@ static int emulate_execlist_schedule_in(struct intel_vgpu_execlist *execlist,
 	return 0;
 }
 
-void free_workload(struct intel_vgpu_workload *workload)
+static void free_workload(struct intel_vgpu_workload *workload)
 {
+	intel_vgpu_unpin_mm(workload->shadow_mm);
 	intel_gvt_mm_unreference(workload->shadow_mm);
 	kmem_cache_free(workload->vgpu->workloads, workload);
 }
@@ -367,7 +368,7 @@ void free_workload(struct intel_vgpu_workload *workload)
 #define get_desc_from_elsp_dwords(ed, i) \
 	((struct execlist_ctx_descriptor_format *)&((ed)->data[i * 2]))
 
-static int prepare_shadow_batch_buffer(struct intel_vgpu_workload *workload)
+static void prepare_shadow_batch_buffer(struct intel_vgpu_workload *workload)
 {
 	const int gmadr_bytes = workload->vgpu->gvt->device_info.gmadr_bytes_in_cmd;
 	struct intel_shadow_bb_entry *entry_obj;
@@ -378,7 +379,7 @@ static int prepare_shadow_batch_buffer(struct intel_vgpu_workload *workload)
 
 		vma = i915_gem_object_ggtt_pin(entry_obj->obj, NULL, 0, 4, 0);
 		if (IS_ERR(vma)) {
-			return PTR_ERR(vma);
+			return;
 		}
 
 		/* FIXME: we are not tracking our pinned VMA leaving it
@@ -386,17 +387,11 @@ static int prepare_shadow_batch_buffer(struct intel_vgpu_workload *workload)
 		 * free.
 		 */
 
-		if (entry_obj->bb_offset)
-			entry_obj->bb_start_cmd_va =
-				workload->shadow_ring_buffer_va +
-				entry_obj->bb_offset;
-
 		/* update the relocate gma with shadow batch buffer*/
 		entry_obj->bb_start_cmd_va[1] = i915_ggtt_offset(vma);
 		if (gmadr_bytes == 8)
 			entry_obj->bb_start_cmd_va[2] = 0;
 	}
-	return 0;
 }
 
 static int update_wa_ctx_2_shadow_ctx(struct intel_shadow_wa_ctx *wa_ctx)
@@ -425,7 +420,7 @@ static int update_wa_ctx_2_shadow_ctx(struct intel_shadow_wa_ctx *wa_ctx)
 	return 0;
 }
 
-static int prepare_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
+static void prepare_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
 {
 	struct i915_vma *vma;
 	unsigned char *per_ctx_va =
@@ -433,12 +428,12 @@ static int prepare_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
 		wa_ctx->indirect_ctx.size;
 
 	if (wa_ctx->indirect_ctx.size == 0)
-		return 0;
+		return;
 
 	vma = i915_gem_object_ggtt_pin(wa_ctx->indirect_ctx.obj, NULL,
 				       0, CACHELINE_BYTES, 0);
 	if (IS_ERR(vma)) {
-		return PTR_ERR(vma);
+		return;
 	}
 
 	/* FIXME: we are not tracking our pinned VMA leaving it
@@ -452,7 +447,26 @@ static int prepare_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
 	memset(per_ctx_va, 0, CACHELINE_BYTES);
 
 	update_wa_ctx_2_shadow_ctx(wa_ctx);
-	return 0;
+}
+
+static int prepare_execlist_workload(struct intel_vgpu_workload *workload)
+{
+	struct intel_vgpu *vgpu = workload->vgpu;
+	struct execlist_ctx_descriptor_format ctx[2];
+	int ring_id = workload->ring_id;
+
+	intel_vgpu_pin_mm(workload->shadow_mm);
+	intel_vgpu_sync_oos_pages(workload->vgpu);
+	intel_vgpu_flush_post_shadow(workload->vgpu);
+	prepare_shadow_batch_buffer(workload);
+	prepare_shadow_wa_ctx(&workload->wa_ctx);
+	if (!workload->emulate_schedule_in)
+		return 0;
+
+	ctx[0] = *get_desc_from_elsp_dwords(&workload->elsp_dwords, 1);
+	ctx[1] = *get_desc_from_elsp_dwords(&workload->elsp_dwords, 0);
+
+	return emulate_execlist_schedule_in(&vgpu->execlist[ring_id], ctx);
 }
 
 static void release_shadow_batch_buffer(struct intel_vgpu_workload *workload)
@@ -475,68 +489,13 @@ static void release_shadow_batch_buffer(struct intel_vgpu_workload *workload)
 	}
 }
 
-static int prepare_execlist_workload(struct intel_vgpu_workload *workload)
+static void release_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
 {
-	struct intel_vgpu *vgpu = workload->vgpu;
-	struct execlist_ctx_descriptor_format ctx[2];
-	int ring_id = workload->ring_id;
-	int ret;
+	if (!wa_ctx->indirect_ctx.obj)
+		return;
 
-	ret = intel_vgpu_pin_mm(workload->shadow_mm);
-	if (ret) {
-		gvt_vgpu_err("fail to vgpu pin mm\n");
-		goto out;
-	}
-
-	ret = intel_vgpu_sync_oos_pages(workload->vgpu);
-	if (ret) {
-		gvt_vgpu_err("fail to vgpu sync oos pages\n");
-		goto err_unpin_mm;
-	}
-
-	ret = intel_vgpu_flush_post_shadow(workload->vgpu);
-	if (ret) {
-		gvt_vgpu_err("fail to flush post shadow\n");
-		goto err_unpin_mm;
-	}
-
-	ret = intel_gvt_generate_request(workload);
-	if (ret) {
-		gvt_vgpu_err("fail to generate request\n");
-		goto err_unpin_mm;
-	}
-
-	ret = prepare_shadow_batch_buffer(workload);
-	if (ret) {
-		gvt_vgpu_err("fail to prepare_shadow_batch_buffer\n");
-		goto err_unpin_mm;
-	}
-
-	ret = prepare_shadow_wa_ctx(&workload->wa_ctx);
-	if (ret) {
-		gvt_vgpu_err("fail to prepare_shadow_wa_ctx\n");
-		goto err_shadow_batch;
-	}
-
-	if (!workload->emulate_schedule_in)
-		return 0;
-
-	ctx[0] = *get_desc_from_elsp_dwords(&workload->elsp_dwords, 0);
-	ctx[1] = *get_desc_from_elsp_dwords(&workload->elsp_dwords, 1);
-
-	ret = emulate_execlist_schedule_in(&vgpu->execlist[ring_id], ctx);
-	if (!ret)
-		goto out;
-	else
-		gvt_vgpu_err("fail to emulate execlist schedule in\n");
-
-	release_shadow_wa_ctx(&workload->wa_ctx);
-err_shadow_batch:
-	release_shadow_batch_buffer(workload);
-err_unpin_mm:
-	intel_vgpu_unpin_mm(workload->shadow_mm);
-out:
-	return ret;
+	i915_gem_object_unpin_map(wa_ctx->indirect_ctx.obj);
+	i915_gem_object_put(wa_ctx->indirect_ctx.obj);
 }
 
 static int complete_execlist_workload(struct intel_vgpu_workload *workload)
@@ -547,15 +506,13 @@ static int complete_execlist_workload(struct intel_vgpu_workload *workload)
 	struct intel_vgpu_workload *next_workload;
 	struct list_head *next = workload_q_head(vgpu, ring_id)->next;
 	bool lite_restore = false;
-	int ret = 0;
+	int ret;
 
 	gvt_dbg_el("complete workload %p status %d\n", workload,
 			workload->status);
 
-	if (!workload->status) {
-		release_shadow_batch_buffer(workload);
-		release_shadow_wa_ctx(&workload->wa_ctx);
-	}
+	release_shadow_batch_buffer(workload);
+	release_shadow_wa_ctx(&workload->wa_ctx);
 
 	if (workload->status || (vgpu->resetting_eng & ENGINE_MASK(ring_id))) {
 		/* if workload->status is not successful means HW GPU
@@ -588,12 +545,17 @@ static int complete_execlist_workload(struct intel_vgpu_workload *workload)
 
 	if (lite_restore) {
 		gvt_dbg_el("next context == current - no schedule-out\n");
-		goto out;
+		free_workload(workload);
+		return 0;
 	}
 
 	ret = emulate_execlist_ctx_schedule_out(execlist, &workload->ctx_desc);
+	if (ret)
+		goto err;
 out:
-	intel_vgpu_unpin_mm(workload->shadow_mm);
+	free_workload(workload);
+	return 0;
+err:
 	free_workload(workload);
 	return ret;
 }
@@ -653,7 +615,7 @@ static int prepare_mm(struct intel_vgpu_workload *workload)
 	(list_empty(q) ? NULL : container_of(q->prev, \
 	struct intel_vgpu_workload, list))
 
-int submit_context(struct intel_vgpu *vgpu, int ring_id,
+static int submit_context(struct intel_vgpu *vgpu, int ring_id,
 		struct execlist_ctx_descriptor_format *desc,
 		bool emulate_schedule_in)
 {
@@ -763,42 +725,33 @@ int submit_context(struct intel_vgpu *vgpu, int ring_id,
 	if (list_empty(workload_q_head(vgpu, ring_id))) {
 		intel_runtime_pm_get(dev_priv);
 		mutex_lock(&dev_priv->drm.struct_mutex);
-		ret = intel_gvt_scan_and_shadow_workload(workload);
+		intel_gvt_scan_and_shadow_workload(workload);
 		mutex_unlock(&dev_priv->drm.struct_mutex);
 		intel_runtime_pm_put(dev_priv);
 	}
 
-	if (ret == 0)
-		queue_workload(workload);
-	else {
-		free_workload(workload);
-		if (vgpu_is_vm_unhealthy(ret)) {
-			intel_vgpu_clean_execlist(vgpu);
-			enter_failsafe_mode(vgpu, GVT_FAILSAFE_GUEST_ERR);
-		}
-	}
-	return ret;
-
+	queue_workload(workload);
+	return 0;
 }
 
 int intel_vgpu_submit_execlist(struct intel_vgpu *vgpu, int ring_id)
 {
 	struct intel_vgpu_execlist *execlist = &vgpu->execlist[ring_id];
-	struct execlist_ctx_descriptor_format *desc[2];
+	struct execlist_ctx_descriptor_format desc[2];
 	int i, ret;
 
-	desc[0] = get_desc_from_elsp_dwords(&execlist->elsp_dwords, 0);
-	desc[1] = get_desc_from_elsp_dwords(&execlist->elsp_dwords, 1);
+	desc[0] = *get_desc_from_elsp_dwords(&execlist->elsp_dwords, 1);
+	desc[1] = *get_desc_from_elsp_dwords(&execlist->elsp_dwords, 0);
 
-	if (!desc[0]->valid) {
+	if (!desc[0].valid) {
 		gvt_vgpu_err("invalid elsp submission, desc0 is invalid\n");
 		goto inv_desc;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(desc); i++) {
-		if (!desc[i]->valid)
+		if (!desc[i].valid)
 			continue;
-		if (!desc[i]->privilege_access) {
+		if (!desc[i].privilege_access) {
 			gvt_vgpu_err("unexpected GGTT elsp submission\n");
 			goto inv_desc;
 		}
@@ -806,9 +759,9 @@ int intel_vgpu_submit_execlist(struct intel_vgpu *vgpu, int ring_id)
 
 	/* submit workload */
 	for (i = 0; i < ARRAY_SIZE(desc); i++) {
-		if (!desc[i]->valid)
+		if (!desc[i].valid)
 			continue;
-		ret = submit_context(vgpu, ring_id, desc[i], i == 0);
+		ret = submit_context(vgpu, ring_id, &desc[i], i == 0);
 		if (ret) {
 			gvt_vgpu_err("failed to submit desc %d\n", i);
 			return ret;
@@ -819,7 +772,7 @@ int intel_vgpu_submit_execlist(struct intel_vgpu *vgpu, int ring_id)
 
 inv_desc:
 	gvt_vgpu_err("descriptors content: desc0 %08x %08x desc1 %08x %08x\n",
-		     desc[0]->udw, desc[0]->ldw, desc[1]->udw, desc[1]->ldw);
+		     desc[0].udw, desc[0].ldw, desc[1].udw, desc[1].ldw);
 	return -EINVAL;
 }
 
@@ -866,47 +819,30 @@ static void clean_workloads(struct intel_vgpu *vgpu, unsigned long engine_mask)
 
 void intel_vgpu_clean_execlist(struct intel_vgpu *vgpu)
 {
-	enum intel_engine_id i;
-	struct intel_engine_cs *engine;
-
 	clean_workloads(vgpu, ALL_ENGINES);
-
-	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
-		kfree(vgpu->reserve_ring_buffer_va[i]);
-		vgpu->reserve_ring_buffer_va[i] = NULL;
-		vgpu->reserve_ring_buffer_size[i] = 0;
-	}
+	kmem_cache_destroy(vgpu->workloads);
 }
 
-#define RESERVE_RING_BUFFER_SIZE		((1 * PAGE_SIZE)/8)
 int intel_vgpu_init_execlist(struct intel_vgpu *vgpu)
 {
 	enum intel_engine_id i;
 	struct intel_engine_cs *engine;
 
-	for_each_engine(engine, vgpu->gvt->dev_priv, i)
+	/* each ring has a virtual execlist engine */
+	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
 		init_vgpu_execlist(vgpu, i);
+		INIT_LIST_HEAD(&vgpu->workload_q_head[i]);
+	}
 
-	/* each ring has a shadow ring buffer until vgpu destroyed */
-	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
-		vgpu->reserve_ring_buffer_va[i] =
-			kmalloc(RESERVE_RING_BUFFER_SIZE, GFP_KERNEL);
-		if (!vgpu->reserve_ring_buffer_va[i]) {
-			gvt_vgpu_err("fail to alloc reserve ring buffer\n");
-			goto out;
-		}
-		vgpu->reserve_ring_buffer_size[i] = RESERVE_RING_BUFFER_SIZE;
-	}
+	vgpu->workloads = kmem_cache_create("gvt-g_vgpu_workload",
+			sizeof(struct intel_vgpu_workload), 0,
+			SLAB_HWCACHE_ALIGN,
+			NULL);
+
+	if (!vgpu->workloads)
+		return -ENOMEM;
+
 	return 0;
-out:
-	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
-		if (vgpu->reserve_ring_buffer_size[i]) {
-			kfree(vgpu->reserve_ring_buffer_va[i]);
-			vgpu->reserve_ring_buffer_va[i] = NULL;
-			vgpu->reserve_ring_buffer_size[i] = 0;
-		}
-	}
-	return -ENOMEM;
 }
 
 void intel_vgpu_reset_execlist(struct intel_vgpu *vgpu,

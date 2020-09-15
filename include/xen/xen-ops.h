@@ -40,7 +40,7 @@ int xen_setup_shutdown_event(void);
 
 extern unsigned long *xen_contiguous_bitmap;
 
-#ifdef CONFIG_XEN_PV
+#if defined(CONFIG_XEN_PV) || defined(CONFIG_ARM) || defined(CONFIG_ARM64)
 int xen_create_contiguous_region(phys_addr_t pstart, unsigned int order,
 				unsigned int address_bits,
 				dma_addr_t *dma_handle);
@@ -168,10 +168,5 @@ static inline void xen_preemptible_hcall_end(void)
 }
 
 #endif /* CONFIG_PREEMPT */
-
-struct vm_struct * xen_remap_domain_mfn_range_in_kernel(unsigned long mfn,
-        int nr, unsigned domid);
-void xen_unmap_domain_mfn_range_in_kernel(struct vm_struct *area, int nr,
-		unsigned domid);
 
 #endif /* INCLUDE_XEN_OPS_H */

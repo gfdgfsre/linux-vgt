@@ -44,7 +44,8 @@ static void internal_free_pages(struct sg_table *st)
 	kfree(st);
 }
 
-static int i915_gem_object_get_pages_internal(struct drm_i915_gem_object *obj)
+static struct sg_table *
+i915_gem_object_get_pages_internal(struct drm_i915_gem_object *obj)
 {
 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
 	struct sg_table *st;
@@ -77,12 +78,12 @@ static int i915_gem_object_get_pages_internal(struct drm_i915_gem_object *obj)
 create_st:
 	st = kmalloc(sizeof(*st), GFP_KERNEL);
 	if (!st)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 
 	npages = obj->base.size / PAGE_SIZE;
 	if (sg_alloc_table(st, npages, GFP_KERNEL)) {
 		kfree(st);
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	sg = st->sgl;
@@ -131,17 +132,13 @@ create_st:
 	 * object are only valid whilst active and pinned.
 	 */
 	obj->mm.madv = I915_MADV_DONTNEED;
-
-	__i915_gem_object_set_pages(obj, st);
-
-	return 0;
+	return st;
 
 err:
 	sg_set_page(sg, NULL, 0, 0);
 	sg_mark_end(sg);
 	internal_free_pages(st);
-
-	return -ENOMEM;
+	return ERR_PTR(-ENOMEM);
 }
 
 static void i915_gem_object_put_pages_internal(struct drm_i915_gem_object *obj,

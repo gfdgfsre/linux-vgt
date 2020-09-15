@@ -44,11 +44,8 @@
 #include "execlist.h"
 #include "scheduler.h"
 #include "sched_policy.h"
-#include "mmio_context.h"
+#include "render.h"
 #include "cmd_parser.h"
-#include "migrate.h"
-#include "fb_decoder.h"
-#include "dmabuf.h"
 
 #define GVT_MAX_VGPU 8
 
@@ -102,6 +99,7 @@ struct intel_vgpu_mmio {
 	bool disable_warn_untrack;
 };
 
+#define INTEL_GVT_MAX_CFG_SPACE_SZ 256
 #define INTEL_GVT_MAX_BAR_NUM 4
 
 struct intel_vgpu_pci_bar {
@@ -110,7 +108,7 @@ struct intel_vgpu_pci_bar {
 };
 
 struct intel_vgpu_cfg_space {
-	unsigned char virtual_cfg_space[PCI_CFG_SPACE_EXP_SIZE];
+	unsigned char virtual_cfg_space[INTEL_GVT_MAX_CFG_SPACE_SZ];
 	struct intel_vgpu_pci_bar bar[INTEL_GVT_MAX_BAR_NUM];
 };
 
@@ -125,9 +123,9 @@ struct intel_vgpu_irq {
 };
 
 struct intel_vgpu_opregion {
-	bool mapped;
 	void *va;
 	u32 gfn[INTEL_GVT_OPREGION_PAGES];
+	struct page *pages[INTEL_GVT_OPREGION_PAGES];
 };
 
 #define vgpu_opregion(vgpu) (&(vgpu->opregion))
@@ -167,16 +165,9 @@ struct intel_vgpu {
 	struct list_head workload_q_head[I915_NUM_ENGINES];
 	struct kmem_cache *workloads;
 	atomic_t running_workload_num;
-	/* 1/2K for each reserve ring buffer */
-	void *reserve_ring_buffer_va[I915_NUM_ENGINES];
-	int reserve_ring_buffer_size[I915_NUM_ENGINES];
 	DECLARE_BITMAP(tlb_handle_pending, I915_NUM_ENGINES);
 	struct i915_gem_context *shadow_ctx;
 	DECLARE_BITMAP(shadow_ctx_desc_updated, I915_NUM_ENGINES);
-
-	unsigned long low_mem_max_gpfn;
-
-	struct dentry *debugfs;
 
 #if IS_ENABLED(CONFIG_DRM_I915_GVT_KVMGT)
 	struct {
@@ -185,35 +176,16 @@ struct intel_vgpu {
 		int num_regions;
 		struct eventfd_ctx *intx_trigger;
 		struct eventfd_ctx *msi_trigger;
-
-		/*
-		 * Two caches are used to avoid mapping duplicated pages (eg.
-		 * scratch pages). This help to reduce dma setup overhead.
-		 */
-		struct rb_root gfn_cache;
-		struct rb_root dma_addr_cache;
+		struct rb_root cache;
 		struct mutex cache_lock;
-
 		struct notifier_block iommu_notifier;
 		struct notifier_block group_notifier;
 		struct kvm *kvm;
 		struct work_struct release_work;
 		atomic_t released;
-		struct vfio_device *vfio_device;
 	} vdev;
 #endif
-
-	struct list_head dmabuf_obj_list_head;
-	struct mutex dmabuf_lock;
-	struct idr object_idr;
-
-	struct completion vblank_done;
-
 };
-
-/* validating GM healthy status*/
-#define vgpu_is_vm_unhealthy(ret_val) \
-	(((ret_val) == -EBADRQC) || ((ret_val) == -EFAULT))
 
 struct intel_gvt_gm {
 	unsigned long vgpu_allocated_low_gm_size;
@@ -256,13 +228,18 @@ struct intel_gvt_mmio {
 	unsigned int num_mmio_block;
 
 	DECLARE_HASHTABLE(mmio_info_table, INTEL_GVT_MMIO_HASH_BITS);
-	unsigned long num_tracked_mmio;
+	unsigned int num_tracked_mmio;
 };
 
 struct intel_gvt_firmware {
 	void *cfg_space;
 	void *mmio;
 	bool firmware_loaded;
+};
+
+struct intel_gvt_opregion {
+	void *opregion_va;
+	u32 opregion_pa;
 };
 
 #define NR_MAX_INTEL_VGPU_TYPES 20
@@ -288,6 +265,7 @@ struct intel_gvt {
 	struct intel_gvt_firmware firmware;
 	struct intel_gvt_irq irq;
 	struct intel_gvt_gtt gtt;
+	struct intel_gvt_opregion opregion;
 	struct intel_gvt_workload_scheduler scheduler;
 	struct notifier_block shadow_ctx_notifier_block[I915_NUM_ENGINES];
 	DECLARE_HASHTABLE(cmd_table, GVT_CMD_HASH_BITS);
@@ -298,13 +276,6 @@ struct intel_gvt {
 	struct task_struct *service_thread;
 	wait_queue_head_t service_thread_wq;
 	unsigned long service_request;
-
-	struct {
-		struct engine_mmio *mmio;
-		int ctx_mmio_count[I915_NUM_ENGINES];
-	} engine_mmio_list;
-
-	struct dentry *debugfs_root;
 };
 
 static inline struct intel_gvt *to_gvt(struct drm_i915_private *i915)
@@ -385,20 +356,6 @@ int intel_gvt_load_firmware(struct intel_gvt *gvt);
 #define vgpu_fence_base(vgpu) (vgpu->fence.base)
 #define vgpu_fence_sz(vgpu) (vgpu->fence.size)
 
-/* Aperture/GM space definitions for vGPU Guest view point */
-#define vgpu_guest_aperture_offset(vgpu) \
-	vgpu_vreg(vgpu, vgtif_reg(avail_rs.mappable_gmadr.base))
-#define vgpu_guest_hidden_offset(vgpu)	\
-	vgpu_vreg(vgpu, vgtif_reg(avail_rs.nonmappable_gmadr.base))
-
-#define vgpu_guest_aperture_gmadr_base(vgpu) (vgpu_guest_aperture_offset(vgpu))
-#define vgpu_guest_aperture_gmadr_end(vgpu) \
-	(vgpu_guest_aperture_gmadr_base(vgpu) + vgpu_aperture_sz(vgpu) - 1)
-
-#define vgpu_guest_hidden_gmadr_base(vgpu) (vgpu_guest_hidden_offset(vgpu))
-#define vgpu_guest_hidden_gmadr_end(vgpu) \
-	(vgpu_guest_hidden_gmadr_base(vgpu) + vgpu_hidden_sz(vgpu) - 1)
-
 struct intel_vgpu_creation_params {
 	__u64 handle;
 	__u64 low_gm_sz;  /* in MB */
@@ -473,17 +430,15 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
 void intel_gvt_reset_vgpu(struct intel_vgpu *vgpu);
 void intel_gvt_activate_vgpu(struct intel_vgpu *vgpu);
 void intel_gvt_deactivate_vgpu(struct intel_vgpu *vgpu);
-int intel_gvt_save_restore(struct intel_vgpu *vgpu, char *buf, size_t count,
-			   void *base, uint64_t off, bool restore);
 
 /* validating GM functions */
 #define vgpu_gmadr_is_aperture(vgpu, gmadr) \
-	((gmadr >= vgpu_guest_aperture_gmadr_base(vgpu)) && \
-	 (gmadr <= vgpu_guest_aperture_gmadr_end(vgpu)))
+	((gmadr >= vgpu_aperture_gmadr_base(vgpu)) && \
+	 (gmadr <= vgpu_aperture_gmadr_end(vgpu)))
 
 #define vgpu_gmadr_is_hidden(vgpu, gmadr) \
-	((gmadr >= vgpu_guest_hidden_gmadr_base(vgpu)) && \
-	 (gmadr <= vgpu_guest_hidden_gmadr_end(vgpu)))
+	((gmadr >= vgpu_hidden_gmadr_base(vgpu)) && \
+	 (gmadr <= vgpu_hidden_gmadr_end(vgpu)))
 
 #define vgpu_gmadr_is_valid(vgpu, gmadr) \
 	 ((vgpu_gmadr_is_aperture(vgpu, gmadr) || \
@@ -509,20 +464,6 @@ int intel_gvt_ggtt_index_g2h(struct intel_vgpu *vgpu, unsigned long g_index,
 int intel_gvt_ggtt_h2g_index(struct intel_vgpu *vgpu, unsigned long h_index,
 			     unsigned long *g_index);
 
-/* apply guest to host gma conversion in GM registers setting */
-static inline u64 intel_gvt_reg_g2h(struct intel_vgpu *vgpu,
-		u32 addr, u32 mask)
-{
-	u64 gma;
-
-	if (addr) {
-		intel_gvt_ggtt_gmadr_g2h(vgpu,
-				addr & mask, &gma);
-		addr = gma | (addr & (~mask));
-	}
-	return addr;
-}
-
 void intel_vgpu_init_cfg_space(struct intel_vgpu *vgpu,
 		bool primary);
 void intel_vgpu_reset_cfg_space(struct intel_vgpu *vgpu);
@@ -537,14 +478,12 @@ void intel_gvt_clean_opregion(struct intel_gvt *gvt);
 int intel_gvt_init_opregion(struct intel_gvt *gvt);
 
 void intel_vgpu_clean_opregion(struct intel_vgpu *vgpu);
-int intel_vgpu_init_opregion(struct intel_vgpu *vgpu);
-int intel_vgpu_opregion_base_write_handler(struct intel_vgpu *vgpu, u32 gpa);
+int intel_vgpu_init_opregion(struct intel_vgpu *vgpu, u32 gpa);
 
 int intel_vgpu_emulate_opregion_request(struct intel_vgpu *vgpu, u32 swsci);
 void populate_pvinfo_page(struct intel_vgpu *vgpu);
 
 int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload);
-void enter_failsafe_mode(struct intel_vgpu *vgpu, int reason);
 
 struct intel_gvt_ops {
 	int (*emulate_cfg_read)(struct intel_vgpu *, unsigned int, void *,
@@ -561,19 +500,12 @@ struct intel_gvt_ops {
 	void (*vgpu_reset)(struct intel_vgpu *);
 	void (*vgpu_activate)(struct intel_vgpu *);
 	void (*vgpu_deactivate)(struct intel_vgpu *);
-	int  (*vgpu_save_restore)(struct intel_vgpu *, char *buf, size_t count,
-				  void *base, uint64_t off, bool restore);
-	int (*vgpu_query_plane)(struct intel_vgpu *vgpu, void *);
-	int (*vgpu_get_dmabuf)(struct intel_vgpu *vgpu, unsigned int);
-	int (*write_protect_handler)(struct intel_vgpu *, u64, void *,
-				     unsigned int);
 };
 
 
 enum {
 	GVT_FAILSAFE_UNSUPPORTED_GUEST,
 	GVT_FAILSAFE_INSUFFICIENT_RESOURCE,
-	GVT_FAILSAFE_GUEST_ERR,
 };
 
 static inline void mmio_hw_access_pre(struct drm_i915_private *dev_priv)
@@ -648,15 +580,6 @@ static inline bool intel_gvt_mmio_has_mode_mask(
 {
 	return gvt->mmio.mmio_attribute[offset >> 2] & F_MODE_MASK;
 }
-
-int intel_gvt_debugfs_add_vgpu(struct intel_vgpu *vgpu);
-void intel_gvt_debugfs_remove_vgpu(struct intel_vgpu *vgpu);
-int intel_gvt_debugfs_init(struct intel_gvt *gvt);
-void intel_gvt_debugfs_clean(struct intel_gvt *gvt);
-int submit_context(struct intel_vgpu *vgpu, int ring_id,
-		struct execlist_ctx_descriptor_format *desc,
-		bool emulate_schedule_in);
-void free_workload(struct intel_vgpu_workload *workload);
 
 #include "trace.h"
 #include "mpt.h"

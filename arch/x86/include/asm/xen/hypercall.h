@@ -217,6 +217,9 @@ privcmd_call(unsigned call,
 	__HYPERCALL_DECLS;
 	__HYPERCALL_5ARG(a1, a2, a3, a4, a5);
 
+	if (call >= PAGE_SIZE / sizeof(hypercall_page[0]))
+		return -EINVAL;
+
 	stac();
 	asm volatile(CALL_NOSPEC
 		     : __HYPERCALL_5PARAM
@@ -463,14 +466,6 @@ HYPERVISOR_hvm_op(int op, void *arg)
 {
        return _hypercall2(unsigned long, hvm_op, op, arg);
 }
-
-static inline int
-HYPERVISOR_domctl(
-	struct xen_domctl *arg)
-{
-	return _hypercall1(int, domctl, arg);
-}
-
 
 static inline int
 HYPERVISOR_tmem_op(

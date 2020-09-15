@@ -67,7 +67,7 @@ static int edp_pipe_is_enabled(struct intel_vgpu *vgpu)
 	return 1;
 }
 
-int pipe_is_enabled(struct intel_vgpu *vgpu, int pipe)
+static int pipe_is_enabled(struct intel_vgpu *vgpu, int pipe)
 {
 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
 
@@ -266,8 +266,6 @@ static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
 	/* Clear host CRT status, so guest couldn't detect this host CRT. */
 	if (IS_BROADWELL(dev_priv))
 		vgpu_vreg(vgpu, PCH_ADPA) &= ~ADPA_CRT_HOTPLUG_MONITOR_MASK;
-
-	vgpu_vreg(vgpu, PIPECONF(PIPE_A)) |= PIPECONF_ENABLE;
 }
 
 static void clean_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num)
@@ -309,7 +307,6 @@ static int setup_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num,
 	port->type = type;
 
 	emulate_monitor_status_change(vgpu);
-
 	return 0;
 }
 

@@ -257,94 +257,46 @@ struct old_child_dev_config {
 	u8  dvo_function;
 } __packed;
 
-/*
- * The child device config, aka the display device data structure, provides a
- * description of a port and its configuration on the platform.
- *
- * The child device config size has been increased, and fields have been added
- * and their meaning has changed over time. Care must be taken when accessing
- * basically any of the fields to ensure the correct interpretation for the BDB
- * version in question.
- *
- * When we copy the child device configs to dev_priv->vbt.child_dev, we reserve
- * space for the full structure below, and initialize the tail not actually
- * present in VBT to zeros. Accessing those fields is fine, as long as the
- * default zero is taken into account, again according to the BDB version.
- *
- * BDB versions 155 and below are considered legacy, and version 155 seems to be
- * a baseline for some of the VBT documentation. When adding new fields, please
- * include the BDB version when the field was added, if it's above that.
- */
-struct child_device_config {
+/* This one contains field offsets that are known to be common for all BDB
+ * versions. Notice that the meaning of the contents contents may still change,
+ * but at least the offsets are consistent. */
+
+struct common_child_dev_config {
 	u16 handle;
 	u16 device_type;
-
-	union {
-		u8  device_id[10]; /* ascii string */
-		struct {
-			u8 i2c_speed;
-			u8 dp_onboard_redriver;			/* 158 */
-			u8 dp_ondock_redriver;			/* 158 */
-			u8 hdmi_level_shifter_value:4;		/* 169 */
-			u8 hdmi_max_data_rate:4;		/* 204 */
-			u16 dtd_buf_ptr;			/* 161 */
-			u8 edidless_efp:1;			/* 161 */
-			u8 compression_enable:1;		/* 198 */
-			u8 compression_method:1;		/* 198 */
-			u8 ganged_edp:1;			/* 202 */
-			u8 reserved0:4;
-			u8 compression_structure_index:4;	/* 198 */
-			u8 reserved1:4;
-			u8 slave_port;				/* 202 */
-			u8 reserved2;
-		} __packed;
-	} __packed;
-
-	u16 addin_offset;
+	u8 not_common1[12];
 	u8 dvo_port;
-	u8 i2c_pin;
-	u8 slave_addr;
+	u8 not_common2[2];
 	u8 ddc_pin;
 	u16 edid_ptr;
 	u8 dvo_cfg; /* See DEVICE_CFG_* above */
-
-	union {
-		struct {
-			u8 dvo2_port;
-			u8 i2c2_pin;
-			u8 slave2_addr;
-			u8 ddc2_pin;
-		} __packed;
-		struct {
-			u8 efp_routed:1;			/* 158 */
-			u8 lane_reversal:1;			/* 184 */
-			u8 lspcon:1;				/* 192 */
-			u8 iboost:1;				/* 196 */
-			u8 hpd_invert:1;			/* 196 */
-			u8 flag_reserved:3;
-			u8 hdmi_support:1;			/* 158 */
-			u8 dp_support:1;			/* 158 */
-			u8 tmds_support:1;			/* 158 */
-			u8 support_reserved:5;
-			u8 aux_channel;
-			u8 dongle_detect;
-		} __packed;
-	} __packed;
-
-	u8 capabilities;
-	u8 dvo_wiring; /* See DEVICE_WIRE_* above */
-
-	union {
-		u8 dvo2_wiring;
-		u8 mipi_bridge_type;				/* 171 */
-	} __packed;
-
-	u16 extended_type;
-	u8 dvo_function;
-	u8 flags2;						/* 195 */
-	u8 dp_gpio_index;					/* 195 */
-	u16 dp_gpio_pin_num;					/* 195 */
+	u8 efp_routed:1;
+	u8 lane_reversal:1;
+	u8 lspcon:1;
+	u8 iboost:1;
+	u8 hpd_invert:1;
+	u8 flag_reserved:3;
+	u8 hdmi_support:1;
+	u8 dp_support:1;
+	u8 tmds_support:1;
+	u8 support_reserved:5;
+	u8 aux_channel;
+	u8 not_common3[11];
 	u8 iboost_level;
+} __packed;
+
+
+/* This field changes depending on the BDB version, so the most reliable way to
+ * read it is by checking the BDB version and reading the raw pointer. */
+union child_device_config {
+	/* This one is safe to be used anywhere, but the code should still check
+	 * the BDB version. */
+	u8 raw[33];
+	/* This one should only be kept for legacy code. */
+	struct old_child_dev_config old;
+	/* This one should also be safe to use anywhere, even without version
+	 * checks. */
+	struct common_child_dev_config common;
 } __packed;
 
 struct bdb_general_definitions {
