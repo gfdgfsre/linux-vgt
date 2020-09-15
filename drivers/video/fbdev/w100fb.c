@@ -110,7 +110,7 @@ static ssize_t flip_store(struct device *dev, struct device_attribute *attr, con
 	return count;
 }
 
-static DEVICE_ATTR_RW(flip);
+static DEVICE_ATTR(flip, 0644, flip_show, flip_store);
 
 static ssize_t w100fb_reg_read(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
@@ -166,7 +166,7 @@ static ssize_t fastpllclk_store(struct device *dev, struct device_attribute *att
 	return count;
 }
 
-static DEVICE_ATTR_RW(fastpllclk);
+static DEVICE_ATTR(fastpllclk, 0644, fastpllclk_show, fastpllclk_store);
 
 /*
  * Some touchscreens need hsync information from the video driver to
@@ -583,6 +583,7 @@ static void w100fb_restore_vidmem(struct w100fb_par *par)
 		memsize=par->mach->mem->size;
 		memcpy_toio(remapped_fbuf + (W100_FB_BASE-MEM_WINDOW_BASE), par->saved_extmem, memsize);
 		vfree(par->saved_extmem);
+		par->saved_extmem = NULL;
 	}
 	if (par->saved_intmem) {
 		memsize=MEM_INT_SIZE;
@@ -591,6 +592,7 @@ static void w100fb_restore_vidmem(struct w100fb_par *par)
 		else
 			memcpy_toio(remapped_fbuf + (W100_FB_BASE-MEM_WINDOW_BASE), par->saved_intmem, memsize);
 		vfree(par->saved_intmem);
+		par->saved_intmem = NULL;
 	}
 }
 

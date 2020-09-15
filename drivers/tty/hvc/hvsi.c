@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (C) 2004 Hollis Blanchard <hollisb@us.ibm.com>, IBM
  *

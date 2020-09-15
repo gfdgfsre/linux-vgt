@@ -332,12 +332,12 @@ static int pxa_gpio_of_xlate(struct gpio_chip *gc,
 
 static int pxa_gpio_request(struct gpio_chip *chip, unsigned int offset)
 {
-	return pinctrl_gpio_request(chip->base + offset);
+	return pinctrl_request_gpio(chip->base + offset);
 }
 
 static void pxa_gpio_free(struct gpio_chip *chip, unsigned int offset)
 {
-	pinctrl_gpio_free(chip->base + offset);
+	pinctrl_free_gpio(chip->base + offset);
 }
 
 static int pxa_init_gpio_chip(struct pxa_gpio_chip *pchip, int ngpio,
@@ -776,6 +776,9 @@ static int pxa_gpio_suspend(void)
 	struct pxa_gpio_bank *c;
 	int gpio;
 
+	if (!pchip)
+		return 0;
+
 	for_each_gpio_bank(gpio, c, pchip) {
 		c->saved_gplr = readl_relaxed(c->regbase + GPLR_OFFSET);
 		c->saved_gpdr = readl_relaxed(c->regbase + GPDR_OFFSET);
@@ -793,6 +796,9 @@ static void pxa_gpio_resume(void)
 	struct pxa_gpio_chip *pchip = pxa_gpio_chip;
 	struct pxa_gpio_bank *c;
 	int gpio;
+
+	if (!pchip)
+		return;
 
 	for_each_gpio_bank(gpio, c, pchip) {
 		/* restore level with set/clear */

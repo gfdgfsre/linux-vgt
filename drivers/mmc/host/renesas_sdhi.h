@@ -18,7 +18,6 @@
 struct renesas_sdhi_scc {
 	unsigned long clk_rate;	/* clock rate for SDR104 */
 	u32 tap;		/* sampling clock position for SDR104 */
-	u32 tap_hs400;		/* sampling clock position for HS400 */
 };
 
 struct renesas_sdhi_of_data {
@@ -30,40 +29,11 @@ struct renesas_sdhi_of_data {
 	dma_addr_t dma_rx_offset;
 	unsigned int bus_shift;
 	int scc_offset;
-	unsigned int scc_base_f_min;
 	struct renesas_sdhi_scc *taps;
 	int taps_num;
 	unsigned int max_blk_count;
 	unsigned short max_segs;
-	unsigned short max_segs_on_iommu;
 };
-
-struct tmio_mmc_dma {
-	enum dma_slave_buswidth dma_buswidth;
-	bool (*filter)(struct dma_chan *chan, void *arg);
-	void (*enable)(struct tmio_mmc_host *host, bool enable);
-	struct completion	dma_dataend;
-	struct tasklet_struct	dma_complete;
-};
-
-struct renesas_sdhi {
-	struct clk *clk;
-	struct clk *clk_cd;
-	struct tmio_mmc_data mmc_data;
-	struct tmio_mmc_dma dma_priv;
-	struct pinctrl *pinctrl;
-	struct pinctrl_state *pins_default, *pins_uhs;
-	void __iomem *scc_ctl;
-	u32 scc_tappos;
-	u32 scc_tappos_hs400;
-	int scc_offset;
-	unsigned int scc_base_f_min;
-	u32 adjust_hs400_offset;
-	u32 adjust_hs400_calibrate;
-};
-
-#define host_to_priv(host) \
-	container_of((host)->pdata, struct renesas_sdhi, mmc_data)
 
 int renesas_sdhi_probe(struct platform_device *pdev,
 		       const struct tmio_mmc_dma_ops *dma_ops);

@@ -2221,11 +2221,6 @@ static void pxa_camera_sensor_unbind(struct v4l2_async_notifier *notifier,
 	mutex_unlock(&pcdev->mlock);
 }
 
-static const struct v4l2_async_notifier_operations pxa_camera_sensor_ops = {
-	.bound = pxa_camera_sensor_bound,
-	.unbind = pxa_camera_sensor_unbind,
-};
-
 /*
  * Driver probe, remove, suspend and resume operations
  */
@@ -2379,7 +2374,7 @@ static int pxa_camera_probe(struct platform_device *pdev)
 	pcdev->res = res;
 
 	pcdev->pdata = pdev->dev.platform_data;
-	if (&pdev->dev.of_node && !pcdev->pdata) {
+	if (pdev->dev.of_node && !pcdev->pdata) {
 		err = pxa_camera_pdata_from_dt(&pdev->dev, pcdev, &pcdev->asd);
 	} else {
 		pcdev->platform_flags = pcdev->pdata->flags;
@@ -2494,7 +2489,8 @@ static int pxa_camera_probe(struct platform_device *pdev)
 	pcdev->asds[0] = &pcdev->asd;
 	pcdev->notifier.subdevs = pcdev->asds;
 	pcdev->notifier.num_subdevs = 1;
-	pcdev->notifier.ops = &pxa_camera_sensor_ops;
+	pcdev->notifier.bound = pxa_camera_sensor_bound;
+	pcdev->notifier.unbind = pxa_camera_sensor_unbind;
 
 	if (!of_have_populated_dt())
 		pcdev->asd.match_type = V4L2_ASYNC_MATCH_I2C;

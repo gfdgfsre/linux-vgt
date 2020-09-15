@@ -385,7 +385,7 @@ config NOMMU_INITIAL_TRIM_EXCESS
 
 config TRANSPARENT_HUGEPAGE
 	bool "Transparent Hugepage Support"
-	depends on HAVE_ARCH_TRANSPARENT_HUGEPAGE
+	depends on HAVE_ARCH_TRANSPARENT_HUGEPAGE && !PREEMPT_RT_FULL
 	select COMPACTION
 	select RADIX_TREE_MULTIORDER
 	help
@@ -526,15 +526,6 @@ config CMA_AREAS
 	  number of CMA area in the system.
 
 	  If unsure, leave the default value "7".
-
-config XT_CMA_HELPER
-	bool "Xen-troops Xen CMA and page allocators"
-	default y
-	depends on CMA && XEN
-	help
-	  Xen-troops Xen dedicated CMA and page allocators support.
-
-	  If unsure, say "n".
 
 config MEM_SOFT_DIRTY
 	bool "Track memory changes"
@@ -717,12 +708,12 @@ config MIGRATE_VMA_HELPER
 
 config HMM
 	bool
+	select MMU_NOTIFIER
 	select MIGRATE_VMA_HELPER
 
 config HMM_MIRROR
 	bool "HMM mirror CPU page table into a device page table"
 	depends on ARCH_HAS_HMM
-	select MMU_NOTIFIER
 	select HMM
 	help
 	  Select HMM_MIRROR if you want to mirror range of the CPU page table of a

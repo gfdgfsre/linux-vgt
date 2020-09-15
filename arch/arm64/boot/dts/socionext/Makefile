@@ -7,3 +7,4 @@ dtb-$(CONFIG_ARCH_UNIPHIER) += \
 	uniphier-pxs3-ref.dtb
 
 always		:= $(dtb-y)
+clean-files	:= *.dtb

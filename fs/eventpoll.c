@@ -587,12 +587,12 @@ static int ep_poll_wakeup_proc(void *priv, void *cookie, int call_nests)
  */
 static void ep_poll_safewake(wait_queue_head_t *wq)
 {
-	int this_cpu = get_cpu();
+	int this_cpu = get_cpu_light();
 
 	ep_call_nested(&poll_safewake_ncalls, EP_MAX_NESTS,
 		       ep_poll_wakeup_proc, NULL, wq, (void *) (long) this_cpu);
 
-	put_cpu();
+	put_cpu_light();
 }
 
 static void ep_remove_wait_queue(struct eppoll_entry *pwq)
@@ -1167,7 +1167,7 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 	 * semantics). All the events that happen during that period of time are
 	 * chained in ep->ovflist and requeued later on.
 	 */
-	if (unlikely(ep->ovflist != EP_UNACTIVE_PTR)) {
+	if (ep->ovflist != EP_UNACTIVE_PTR) {
 		if (epi->next == EP_UNACTIVE_PTR) {
 			epi->next = ep->ovflist;
 			ep->ovflist = epi;

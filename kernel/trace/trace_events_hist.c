@@ -2592,7 +2592,7 @@ static struct hist_field *parse_unary(struct hist_trigger_data *hist_data,
 	int ret = 0;
 	char *s;
 
-	/* we support only -(xxx) i.e. explicit parens required */
+	// we support only -(xxx) i.e. explicit parens required
 
 	if (level > 3) {
 		hist_err("Too many subexpressions (3 max): ", str);
@@ -2600,7 +2600,7 @@ static struct hist_field *parse_unary(struct hist_trigger_data *hist_data,
 		goto free;
 	}
 
-	str++; /* skip leading '-' */
+	str++; // skip leading '-'
 
 	s = strchr(str, '(');
 	if (s)
@@ -2614,7 +2614,7 @@ static struct hist_field *parse_unary(struct hist_trigger_data *hist_data,
 	if (s)
 		*s = '\0';
 	else {
-		ret = -EINVAL; /* no closing ')' */
+		ret = -EINVAL; // no closing ')'
 		goto free;
 	}
 
@@ -2732,7 +2732,7 @@ static struct hist_field *parse_expr(struct hist_trigger_data *hist_data,
 		goto free;
 	}
 
-	/* rest of string could be another expression e.g. b+c in a+b+c */
+	// rest of string could be another expression e.g. b+c in a+b+c
 	operand_flags = 0;
 	operand2 = parse_expr(hist_data, file, str, operand_flags, NULL, ++level);
 	if (IS_ERR(operand2)) {
@@ -2865,7 +2865,7 @@ static struct trace_event_file *event_file(struct trace_array *tr,
 {
 	struct trace_event_file *file;
 
-	file = __find_event_file(tr, system, event_name);
+	file = find_event_file(tr, system, event_name);
 	if (!file)
 		return ERR_PTR(-EINVAL);
 
@@ -4610,9 +4610,10 @@ static inline void add_to_key(char *compound_key, void *key,
 		/* ensure NULL-termination */
 		if (size > key_field->size - 1)
 			size = key_field->size - 1;
-	}
 
-	memcpy(compound_key + key_field->offset, key, size);
+		strncpy(compound_key + key_field->offset, (char *)key, size);
+	} else
+		memcpy(compound_key + key_field->offset, key, size);
 }
 
 static void
@@ -4838,7 +4839,7 @@ static void hist_trigger_show(struct seq_file *m,
 			      struct event_trigger_data *data, int n)
 {
 	struct hist_trigger_data *hist_data;
-	int n_entries;
+	int n_entries, ret = 0;
 
 	if (n > 0)
 		seq_puts(m, "\n\n");
@@ -4849,8 +4850,10 @@ static void hist_trigger_show(struct seq_file *m,
 
 	hist_data = data->private_data;
 	n_entries = print_entries(m, hist_data);
-	if (n_entries < 0)
+	if (n_entries < 0) {
+		ret = n_entries;
 		n_entries = 0;
+	}
 
 	seq_printf(m, "\nTotals:\n    Hits: %llu\n    Entries: %u\n    Dropped: %llu\n",
 		   (u64)atomic64_read(&hist_data->map->hits),

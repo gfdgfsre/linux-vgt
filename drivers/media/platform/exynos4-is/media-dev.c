@@ -496,6 +496,7 @@ static int fimc_md_register_sensor_entities(struct fimc_md *fmd)
 			continue;
 
 		ret = fimc_md_parse_port_node(fmd, port, index);
+		of_node_put(port);
 		if (ret < 0) {
 			of_node_put(node);
 			goto rpm_put;
@@ -529,6 +530,7 @@ static int __of_get_csis_id(struct device_node *np)
 	if (!np)
 		return -EINVAL;
 	of_property_read_u32(np, "reg", &reg);
+	of_node_put(np);
 	return reg - FIMC_INPUT_MIPI_CSI2_0;
 }
 
@@ -1405,11 +1407,6 @@ unlock:
 	return media_device_register(&fmd->media_dev);
 }
 
-static const struct v4l2_async_notifier_operations subdev_notifier_ops = {
-	.bound = subdev_notifier_bound,
-	.complete = subdev_notifier_complete,
-};
-
 static int fimc_md_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1484,7 +1481,8 @@ static int fimc_md_probe(struct platform_device *pdev)
 	if (fmd->num_sensors > 0) {
 		fmd->subdev_notifier.subdevs = fmd->async_subdevs;
 		fmd->subdev_notifier.num_subdevs = fmd->num_sensors;
-		fmd->subdev_notifier.ops = &subdev_notifier_ops;
+		fmd->subdev_notifier.bound = subdev_notifier_bound;
+		fmd->subdev_notifier.complete = subdev_notifier_complete;
 		fmd->num_sensors = 0;
 
 		ret = v4l2_async_notifier_register(&fmd->v4l2_dev,

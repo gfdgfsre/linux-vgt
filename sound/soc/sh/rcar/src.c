@@ -8,15 +8,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-
-/*
- * you can enable below define if you don't need
- * SSI interrupt status debug message when debugging
- * see rsnd_dbg_irq_status()
- *
- * #define RSND_DEBUG_NO_IRQ_STATUS 1
- */
-
 #include "rsnd.h"
 
 #define SRC_NAME "src"
@@ -173,60 +164,6 @@ static int rsnd_src_hw_params(struct rsnd_mod *mod,
 	return 0;
 }
 
-const static u32 bsdsr_table_pattern1[] = {
-	0x01800000, /* 6 - 1/6 */
-	0x01000000, /* 6 - 1/4 */
-	0x00c00000, /* 6 - 1/3 */
-	0x00800000, /* 6 - 1/2 */
-	0x00600000, /* 6 - 2/3 */
-	0x00400000, /* 6 - 1   */
-};
-
-const static u32 bsdsr_table_pattern2[] = {
-	0x02400000, /* 6 - 1/6 */
-	0x01800000, /* 6 - 1/4 */
-	0x01200000, /* 6 - 1/3 */
-	0x00c00000, /* 6 - 1/2 */
-	0x00900000, /* 6 - 2/3 */
-	0x00600000, /* 6 - 1   */
-};
-
-const static u32 bsisr_table[] = {
-	0x00100060, /* 6 - 1/6 */
-	0x00100040, /* 6 - 1/4 */
-	0x00100030, /* 6 - 1/3 */
-	0x00100020, /* 6 - 1/2 */
-	0x00100020, /* 6 - 2/3 */
-	0x00100020, /* 6 - 1   */
-};
-
-const static u32 chan288888[] = {
-	0x00000006, /* 1 to 2 */
-	0x000001fe, /* 1 to 8 */
-	0x000001fe, /* 1 to 8 */
-	0x000001fe, /* 1 to 8 */
-	0x000001fe, /* 1 to 8 */
-	0x000001fe, /* 1 to 8 */
-};
-
-const static u32 chan244888[] = {
-	0x00000006, /* 1 to 2 */
-	0x0000001e, /* 1 to 4 */
-	0x0000001e, /* 1 to 4 */
-	0x000001fe, /* 1 to 8 */
-	0x000001fe, /* 1 to 8 */
-	0x000001fe, /* 1 to 8 */
-};
-
-const static u32 chan222222[] = {
-	0x00000006, /* 1 to 2 */
-	0x00000006, /* 1 to 2 */
-	0x00000006, /* 1 to 2 */
-	0x00000006, /* 1 to 2 */
-	0x00000006, /* 1 to 2 */
-	0x00000006, /* 1 to 2 */
-};
-
 static void rsnd_src_set_convert_rate(struct rsnd_dai_stream *io,
 				      struct rsnd_mod *mod)
 {
@@ -238,20 +175,15 @@ static void rsnd_src_set_convert_rate(struct rsnd_dai_stream *io,
 	u32 fin, fout;
 	u32 ifscr, fsrate, adinr;
 	u32 cr, route;
+	u32 bsdsr, bsisr;
 	u32 i_busif, o_busif, tmp;
-	const u32 *bsdsr_table;
-	const u32 *chptn;
 	uint ratio;
-	int chan;
-	int idx;
 
 	if (!runtime)
 		return;
 
 	fin  = rsnd_src_get_in_rate(priv, io);
 	fout = rsnd_src_get_out_rate(priv, io);
-
-	chan = rsnd_runtime_channel_original(io);
 
 	/* 6 - 1/6 are very enough ratio for SRC_BSDSR */
 	if (fin == fout)
@@ -271,7 +203,8 @@ static void rsnd_src_set_convert_rate(struct rsnd_dai_stream *io,
 	/*
 	 * SRC_ADINR
 	 */
-	adinr = rsnd_get_adinr_bit(mod, io) | chan;
+	adinr = rsnd_get_adinr_bit(mod, io) |
+		rsnd_runtime_channel_original(io);
 
 	/*
 	 * SRC_IFSCR / SRC_IFSVR
@@ -304,55 +237,20 @@ static void rsnd_src_set_convert_rate(struct rsnd_dai_stream *io,
 
 	/*
 	 * SRC_BSDSR / SRC_BSISR
-	 *
-	 * see
-	 *	Combination of Register Setting Related to
-	 *	FSO/FSI Ratio and Channel, Latency
 	 */
 	switch (rsnd_mod_id(mod)) {
-	case 0:
-		chptn		= chan288888;
-		bsdsr_table	= bsdsr_table_pattern1;
-		break;
-	case 1:
-	case 3:
-	case 4:
-		chptn		= chan244888;
-		bsdsr_table	= bsdsr_table_pattern1;
-		break;
-	case 2:
-	case 9:
-		chptn		= chan222222;
-		bsdsr_table	= bsdsr_table_pattern1;
-		break;
 	case 5:
 	case 6:
 	case 7:
 	case 8:
-		chptn		= chan222222;
-		bsdsr_table	= bsdsr_table_pattern2;
+		bsdsr = 0x02400000; /* 6 - 1/6 */
+		bsisr = 0x00100060; /* 6 - 1/6 */
 		break;
 	default:
-		goto convert_rate_err;
+		bsdsr = 0x01800000; /* 6 - 1/6 */
+		bsisr = 0x00100060 ;/* 6 - 1/6 */
+		break;
 	}
-
-	/*
-	 * E3 need to overwrite
-	 */
-	if (rsnd_is_e3(priv))
-		switch (rsnd_mod_id(mod)) {
-		case 0:
-		case 4:
-			chptn	= chan222222;
-		}
-
-	for (idx = 0; idx < ARRAY_SIZE(chan222222); idx++)
-		if (chptn[idx] & (1 << chan))
-			break;
-
-	if (chan > 8 ||
-	    idx >= ARRAY_SIZE(chan222222))
-		goto convert_rate_err;
 
 	/* BUSIF_MODE */
 	tmp = rsnd_get_busif_shift(io, mod);
@@ -366,8 +264,8 @@ static void rsnd_src_set_convert_rate(struct rsnd_dai_stream *io,
 	rsnd_mod_write(mod, SRC_IFSCR, ifscr);
 	rsnd_mod_write(mod, SRC_IFSVR, fsrate);
 	rsnd_mod_write(mod, SRC_SRCCR, cr);
-	rsnd_mod_write(mod, SRC_BSDSR, bsdsr_table[idx]);
-	rsnd_mod_write(mod, SRC_BSISR, bsisr_table[idx]);
+	rsnd_mod_write(mod, SRC_BSDSR, bsdsr);
+	rsnd_mod_write(mod, SRC_BSISR, bsisr);
 	rsnd_mod_write(mod, SRC_SRCIR, 0);	/* cancel initialize */
 
 	rsnd_mod_write(mod, SRC_I_BUSIF_MODE, i_busif);
@@ -376,11 +274,6 @@ static void rsnd_src_set_convert_rate(struct rsnd_dai_stream *io,
 	rsnd_mod_write(mod, SRC_BUSIF_DALIGN, rsnd_get_dalign(mod, io));
 
 	rsnd_adg_set_src_timesel_gen2(mod, io, fin, fout);
-
-	return;
-
-convert_rate_err:
-	dev_err(dev, "unknown BSDSR/BSDIR settings\n");
 }
 
 static int rsnd_src_irq(struct rsnd_mod *mod,
@@ -432,10 +325,7 @@ static void rsnd_src_status_clear(struct rsnd_mod *mod)
 
 static bool rsnd_src_error_occurred(struct rsnd_mod *mod)
 {
-	struct rsnd_priv *priv = rsnd_mod_to_priv(mod);
-	struct device *dev = rsnd_priv_to_dev(priv);
 	u32 val0, val1;
-	u32 status0, status1;
 	bool ret = false;
 
 	val0 = val1 = OUF_SRC(rsnd_mod_id(mod));
@@ -448,15 +338,9 @@ static bool rsnd_src_error_occurred(struct rsnd_mod *mod)
 	if (rsnd_src_sync_is_enabled(mod))
 		val0 = val0 & 0xffff;
 
-	status0 = rsnd_mod_read(mod, SCU_SYS_STATUS0);
-	status1 = rsnd_mod_read(mod, SCU_SYS_STATUS1);
-	if ((status0 & val0) || (status1 & val1)) {
-		rsnd_dbg_irq_status(dev, "%s[%d] err status : 0x%08x, 0x%08x\n",
-			rsnd_mod_name(mod), rsnd_mod_id(mod),
-			status0, status1);
-
+	if ((rsnd_mod_read(mod, SCU_SYS_STATUS0) & val0) ||
+	    (rsnd_mod_read(mod, SCU_SYS_STATUS1) & val1))
 		ret = true;
-	}
 
 	return ret;
 }

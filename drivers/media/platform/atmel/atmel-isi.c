@@ -496,7 +496,7 @@ static void stop_streaming(struct vb2_queue *vq)
 	spin_unlock_irq(&isi->irqlock);
 
 	if (!isi->enable_preview_path) {
-		timeout = jiffies + FRAME_INTERVAL_MILLI_SEC * HZ;
+		timeout = jiffies + (FRAME_INTERVAL_MILLI_SEC * HZ) / 1000;
 		/* Wait until the end of the current frame. */
 		while ((isi_readl(isi, ISI_STATUS) & ISI_CTRL_CDC) &&
 				time_before(jiffies, timeout))
@@ -1105,12 +1105,6 @@ static int isi_graph_notify_bound(struct v4l2_async_notifier *notifier,
 	return 0;
 }
 
-static const struct v4l2_async_notifier_operations isi_graph_notify_ops = {
-	.bound = isi_graph_notify_bound,
-	.unbind = isi_graph_notify_unbind,
-	.complete = isi_graph_notify_complete,
-};
-
 static int isi_graph_parse(struct atmel_isi *isi, struct device_node *node)
 {
 	struct device_node *ep = NULL;
@@ -1158,7 +1152,9 @@ static int isi_graph_init(struct atmel_isi *isi)
 
 	isi->notifier.subdevs = subdevs;
 	isi->notifier.num_subdevs = 1;
-	isi->notifier.ops = &isi_graph_notify_ops;
+	isi->notifier.bound = isi_graph_notify_bound;
+	isi->notifier.unbind = isi_graph_notify_unbind;
+	isi->notifier.complete = isi_graph_notify_complete;
 
 	ret = v4l2_async_notifier_register(&isi->v4l2_dev, &isi->notifier);
 	if (ret < 0) {

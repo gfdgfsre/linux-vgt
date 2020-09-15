@@ -1178,7 +1178,7 @@ lpfc_sli4_pdev_reg_request(struct lpfc_hba *phba, uint32_t opcode)
 		return -EACCES;
 
 	if ((phba->sli_rev < LPFC_SLI_REV4) ||
-	    (bf_get(lpfc_sli_intf_if_type, &phba->sli4_hba.sli_intf) !=
+	    (bf_get(lpfc_sli_intf_if_type, &phba->sli4_hba.sli_intf) <
 	     LPFC_SLI_INTF_IF_TYPE_2))
 		return -EPERM;
 
@@ -1478,6 +1478,9 @@ lpfc_get_hba_info(struct lpfc_hba *phba,
 		max_vpi = (bf_get(lpfc_mbx_rd_conf_vpi_count, rd_config) > 0) ?
 			(bf_get(lpfc_mbx_rd_conf_vpi_count, rd_config) - 1) : 0;
 
+		/* Limit the max we support */
+		if (max_vpi > LPFC_MAX_VPI)
+			max_vpi = LPFC_MAX_VPI;
 		if (mvpi)
 			*mvpi = max_vpi;
 		if (avpi)
@@ -1493,8 +1496,13 @@ lpfc_get_hba_info(struct lpfc_hba *phba,
 			*axri = pmb->un.varRdConfig.avail_xri;
 		if (mvpi)
 			*mvpi = pmb->un.varRdConfig.max_vpi;
-		if (avpi)
-			*avpi = pmb->un.varRdConfig.avail_vpi;
+		if (avpi) {
+			/* avail_vpi is only valid if link is up and ready */
+			if (phba->link_state == LPFC_HBA_READY)
+				*avpi = pmb->un.varRdConfig.avail_vpi;
+			else
+				*avpi = pmb->un.varRdConfig.max_vpi;
+		}
 	}
 
 	mempool_free(pmboxq, phba->mbox_mem_pool);
@@ -2490,7 +2498,8 @@ lpfc_soft_wwpn_store(struct device *dev, struct device_attribute *attr,
 				"reinit adapter - %d\n", stat2);
 	return (stat1 || stat2) ? -EIO : count;
 }
-static DEVICE_ATTR_RW(lpfc_soft_wwpn);
+static DEVICE_ATTR(lpfc_soft_wwpn, S_IRUGO | S_IWUSR,
+		   lpfc_soft_wwpn_show, lpfc_soft_wwpn_store);
 
 /**
  * lpfc_soft_wwnn_show - Return the cfg soft ww node name for the adapter
@@ -2553,7 +2562,8 @@ lpfc_soft_wwnn_store(struct device *dev, struct device_attribute *attr,
 
 	return count;
 }
-static DEVICE_ATTR_RW(lpfc_soft_wwnn);
+static DEVICE_ATTR(lpfc_soft_wwnn, S_IRUGO | S_IWUSR,
+		   lpfc_soft_wwnn_show, lpfc_soft_wwnn_store);
 
 /**
  * lpfc_oas_tgt_show - Return wwpn of target whose luns maybe enabled for
@@ -3071,7 +3081,8 @@ MODULE_PARM_DESC(lpfc_poll, "FCP ring polling mode control:"
 		 " 1 - poll with interrupts enabled"
 		 " 3 - poll and disable FCP ring interrupts");
 
-static DEVICE_ATTR_RW(lpfc_poll);
+static DEVICE_ATTR(lpfc_poll, S_IRUGO | S_IWUSR,
+		   lpfc_poll_show, lpfc_poll_store);
 
 int lpfc_no_hba_reset_cnt;
 unsigned long lpfc_no_hba_reset[MAX_HBAS_NO_RESET] = {
@@ -3299,7 +3310,8 @@ lpfc_nodev_tmo_set(struct lpfc_vport *vport, int val)
 
 lpfc_vport_param_store(nodev_tmo)
 
-static DEVICE_ATTR_RW(lpfc_nodev_tmo);
+static DEVICE_ATTR(lpfc_nodev_tmo, S_IRUGO | S_IWUSR,
+		   lpfc_nodev_tmo_show, lpfc_nodev_tmo_store);
 
 /*
 # lpfc_devloss_tmo: If set, it will hold all I/O errors on devices that
@@ -3348,7 +3360,8 @@ lpfc_devloss_tmo_set(struct lpfc_vport *vport, int val)
 }
 
 lpfc_vport_param_store(devloss_tmo)
-static DEVICE_ATTR_RW(lpfc_devloss_tmo);
+static DEVICE_ATTR(lpfc_devloss_tmo, S_IRUGO | S_IWUSR,
+		   lpfc_devloss_tmo_show, lpfc_devloss_tmo_store);
 
 /*
  * lpfc_suppress_rsp: Enable suppress rsp feature is firmware supports it
@@ -3540,7 +3553,8 @@ lpfc_restrict_login_set(struct lpfc_vport *vport, int val)
 	return 0;
 }
 lpfc_vport_param_store(restrict_login);
-static DEVICE_ATTR_RW(lpfc_restrict_login);
+static DEVICE_ATTR(lpfc_restrict_login, S_IRUGO | S_IWUSR,
+		   lpfc_restrict_login_show, lpfc_restrict_login_store);
 
 /*
 # Some disk devices have a "select ID" or "select Target" capability.
@@ -3654,7 +3668,8 @@ lpfc_topology_store(struct device *dev, struct device_attribute *attr,
 }
 
 lpfc_param_show(topology)
-static DEVICE_ATTR_RW(lpfc_topology);
+static DEVICE_ATTR(lpfc_topology, S_IRUGO | S_IWUSR,
+		lpfc_topology_show, lpfc_topology_store);
 
 /**
  * lpfc_static_vport_show: Read callback function for
@@ -3912,7 +3927,8 @@ lpfc_stat_data_ctrl_show(struct device *dev, struct device_attribute *attr,
 /*
  * Sysfs attribute to control the statistical data collection.
  */
-static DEVICE_ATTR_RW(lpfc_stat_data_ctrl);
+static DEVICE_ATTR(lpfc_stat_data_ctrl, S_IRUGO | S_IWUSR,
+		   lpfc_stat_data_ctrl_show, lpfc_stat_data_ctrl_store);
 
 /*
  * lpfc_drvr_stat_data: sysfs attr to get driver statistical data.
@@ -4048,7 +4064,7 @@ lpfc_link_speed_store(struct device *dev, struct device_attribute *attr,
 	uint32_t prev_val, if_type;
 
 	if_type = bf_get(lpfc_sli_intf_if_type, &phba->sli4_hba.sli_intf);
-	if (if_type == LPFC_SLI_INTF_IF_TYPE_2 &&
+	if (if_type >= LPFC_SLI_INTF_IF_TYPE_2 &&
 	    phba->hba_flag & HBA_FORCED_LINK_SPEED)
 		return -EPERM;
 
@@ -4151,7 +4167,8 @@ lpfc_link_speed_init(struct lpfc_hba *phba, int val)
 	return -EINVAL;
 }
 
-static DEVICE_ATTR_RW(lpfc_link_speed);
+static DEVICE_ATTR(lpfc_link_speed, S_IRUGO | S_IWUSR,
+		   lpfc_link_speed_show, lpfc_link_speed_store);
 
 /*
 # lpfc_aer_support: Support PCIe device Advanced Error Reporting (AER)
@@ -4244,7 +4261,8 @@ lpfc_aer_support_store(struct device *dev, struct device_attribute *attr,
 	return rc;
 }
 
-static DEVICE_ATTR_RW(lpfc_aer_support);
+static DEVICE_ATTR(lpfc_aer_support, S_IRUGO | S_IWUSR,
+		   lpfc_aer_support_show, lpfc_aer_support_store);
 
 /**
  * lpfc_aer_cleanup_state - Clean up aer state to the aer enabled device
@@ -4391,7 +4409,8 @@ LPFC_ATTR(sriov_nr_virtfn, LPFC_DEF_VFN_PER_PFN, 0, LPFC_MAX_VFN_PER_PFN,
 	"Enable PCIe device SR-IOV virtual fn");
 
 lpfc_param_show(sriov_nr_virtfn)
-static DEVICE_ATTR_RW(lpfc_sriov_nr_virtfn);
+static DEVICE_ATTR(lpfc_sriov_nr_virtfn, S_IRUGO | S_IWUSR,
+		   lpfc_sriov_nr_virtfn_show, lpfc_sriov_nr_virtfn_store);
 
 /**
  * lpfc_request_firmware_store - Request for Linux generic firmware upgrade
@@ -4565,7 +4584,8 @@ lpfc_fcp_imax_init(struct lpfc_hba *phba, int val)
 	return 0;
 }
 
-static DEVICE_ATTR_RW(lpfc_fcp_imax);
+static DEVICE_ATTR(lpfc_fcp_imax, S_IRUGO | S_IWUSR,
+		   lpfc_fcp_imax_show, lpfc_fcp_imax_store);
 
 /*
  * lpfc_auto_imax: Controls Auto-interrupt coalescing values support.
@@ -4725,7 +4745,8 @@ lpfc_fcp_cpu_map_init(struct lpfc_hba *phba, int val)
 	return 0;
 }
 
-static DEVICE_ATTR_RW(lpfc_fcp_cpu_map);
+static DEVICE_ATTR(lpfc_fcp_cpu_map, S_IRUGO | S_IWUSR,
+		   lpfc_fcp_cpu_map_show, lpfc_fcp_cpu_map_store);
 
 /*
 # lpfc_fcp_class:  Determines FC class to use for the FCP protocol.
@@ -4811,7 +4832,9 @@ lpfc_max_scsicmpl_time_set(struct lpfc_vport *vport, int val)
 	return 0;
 }
 lpfc_vport_param_store(max_scsicmpl_time);
-static DEVICE_ATTR_RW(lpfc_max_scsicmpl_time);
+static DEVICE_ATTR(lpfc_max_scsicmpl_time, S_IRUGO | S_IWUSR,
+		   lpfc_max_scsicmpl_time_show,
+		   lpfc_max_scsicmpl_time_store);
 
 /*
 # lpfc_ack0: Use ACK0, instead of ACK1 for class 2 acknowledgement. Value

@@ -26,19 +26,14 @@ struct device;
 struct drm_device;
 struct drm_fbdev_cma;
 struct rcar_du_device;
+struct rcar_du_lvdsenc;
 
 #define RCAR_DU_FEATURE_CRTC_IRQ_CLOCK	(1 << 0)	/* Per-CRTC IRQ and clock */
 #define RCAR_DU_FEATURE_EXT_CTRL_REGS	(1 << 1)	/* Has extended control registers */
 #define RCAR_DU_FEATURE_VSP1_SOURCE	(1 << 2)	/* Has inputs from VSP1 */
-#define RCAR_DU_FEATURE_R8A7795_REGS	(1 << 3)        /* Use R8A7795 registers */
-#define RCAR_DU_FEATURE_R8A7796_REGS	(1 << 4)        /* Use R8A7796 registers */
-#define RCAR_DU_FEATURE_R8A77965_REGS	(1 << 5)        /* Use R8A77965 registers */
-#define RCAR_DU_FEATURE_R8A77990_REGS	(1 << 6)        /* Use R8A77990 registers */
-#define RCAR_DU_FEATURE_R8A77995_REGS	(1 << 7)        /* Use R8A77995 registers */
-#define RCAR_DU_FEATURE_TVM_SYNC	(1 << 8)	/* Has TV switch/sync modes */
-#define RCAR_DU_FEATURE_R8A7799X	(1 << 9)        /* Use R8A7799X */
 
 #define RCAR_DU_QUIRK_ALIGN_128B	(1 << 0)	/* Align pitches to 128 bytes */
+#define RCAR_DU_QUIRK_LVDS_LANES	(1 << 1)	/* LVDS lanes 1 and 3 inverted */
 
 /*
  * struct rcar_du_output_routing - Output routing specification
@@ -59,24 +54,23 @@ struct rcar_du_output_routing {
  * @gen: device generation (2 or 3)
  * @features: device features (RCAR_DU_FEATURE_*)
  * @quirks: device quirks (RCAR_DU_QUIRK_*)
- * @channels_mask: bit mask of available DU channels
+ * @num_crtcs: total number of CRTCs
  * @routes: array of CRTC to output routes, indexed by output (RCAR_DU_OUTPUT_*)
  * @num_lvds: number of internal LVDS encoders
- * @lvds_clk_mask: bitmask of channels that can use the LVDS clock as dot clock
  */
 struct rcar_du_device_info {
 	unsigned int gen;
 	unsigned int features;
 	unsigned int quirks;
-	unsigned int channels_mask;
+	unsigned int num_crtcs;
 	struct rcar_du_output_routing routes[RCAR_DU_OUTPUT_MAX];
 	unsigned int num_lvds;
 	unsigned int dpll_ch;
-	unsigned int lvds_clk_mask;
 };
 
 #define RCAR_DU_MAX_CRTCS		4
 #define RCAR_DU_MAX_GROUPS		DIV_ROUND_UP(RCAR_DU_MAX_CRTCS, 2)
+#define RCAR_DU_MAX_LVDS		2
 #define RCAR_DU_MAX_VSPS		4
 
 struct rcar_du_device {
@@ -87,7 +81,6 @@ struct rcar_du_device {
 
 	struct drm_device *ddev;
 	struct drm_fbdev_cma *fbdev;
-	struct drm_atomic_state *suspend_state;
 
 	struct rcar_du_crtc crtcs[RCAR_DU_MAX_CRTCS];
 	unsigned int num_crtcs;
@@ -98,13 +91,12 @@ struct rcar_du_device {
 	struct {
 		struct drm_property *alpha;
 		struct drm_property *colorkey;
-		struct drm_property *colorkey_alpha;
 	} props;
 
 	unsigned int dpad0_source;
 	unsigned int vspd1_sink;
-	bool vspdl_fix;
-	unsigned int brs_num;
+
+	struct rcar_du_lvdsenc *lvds[RCAR_DU_MAX_LVDS];
 };
 
 static inline bool rcar_du_has(struct rcar_du_device *rcdu,

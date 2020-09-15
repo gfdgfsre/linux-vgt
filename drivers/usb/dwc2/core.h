@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
 /*
  * core.h - DesignWare HS OTG Controller common declarations
  *
@@ -922,7 +921,6 @@ struct dwc2_hsotg {
 	int     irq;
 	struct clk *clk;
 	struct reset_control *reset;
-	struct reset_control *reset_ecc;
 
 	unsigned int queuing_high_bandwidth:1;
 	unsigned int srp_success:1;

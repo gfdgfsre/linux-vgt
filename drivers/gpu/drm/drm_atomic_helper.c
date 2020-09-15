@@ -696,100 +696,6 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
 EXPORT_SYMBOL(drm_atomic_helper_check_modeset);
 
 /**
- * drm_atomic_helper_check_plane_state() - Check plane state for validity
- * @plane_state: plane state to check
- * @crtc_state: crtc state to check
- * @clip: integer clipping coordinates
- * @min_scale: minimum @src:@dest scaling factor in 16.16 fixed point
- * @max_scale: maximum @src:@dest scaling factor in 16.16 fixed point
- * @can_position: is it legal to position the plane such that it
- *                doesn't cover the entire crtc?  This will generally
- *                only be false for primary planes.
- * @can_update_disabled: can the plane be updated while the crtc
- *                       is disabled?
- *
- * Checks that a desired plane update is valid, and updates various
- * bits of derived state (clipped coordinates etc.). Drivers that provide
- * their own plane handling rather than helper-provided implementations may
- * still wish to call this function to avoid duplication of error checking
- * code.
- *
- * RETURNS:
- * Zero if update appears valid, error code on failure
- */
-int drm_atomic_helper_check_plane_state(struct drm_plane_state *plane_state,
-					const struct drm_crtc_state *crtc_state,
-					const struct drm_rect *clip,
-					int min_scale,
-					int max_scale,
-					bool can_position,
-					bool can_update_disabled)
-{
-	struct drm_framebuffer *fb = plane_state->fb;
-	struct drm_rect *src = &plane_state->src;
-	struct drm_rect *dst = &plane_state->dst;
-	unsigned int rotation = plane_state->rotation;
-	int hscale, vscale;
-
-	WARN_ON(plane_state->crtc && plane_state->crtc != crtc_state->crtc);
-
-	*src = drm_plane_state_src(plane_state);
-	*dst = drm_plane_state_dest(plane_state);
-
-	if (!fb) {
-		plane_state->visible = false;
-		return 0;
-	}
-
-	/* crtc should only be NULL when disabling (i.e., !fb) */
-	if (WARN_ON(!plane_state->crtc)) {
-		plane_state->visible = false;
-		return 0;
-	}
-
-	if (!crtc_state->enable && !can_update_disabled) {
-		DRM_DEBUG_KMS("Cannot update plane of a disabled CRTC.\n");
-		return -EINVAL;
-	}
-
-	drm_rect_rotate(src, fb->width << 16, fb->height << 16, rotation);
-
-	/* Check scaling */
-	hscale = drm_rect_calc_hscale(src, dst, min_scale, max_scale);
-	vscale = drm_rect_calc_vscale(src, dst, min_scale, max_scale);
-	if (hscale < 0 || vscale < 0) {
-		DRM_DEBUG_KMS("Invalid scaling of plane\n");
-		drm_rect_debug_print("src: ", &plane_state->src, true);
-		drm_rect_debug_print("dst: ", &plane_state->dst, false);
-		return -ERANGE;
-	}
-
-	plane_state->visible = drm_rect_clip_scaled(src, dst, clip, hscale, vscale);
-
-	drm_rect_rotate_inv(src, fb->width << 16, fb->height << 16, rotation);
-
-	if (!plane_state->visible)
-		/*
-		 * Plane isn't visible; some drivers can handle this
-		 * so we just return success here.  Drivers that can't
-		 * (including those that use the primary plane helper's
-		 * update function) will return an error from their
-		 * update_plane handler.
-		 */
-		return 0;
-
-	if (!can_position && !drm_rect_equals(dst, clip)) {
-		DRM_DEBUG_KMS("Plane must cover entire CRTC\n");
-		drm_rect_debug_print("dst: ", dst, false);
-		drm_rect_debug_print("clip: ", clip, false);
-		return -EINVAL;
-	}
-
-	return 0;
-}
-EXPORT_SYMBOL(drm_atomic_helper_check_plane_state);
-
-/**
  * drm_atomic_helper_check_planes - validate state object for planes changes
  * @dev: DRM device
  * @state: the driver state object
@@ -873,11 +779,6 @@ EXPORT_SYMBOL(drm_atomic_helper_check_planes);
  * functions depend upon an updated adjusted_mode.clock to e.g. properly compute
  * watermarks.
  *
- * Note that zpos normalization will add all enable planes to the state which
- * might not desired for some drivers.
- * For example enable/disable of a cursor plane which have fixed zpos value
- * would trigger all other enabled planes to be forced to the state change.
- *
  * RETURNS:
  * Zero for success or -errno
  */
@@ -889,12 +790,6 @@ int drm_atomic_helper_check(struct drm_device *dev,
 	ret = drm_atomic_helper_check_modeset(dev, state);
 	if (ret)
 		return ret;
-
-	if (dev->mode_config.normalize_zpos) {
-		ret = drm_atomic_normalize_zpos(dev, state);
-		if (ret)
-			return ret;
-	}
 
 	ret = drm_atomic_helper_check_planes(dev, state);
 	if (ret)
@@ -1567,6 +1462,8 @@ EXPORT_SYMBOL(drm_atomic_helper_async_check);
  * drm_atomic_async_check() succeeds. Async commits are not supposed to swap
  * the states like normal sync commits, but just do in-place changes on the
  * current state.
+ *
+ * TODO: Implement full swap instead of doing in-place changes.
  */
 void drm_atomic_helper_async_commit(struct drm_device *dev,
 				    struct drm_atomic_state *state)
@@ -1577,8 +1474,16 @@ void drm_atomic_helper_async_commit(struct drm_device *dev,
 	int i;
 
 	for_each_new_plane_in_state(state, plane, plane_state, i) {
+		struct drm_framebuffer *old_fb = plane->state->fb;
+
 		funcs = plane->helper_private;
 		funcs->atomic_async_update(plane, plane_state);
+
+		/*
+		 * Make sure the FBs have been swapped so that cleanups in the
+		 * new_state performs a cleanup in the old FB.
+		 */
+		WARN_ON_ONCE(plane_state->fb != old_fb);
 	}
 }
 EXPORT_SYMBOL(drm_atomic_helper_async_commit);
@@ -3004,7 +2909,7 @@ EXPORT_SYMBOL(drm_atomic_helper_suspend);
 int drm_atomic_helper_commit_duplicated_state(struct drm_atomic_state *state,
 					      struct drm_modeset_acquire_ctx *ctx)
 {
-	int i;
+	int i, ret;
 	struct drm_plane *plane;
 	struct drm_plane_state *new_plane_state;
 	struct drm_connector *connector;
@@ -3023,7 +2928,11 @@ int drm_atomic_helper_commit_duplicated_state(struct drm_atomic_state *state,
 	for_each_new_connector_in_state(state, connector, new_conn_state, i)
 		state->connectors[i].old_state = connector->state;
 
-	return drm_atomic_commit(state);
+	ret = drm_atomic_commit(state);
+
+	state->acquire_ctx = NULL;
+
+	return ret;
 }
 EXPORT_SYMBOL(drm_atomic_helper_commit_duplicated_state);
 
@@ -3371,10 +3280,6 @@ void drm_atomic_helper_plane_reset(struct drm_plane *plane)
 	if (plane->state) {
 		plane->state->plane = plane;
 		plane->state->rotation = DRM_MODE_ROTATE_0;
-
-		/* Reset the alpha value to fully opaque if it matters */
-		if (plane->alpha_property)
-			plane->state->alpha = plane->alpha_property->values[1];
 	}
 }
 EXPORT_SYMBOL(drm_atomic_helper_plane_reset);

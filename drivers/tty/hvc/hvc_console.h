@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * hvc_console.h
  * Copyright (C) 2005 IBM Corporation

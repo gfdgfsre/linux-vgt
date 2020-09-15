@@ -46,8 +46,6 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/spi.h>
 
-#include "internals.h"
-
 static DEFINE_IDR(spi_master_idr);
 
 static void spidev_release(struct device *dev)
@@ -742,9 +740,9 @@ static void spi_set_cs(struct spi_device *spi, bool enable)
 }
 
 #ifdef CONFIG_HAS_DMA
-int spi_map_buf(struct spi_controller *ctlr, struct device *dev,
-		struct sg_table *sgt, void *buf, size_t len,
-		enum dma_data_direction dir)
+static int spi_map_buf(struct spi_controller *ctlr, struct device *dev,
+		       struct sg_table *sgt, void *buf, size_t len,
+		       enum dma_data_direction dir)
 {
 	const bool vmalloced_buf = is_vmalloc_addr(buf);
 	unsigned int max_seg_size = dma_get_max_seg_size(dev);
@@ -823,8 +821,8 @@ int spi_map_buf(struct spi_controller *ctlr, struct device *dev,
 	return 0;
 }
 
-void spi_unmap_buf(struct spi_controller *ctlr, struct device *dev,
-		   struct sg_table *sgt, enum dma_data_direction dir)
+static void spi_unmap_buf(struct spi_controller *ctlr, struct device *dev,
+			  struct sg_table *sgt, enum dma_data_direction dir)
 {
 	if (sgt->orig_nents) {
 		dma_unmap_sg(dev, sgt->sgl, sgt->orig_nents, dir);
@@ -909,6 +907,19 @@ static int __spi_unmap_msg(struct spi_controller *ctlr, struct spi_message *msg)
 	return 0;
 }
 #else /* !CONFIG_HAS_DMA */
+static inline int spi_map_buf(struct spi_controller *ctlr, struct device *dev,
+			      struct sg_table *sgt, void *buf, size_t len,
+			      enum dma_data_direction dir)
+{
+	return -EINVAL;
+}
+
+static inline void spi_unmap_buf(struct spi_controller *ctlr,
+				 struct device *dev, struct sg_table *sgt,
+				 enum dma_data_direction dir)
+{
+}
+
 static inline int __spi_map_msg(struct spi_controller *ctlr,
 				struct spi_message *msg)
 {
@@ -980,6 +991,8 @@ static int spi_map_msg(struct spi_controller *ctlr, struct spi_message *msg)
 		if (max_tx || max_rx) {
 			list_for_each_entry(xfer, &msg->transfers,
 					    transfer_list) {
+				if (!xfer->len)
+					continue;
 				if (!xfer->tx_buf)
 					xfer->tx_buf = ctlr->dummy_tx;
 				if (!xfer->rx_buf)
@@ -1521,22 +1534,6 @@ err_start_queue:
 	spi_destroy_queue(ctlr);
 err_init_queue:
 	return ret;
-}
-
-/**
- * spi_flush_queue - Send all pending messages in the queue from the callers'
- *		     context
- * @ctlr: controller to process queue for
- *
- * This should be used when one wants to ensure all pending messages have been
- * sent before doing something. Is used by the spi-mem code to make sure SPI
- * memory operations do not preempt regular SPI transfers that have been queued
- * before the spi-mem operation.
- */
-void spi_flush_queue(struct spi_controller *ctlr)
-{
-	if (ctlr->transfer == spi_queued_transfer)
-		__spi_pump_messages(ctlr, false);
 }
 
 /*-------------------------------------------------------------------------*/
@@ -2267,7 +2264,8 @@ void spi_unregister_controller(struct spi_controller *ctlr)
 {
 	struct spi_controller *found;
 	int id = ctlr->bus_num;
-	int dummy;
+
+	device_for_each_child(&ctlr->dev, NULL, __unregister);
 
 	/* First make sure that this controller was ever added */
 	mutex_lock(&board_lock);
@@ -2281,7 +2279,6 @@ void spi_unregister_controller(struct spi_controller *ctlr)
 	list_del(&ctlr->list);
 	mutex_unlock(&board_lock);
 
-	dummy = device_for_each_child(&ctlr->dev, NULL, __unregister);
 	device_unregister(&ctlr->dev);
 	/* free bus id */
 	mutex_lock(&board_lock);

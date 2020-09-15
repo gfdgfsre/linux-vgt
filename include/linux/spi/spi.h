@@ -27,7 +27,6 @@ struct property_entry;
 struct spi_controller;
 struct spi_transfer;
 struct spi_flash_read_message;
-struct spi_controller_mem_ops;
 
 /*
  * INTERFACES between SPI master-side drivers and SPI slave protocol handlers,
@@ -377,9 +376,6 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
  *                    transfer_one callback.
  * @handle_err: the subsystem calls the driver to handle an error that occurs
  *		in the generic implementation of transfer_one_message().
- * @mem_ops: optimized/dedicated operations for interactions with SPI memory.
- *	     This field is optional and should only be implemented if the
- *	     controller has native support for memory like operations.
  * @unprepare_message: undo any work done by prepare_message().
  * @slave_abort: abort the ongoing transfer request on an SPI slave controller
  * @spi_flash_read: to support spi-controller hardwares that provide
@@ -567,9 +563,6 @@ struct spi_controller {
 			    struct spi_transfer *transfer);
 	void (*handle_err)(struct spi_controller *ctlr,
 			   struct spi_message *message);
-
-	/* Optimized handlers for SPI memory-like operations. */
-	const struct spi_controller_mem_ops *mem_ops;
 
 	/* gpio chip select */
 	int			*cs_gpios;

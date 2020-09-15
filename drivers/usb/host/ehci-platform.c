@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Generic platform ehci driver
  *
@@ -222,9 +221,9 @@ static int ehci_platform_probe(struct platform_device *dev)
 			if (IS_ERR(priv->phys[phy_num])) {
 				err = PTR_ERR(priv->phys[phy_num]);
 					goto err_put_hcd;
-			} else {
+			} else if (!hcd->phy) {
 				/* Avoiding phy_get() in usb_add_hcd() */
-				hcd->skip_phy_initialization = 1;
+				hcd->phy = priv->phys[phy_num];
 			}
 		}
 

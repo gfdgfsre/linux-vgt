@@ -8,3 +8,4 @@ obj-$(CONFIG_MACH_PISTACHIO)	+= pistachio_marduk.dtb.o
 obj-				+= dummy.o
 
 always				:= $(dtb-y)
+clean-files			:= *.dtb *.dtb.S

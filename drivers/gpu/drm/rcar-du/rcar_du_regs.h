@@ -187,14 +187,14 @@
 
 #define DEFR6			0x000e8
 #define DEFR6_CODE		(0x7778 << 16)
-#define DEFR6_ODPM12_DSMR	(0 << 10)
-#define DEFR6_ODPM12_DISP	(2 << 10)
-#define DEFR6_ODPM12_CDE	(3 << 10)
-#define DEFR6_ODPM12_MASK	(3 << 10)
-#define DEFR6_ODPM02_DSMR	(0 << 8)
-#define DEFR6_ODPM02_DISP	(2 << 8)
-#define DEFR6_ODPM02_CDE	(3 << 8)
-#define DEFR6_ODPM02_MASK	(3 << 8)
+#define DEFR6_ODPM22_DSMR	(0 << 10)
+#define DEFR6_ODPM22_DISP	(2 << 10)
+#define DEFR6_ODPM22_CDE	(3 << 10)
+#define DEFR6_ODPM22_MASK	(3 << 10)
+#define DEFR6_ODPM12_DSMR	(0 << 8)
+#define DEFR6_ODPM12_DISP	(2 << 8)
+#define DEFR6_ODPM12_CDE	(3 << 8)
+#define DEFR6_ODPM12_MASK	(3 << 8)
 #define DEFR6_TCNE1		(1 << 6)
 #define DEFR6_TCNE0		(1 << 4)
 #define DEFR6_MLOS1		(1 << 2)
@@ -285,8 +285,7 @@
  * isn't implemented by other SoC in the Gen3 family it can safely be set
  * unconditionally.
  */
-#define DPLLCR_PLCS0		(1 << 21)
-#define DPLLCR_PLCS0_H3ES1X_WA	(1 << 20)
+#define DPLLCR_PLCS0		(3 << 20)
 #define DPLLCR_CLKE		(1 << 18)
 #define DPLLCR_FDPLL(n)		((n) << 12)
 #define DPLLCR_N(n)		((n) << 5)

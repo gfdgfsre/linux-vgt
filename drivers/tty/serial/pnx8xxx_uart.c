@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * UART driver for PNX8XXX SoCs
  *
@@ -8,6 +7,11 @@
  *
  * Based on drivers/char/serial.c, by Linus Torvalds, Theodore Ts'o.
  * Copyright (C) 2000 Deep Blue Solutions Ltd.
+ *
+ * This file is licensed under the terms of the GNU General Public License
+ * version 2. This program is licensed "as is" without any warranty of
+ * any kind, whether express or implied.
+ *
  */
 
 #if defined(CONFIG_SERIAL_PNX8XXX_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)

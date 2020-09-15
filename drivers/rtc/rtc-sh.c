@@ -359,7 +359,8 @@ static int sh_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
 
 static int sh_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct sh_rtc *rtc = platform_get_drvdata(pdev);
 	unsigned int sec128, sec2, yr, yr100, cf_bit;
 
 	do {
@@ -418,7 +419,8 @@ static int sh_rtc_read_time(struct device *dev, struct rtc_time *tm)
 
 static int sh_rtc_set_time(struct device *dev, struct rtc_time *tm)
 {
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct sh_rtc *rtc = platform_get_drvdata(pdev);
 	unsigned int tmp;
 	int year;
 
@@ -460,7 +462,7 @@ static int sh_rtc_set_time(struct device *dev, struct rtc_time *tm)
 static inline int sh_rtc_read_alarm_value(struct sh_rtc *rtc, int reg_off)
 {
 	unsigned int byte;
-	int value = 0xff;	/* return 0xff for ignored values */
+	int value = -1;			/* return -1 for ignored values */
 
 	byte = readb(rtc->regbase + reg_off);
 	if (byte & AR_ENB) {
@@ -473,7 +475,8 @@ static inline int sh_rtc_read_alarm_value(struct sh_rtc *rtc, int reg_off)
 
 static int sh_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 {
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct sh_rtc *rtc = platform_get_drvdata(pdev);
 	struct rtc_time *tm = &wkalrm->time;
 
 	spin_lock_irq(&rtc->lock);
@@ -506,7 +509,8 @@ static inline void sh_rtc_write_alarm_value(struct sh_rtc *rtc,
 
 static int sh_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 {
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct sh_rtc *rtc = platform_get_drvdata(pdev);
 	unsigned int rcr1;
 	struct rtc_time *tm = &wkalrm->time;
 	int mon;
@@ -719,7 +723,8 @@ static int __exit sh_rtc_remove(struct platform_device *pdev)
 
 static void sh_rtc_set_irq_wake(struct device *dev, int enabled)
 {
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct sh_rtc *rtc = platform_get_drvdata(pdev);
 
 	irq_set_irq_wake(rtc->periodic_irq, enabled);
 

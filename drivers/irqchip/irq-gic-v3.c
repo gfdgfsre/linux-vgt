@@ -60,7 +60,7 @@ struct gic_chip_data {
 };
 
 static struct gic_chip_data gic_data __read_mostly;
-static DEFINE_STATIC_KEY_TRUE(supports_deactivate_key);
+static struct static_key supports_deactivate = STATIC_KEY_INIT_TRUE;
 
 static struct gic_kvm_info gic_v3_kvm_info;
 
@@ -351,7 +351,7 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 		if (likely(irqnr > 15 && irqnr < 1020) || irqnr >= 8192) {
 			int err;
 
-			if (static_branch_likely(&supports_deactivate_key))
+			if (static_key_true(&supports_deactivate))
 				gic_write_eoir(irqnr);
 			else
 				isb();
@@ -359,7 +359,7 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 			err = handle_domain_irq(gic_data.domain, irqnr, regs);
 			if (err) {
 				WARN_ONCE(true, "Unexpected interrupt received!\n");
-				if (static_branch_likely(&supports_deactivate_key)) {
+				if (static_key_true(&supports_deactivate)) {
 					if (irqnr < 8192)
 						gic_write_dir(irqnr);
 				} else {
@@ -370,7 +370,7 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 		}
 		if (irqnr < 16) {
 			gic_write_eoir(irqnr);
-			if (static_branch_likely(&supports_deactivate_key))
+			if (static_key_true(&supports_deactivate))
 				gic_write_dir(irqnr);
 #ifdef CONFIG_SMP
 			/*
@@ -547,7 +547,7 @@ static void gic_cpu_sys_reg_init(void)
 	 */
 	gic_write_bpr1(0);
 
-	if (static_branch_likely(&supports_deactivate_key)) {
+	if (static_key_true(&supports_deactivate)) {
 		/* EOI drops priority only (mode 1) */
 		gic_write_ctlr(ICC_CTLR_EL1_EOImode_drop);
 	} else {
@@ -795,7 +795,7 @@ static int gic_irq_domain_map(struct irq_domain *d, unsigned int irq,
 {
 	struct irq_chip *chip = &gic_chip;
 
-	if (static_branch_likely(&supports_deactivate_key))
+	if (static_key_true(&supports_deactivate))
 		chip = &gic_eoimode1_chip;
 
 	/* SGIs are private to the core kernel */
@@ -974,9 +974,9 @@ static int __init gic_init_bases(void __iomem *dist_base,
 	int err;
 
 	if (!is_hyp_mode_available())
-		static_branch_disable(&supports_deactivate_key);
+		static_key_slow_dec(&supports_deactivate);
 
-	if (static_branch_likely(&supports_deactivate_key))
+	if (static_key_true(&supports_deactivate))
 		pr_info("GIC: Using split EOI/Deactivate mode\n");
 
 	gic_data.fwnode = handle;
@@ -1231,9 +1231,7 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 		goto out_unmap_rdist;
 
 	gic_populate_ppi_partitions(node);
-
-	if (static_branch_likely(&supports_deactivate_key))
-		gic_of_setup_kvm_info(node);
+	gic_of_setup_kvm_info(node);
 	return 0;
 
 out_unmap_rdist:
@@ -1255,6 +1253,7 @@ static struct
 	struct redist_region *redist_regs;
 	u32 nr_redist_regions;
 	bool single_redist;
+	int enabled_rdists;
 	u32 maint_irq;
 	int maint_irq_mode;
 	phys_addr_t vcpu_base;
@@ -1349,8 +1348,10 @@ static int __init gic_acpi_match_gicc(struct acpi_subtable_header *header,
 	 * If GICC is enabled and has valid gicr base address, then it means
 	 * GICR base is presented via GICC
 	 */
-	if ((gicc->flags & ACPI_MADT_ENABLED) && gicc->gicr_base_address)
+	if ((gicc->flags & ACPI_MADT_ENABLED) && gicc->gicr_base_address) {
+		acpi_data.enabled_rdists++;
 		return 0;
+	}
 
 	/*
 	 * It's perfectly valid firmware can pass disabled GICC entry, driver
@@ -1380,8 +1381,10 @@ static int __init gic_acpi_count_gicr_regions(void)
 
 	count = acpi_table_parse_madt(ACPI_MADT_TYPE_GENERIC_INTERRUPT,
 				      gic_acpi_match_gicc, 0);
-	if (count > 0)
+	if (count > 0) {
 		acpi_data.single_redist = true;
+		count = acpi_data.enabled_rdists;
+	}
 
 	return count;
 }
@@ -1533,9 +1536,7 @@ gic_acpi_init(struct acpi_subtable_header *header, const unsigned long end)
 		goto out_fwhandle_free;
 
 	acpi_set_irq_model(ACPI_IRQ_MODEL_GIC, domain_handle);
-
-	if (static_branch_likely(&supports_deactivate_key))
-		gic_acpi_setup_kvm_info();
+	gic_acpi_setup_kvm_info();
 
 	return 0;
 

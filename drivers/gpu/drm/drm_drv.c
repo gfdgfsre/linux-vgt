@@ -32,7 +32,6 @@
 #include <linux/moduleparam.h>
 #include <linux/mount.h>
 #include <linux/slab.h>
-#include <linux/srcu.h>
 
 #include <drm/drm_drv.h>
 #include <drm/drmP.h>
@@ -74,8 +73,6 @@ static struct idr drm_minors_idr;
 static bool drm_core_init_complete = false;
 
 static struct dentry *drm_debugfs_root;
-
-DEFINE_STATIC_SRCU(drm_unplug_srcu);
 
 #define DRM_PRINTK_FMT "[" DRM_NAME ":%s]%s %pV"
 
@@ -367,68 +364,27 @@ void drm_put_dev(struct drm_device *dev)
 }
 EXPORT_SYMBOL(drm_put_dev);
 
-/**
- * drm_dev_enter - Enter device critical section
- * @dev: DRM device
- * @idx: Pointer to index that will be passed to the matching drm_dev_exit()
- *
- * This function marks and protects the beginning of a section that should not
- * be entered after the device has been unplugged. The section end is marked
- * with drm_dev_exit(). Calls to this function can be nested.
- *
- * Returns:
- * True if it is OK to enter the section, false otherwise.
- */
-bool drm_dev_enter(struct drm_device *dev, int *idx)
+static void drm_device_set_unplugged(struct drm_device *dev)
 {
-	*idx = srcu_read_lock(&drm_unplug_srcu);
-
-	if (dev->unplugged) {
-		srcu_read_unlock(&drm_unplug_srcu, *idx);
-		return false;
-	}
-
-	return true;
+	smp_wmb();
+	atomic_set(&dev->unplugged, 1);
 }
-EXPORT_SYMBOL(drm_dev_enter);
-
-/**
- * drm_dev_exit - Exit device critical section
- * @idx: index returned from drm_dev_enter()
- *
- * This function marks the end of a section that should not be entered after
- * the device has been unplugged.
- */
-void drm_dev_exit(int idx)
-{
-	srcu_read_unlock(&drm_unplug_srcu, idx);
-}
-EXPORT_SYMBOL(drm_dev_exit);
 
 /**
  * drm_dev_unplug - unplug a DRM device
  * @dev: DRM device
  *
  * This unplugs a hotpluggable DRM device, which makes it inaccessible to
- * userspace operations. Entry-points can use drm_dev_enter() and
- * drm_dev_exit() to protect device resources in a race free manner. This
+ * userspace operations. Entry-points can use drm_dev_is_unplugged(). This
  * essentially unregisters the device like drm_dev_unregister(), but can be
  * called while there are still open users of @dev.
  */
 void drm_dev_unplug(struct drm_device *dev)
 {
-	/*
-	 * After synchronizing any critical read section is guaranteed to see
-	 * the new value of ->unplugged, and any critical section which might
-	 * still have seen the old value of ->unplugged is guaranteed to have
-	 * finished.
-	 */
-	dev->unplugged = true;
-	synchronize_srcu(&drm_unplug_srcu);
-
 	drm_dev_unregister(dev);
 
 	mutex_lock(&drm_global_mutex);
+	drm_device_set_unplugged(dev);
 	if (dev->open_count == 0)
 		drm_dev_unref(dev);
 	mutex_unlock(&drm_global_mutex);
@@ -549,7 +505,7 @@ int drm_dev_init(struct drm_device *dev,
 	}
 
 	kref_init(&dev->ref);
-	dev->dev = parent;
+	dev->dev = get_device(parent);
 	dev->driver = driver;
 
 	INIT_LIST_HEAD(&dev->filelist);
@@ -616,6 +572,7 @@ err_minors:
 	drm_minor_free(dev, DRM_MINOR_CONTROL);
 	drm_fs_inode_free(dev->anon_inode);
 err_free:
+	put_device(dev->dev);
 	mutex_destroy(&dev->master_mutex);
 	mutex_destroy(&dev->ctxlist_mutex);
 	mutex_destroy(&dev->filelist_mutex);
@@ -650,6 +607,8 @@ void drm_dev_fini(struct drm_device *dev)
 	drm_minor_free(dev, DRM_MINOR_PRIMARY);
 	drm_minor_free(dev, DRM_MINOR_RENDER);
 	drm_minor_free(dev, DRM_MINOR_CONTROL);
+
+	put_device(dev->dev);
 
 	mutex_destroy(&dev->master_mutex);
 	mutex_destroy(&dev->ctxlist_mutex);

@@ -125,7 +125,6 @@ static int rsnd_ssiu_init_gen2(struct rsnd_mod *mod,
 {
 	int hdmi = rsnd_ssi_hdmi_port(io);
 	int ret;
-	u32 mode = 0;
 
 	ret = rsnd_ssiu_init(mod, io, priv);
 	if (ret < 0)
@@ -137,10 +136,8 @@ static int rsnd_ssiu_init_gen2(struct rsnd_mod *mod,
 		 * see
 		 *	rsnd_ssi_config_init()
 		 */
-		mode = 0x1;
+		rsnd_mod_write(mod, SSI_MODE, 0x1);
 	}
-
-	rsnd_mod_write(mod, SSI_MODE, mode);
 
 	if (rsnd_ssi_use_busif(io)) {
 		rsnd_mod_write(mod, SSI_BUSIF_ADINR,
@@ -175,7 +172,7 @@ static int rsnd_ssiu_init_gen2(struct rsnd_mod *mod,
 			i;
 
 		for_each_rsnd_mod_array(i, pos, io, rsnd_ssi_array) {
-			shift	= (i * 4) + 16;
+			shift	= (i * 4) + 20;
 			val	= (val & ~(0xF << shift)) |
 				rsnd_mod_id(pos) << shift;
 		}

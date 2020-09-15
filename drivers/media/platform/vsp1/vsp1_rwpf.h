@@ -1,10 +1,14 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * vsp1_rwpf.h  --  R-Car VSP1 Read and Write Pixel Formatters
  *
- * Copyright (C) 2013-2018 Renesas Electronics Corporation
+ * Copyright (C) 2013-2014 Renesas Electronics Corporation
  *
  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  */
 #ifndef __VSP1_RWPF_H__
 #define __VSP1_RWPF_H__
@@ -23,6 +27,7 @@
 
 struct v4l2_ctrl;
 struct vsp1_dl_manager;
+struct vsp1_pipeline;
 struct vsp1_rwpf;
 struct vsp1_video;
 
@@ -34,6 +39,7 @@ struct vsp1_rwpf {
 	struct vsp1_entity entity;
 	struct v4l2_ctrl_handler ctrls;
 
+	struct vsp1_pipeline *pipe;
 	struct vsp1_video *video;
 
 	unsigned int max_width;
@@ -41,12 +47,9 @@ struct vsp1_rwpf {
 
 	struct v4l2_pix_format_mplane format;
 	const struct vsp1_format_info *fmtinfo;
-	unsigned int brx_input;
+	unsigned int bru_input;
 
 	unsigned int alpha;
-	u32 colorkey;
-	bool colorkey_en;
-	u32 colorkey_alpha;
 
 	u32 mult_alpha;
 	u32 outfmt;
@@ -66,11 +69,6 @@ struct vsp1_rwpf {
 	struct vsp1_rwpf_memory mem;
 
 	struct vsp1_dl_manager *dlm;
-
-	bool interlaced;
-
-	int write_back;
-	dma_addr_t buf_addr[3];
 };
 
 static inline struct vsp1_rwpf *to_rwpf(struct v4l2_subdev *subdev)

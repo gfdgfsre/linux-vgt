@@ -204,7 +204,7 @@ static int plgpio_request(struct gpio_chip *chip, unsigned offset)
 	if (offset >= chip->ngpio)
 		return -EINVAL;
 
-	ret = pinctrl_gpio_request(gpio);
+	ret = pinctrl_request_gpio(gpio);
 	if (ret)
 		return ret;
 
@@ -242,7 +242,7 @@ err1:
 	if (!IS_ERR(plgpio->clk))
 		clk_disable(plgpio->clk);
 err0:
-	pinctrl_gpio_free(gpio);
+	pinctrl_free_gpio(gpio);
 	return ret;
 }
 
@@ -273,7 +273,7 @@ disable_clk:
 	if (!IS_ERR(plgpio->clk))
 		clk_disable(plgpio->clk);
 
-	pinctrl_gpio_free(gpio);
+	pinctrl_free_gpio(gpio);
 }
 
 /* PLGPIO IRQ */

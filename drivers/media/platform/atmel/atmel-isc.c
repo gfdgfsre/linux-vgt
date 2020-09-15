@@ -1555,6 +1555,8 @@ static int isc_async_complete(struct v4l2_async_notifier *notifier)
 	struct vb2_queue *q = &isc->vb2_vidq;
 	int ret;
 
+	INIT_WORK(&isc->awb_work, isc_awb_work);
+
 	ret = v4l2_device_register_subdev_nodes(&isc->v4l2_dev);
 	if (ret < 0) {
 		v4l2_err(&isc->v4l2_dev, "Failed to register subdev nodes\n");
@@ -1614,8 +1616,6 @@ static int isc_async_complete(struct v4l2_async_notifier *notifier)
 		return ret;
 	}
 
-	INIT_WORK(&isc->awb_work, isc_awb_work);
-
 	/* Register video device */
 	strlcpy(vdev->name, ATMEL_ISC_NAME, sizeof(vdev->name));
 	vdev->release		= video_device_release_empty;
@@ -1638,12 +1638,6 @@ static int isc_async_complete(struct v4l2_async_notifier *notifier)
 
 	return 0;
 }
-
-static const struct v4l2_async_notifier_operations isc_async_ops = {
-	.bound = isc_async_bound,
-	.unbind = isc_async_unbind,
-	.complete = isc_async_complete,
-};
 
 static void isc_subdev_cleanup(struct isc_device *isc)
 {
@@ -1728,8 +1722,11 @@ static int isc_parse_dt(struct device *dev, struct isc_device *isc)
 			break;
 		}
 
-		subdev_entity->asd = devm_kzalloc(dev,
-				     sizeof(*subdev_entity->asd), GFP_KERNEL);
+		/* asd will be freed by the subsystem once it's added to the
+		 * notifier list
+		 */
+		subdev_entity->asd = kzalloc(sizeof(*subdev_entity->asd),
+					     GFP_KERNEL);
 		if (subdev_entity->asd == NULL) {
 			of_node_put(rem);
 			ret = -ENOMEM;
@@ -1857,12 +1854,15 @@ static int atmel_isc_probe(struct platform_device *pdev)
 	list_for_each_entry(subdev_entity, &isc->subdev_entities, list) {
 		subdev_entity->notifier.subdevs = &subdev_entity->asd;
 		subdev_entity->notifier.num_subdevs = 1;
-		subdev_entity->notifier.ops = &isc_async_ops;
+		subdev_entity->notifier.bound = isc_async_bound;
+		subdev_entity->notifier.unbind = isc_async_unbind;
+		subdev_entity->notifier.complete = isc_async_complete;
 
 		ret = v4l2_async_notifier_register(&isc->v4l2_dev,
 						   &subdev_entity->notifier);
 		if (ret) {
 			dev_err(dev, "fail to register async notifier\n");
+			kfree(subdev_entity->asd);
 			goto cleanup_subdev;
 		}
 

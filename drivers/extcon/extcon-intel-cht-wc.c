@@ -15,7 +15,7 @@
  * more details.
  */
 
-#include <linux/extcon-provider.h>
+#include <linux/extcon.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/mfd/intel_soc_pmic.h>
@@ -155,7 +155,7 @@ static int cht_wc_extcon_get_charger(struct cht_wc_extcon_data *ext,
 		dev_warn(ext->dev,
 			"Unhandled charger type %d, defaulting to SDP\n",
 			 ret);
-		/* Fall through, treat as SDP */
+		return EXTCON_CHG_USB_SDP;
 	case CHT_WC_USBSRC_TYPE_SDP:
 	case CHT_WC_USBSRC_TYPE_FLOAT_DP_DN:
 	case CHT_WC_USBSRC_TYPE_OTHER:

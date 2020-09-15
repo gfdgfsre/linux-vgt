@@ -82,9 +82,12 @@ static int adv748x_csi2_registered(struct v4l2_subdev *sd)
 			sd->name);
 
 	/*
-	 * The adv748x hardware allows the AFE to route through the TXA.
+	 * The adv748x hardware allows the AFE to route through the TXA, however
+	 * this is not currently supported in this driver.
+	 *
+	 * Link HDMI->TXA, and AFE->TXB directly.
 	 */
-	if (is_txa(tx) && !state->afe.txa_switch) {
+	if (is_txa(tx)) {
 		return adv748x_csi2_register_link(tx, sd->v4l2_dev,
 						  &state->hdmi.sd,
 						  ADV748X_HDMI_SOURCE);
@@ -103,18 +106,6 @@ static const struct v4l2_subdev_internal_ops adv748x_csi2_internal_ops = {
  * v4l2_subdev_video_ops
  */
 
-static int adv748x_csi2_g_std(struct v4l2_subdev *sd, v4l2_std_id *std)
-{
-	struct adv748x_csi2 *tx = adv748x_sd_to_csi2(sd);
-	struct v4l2_subdev *src;
-
-	src = adv748x_get_remote_sd(&tx->pads[ADV748X_CSI2_SINK]);
-	if (!src)
-		return -EPIPE;
-
-	return v4l2_subdev_call(src, video, g_std, std);
-}
-
 static int adv748x_csi2_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct adv748x_csi2 *tx = adv748x_sd_to_csi2(sd);
@@ -128,7 +119,6 @@ static int adv748x_csi2_s_stream(struct v4l2_subdev *sd, int enable)
 }
 
 static const struct v4l2_subdev_video_ops adv748x_csi2_video_ops = {
-	.g_std = adv748x_csi2_g_std,
 	.s_stream = adv748x_csi2_s_stream,
 };
 
@@ -275,29 +265,20 @@ static int adv748x_csi2_init_controls(struct adv748x_csi2 *tx)
 
 int adv748x_csi2_init(struct adv748x_state *state, struct adv748x_csi2 *tx)
 {
-	struct device_node *ep;
 	int ret;
-	unsigned int ch;
 
 	if (!is_tx_enabled(tx))
 		return 0;
 
-	ep = state->endpoints[tx->port];
-	if (of_property_read_u32(ep, "virtual-channel", &ch))
-		ch = 0;
-
-	if (ch > 3)
-		return -EINVAL;
-
 	/* Initialise the virtual channel */
-	adv748x_csi2_set_virtual_channel(tx, ch);
+	adv748x_csi2_set_virtual_channel(tx, 0);
 
 	adv748x_subdev_init(&tx->sd, state, &adv748x_csi2_ops,
 			    MEDIA_ENT_F_UNKNOWN,
 			    is_txa(tx) ? "txa" : "txb");
 
 	/* Ensure that matching is based upon the endpoint fwnodes */
-	tx->sd.fwnode = of_fwnode_handle(ep);
+	tx->sd.fwnode = of_fwnode_handle(state->endpoints[tx->port]);
 
 	/* Register internal ops for incremental subdev registration */
 	tx->sd.internal_ops = &adv748x_csi2_internal_ops;

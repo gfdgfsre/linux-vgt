@@ -48,7 +48,6 @@ struct rockchip_hdmi {
 	const struct rockchip_hdmi_chip_data *chip_data;
 	struct clk *vpll_clk;
 	struct clk *grf_clk;
-	struct dw_hdmi *hdmi;
 };
 
 #define to_rockchip_hdmi(x)	container_of(x, struct rockchip_hdmi, x)
@@ -377,18 +376,14 @@ static int dw_hdmi_rockchip_bind(struct device *dev, struct device *master,
 	drm_encoder_init(drm, encoder, &dw_hdmi_rockchip_encoder_funcs,
 			 DRM_MODE_ENCODER_TMDS, NULL);
 
-	platform_set_drvdata(pdev, hdmi);
-
-	hdmi->hdmi = dw_hdmi_bind(pdev, encoder, plat_data);
+	ret = dw_hdmi_bind(pdev, encoder, plat_data);
 
 	/*
 	 * If dw_hdmi_bind() fails we'll never call dw_hdmi_unbind(),
 	 * which would have called the encoder cleanup.  Do it manually.
 	 */
-	if (IS_ERR(hdmi->hdmi)) {
-		ret = PTR_ERR(hdmi->hdmi);
+	if (ret)
 		drm_encoder_cleanup(encoder);
-	}
 
 	return ret;
 }
@@ -396,9 +391,7 @@ static int dw_hdmi_rockchip_bind(struct device *dev, struct device *master,
 static void dw_hdmi_rockchip_unbind(struct device *dev, struct device *master,
 				    void *data)
 {
-	struct rockchip_hdmi *hdmi = dev_get_drvdata(dev);
-
-	dw_hdmi_unbind(hdmi->hdmi);
+	return dw_hdmi_unbind(dev);
 }
 
 static const struct component_ops dw_hdmi_rockchip_ops = {

@@ -915,6 +915,7 @@ static int rcar_drif_g_fmt_sdr_cap(struct file *file, void *priv,
 {
 	struct rcar_drif_sdr *sdr = video_drvdata(file);
 
+	memset(f->fmt.sdr.reserved, 0, sizeof(f->fmt.sdr.reserved));
 	f->fmt.sdr.pixelformat = sdr->fmt->pixelformat;
 	f->fmt.sdr.buffersize = sdr->fmt->buffersize;
 
@@ -1185,12 +1186,6 @@ error:
 	return ret;
 }
 
-static const struct v4l2_async_notifier_operations rcar_drif_notify_ops = {
-	.bound = rcar_drif_notify_bound,
-	.unbind = rcar_drif_notify_unbind,
-	.complete = rcar_drif_notify_complete,
-};
-
 /* Read endpoint properties */
 static void rcar_drif_get_ep_properties(struct rcar_drif_sdr *sdr,
 					struct fwnode_handle *fwnode)
@@ -1353,7 +1348,9 @@ static int rcar_drif_sdr_probe(struct rcar_drif_sdr *sdr)
 	if (ret)
 		goto error;
 
-	sdr->notifier.ops = &rcar_drif_notify_ops;
+	sdr->notifier.bound = rcar_drif_notify_bound;
+	sdr->notifier.unbind = rcar_drif_notify_unbind;
+	sdr->notifier.complete = rcar_drif_notify_complete;
 
 	/* Register notifier */
 	ret = v4l2_async_notifier_register(&sdr->v4l2_dev, &sdr->notifier);

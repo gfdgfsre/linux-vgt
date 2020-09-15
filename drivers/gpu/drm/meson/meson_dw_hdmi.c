@@ -138,7 +138,6 @@ struct meson_dw_hdmi {
 	struct clk *hdmi_pclk;
 	struct clk *venci_clk;
 	u32 irq_stat;
-	struct dw_hdmi *hdmi;
 };
 #define encoder_to_meson_dw_hdmi(x) \
 	container_of(x, struct meson_dw_hdmi, encoder)
@@ -301,7 +300,7 @@ static void meson_hdmi_phy_setup_mode(struct meson_dw_hdmi *dw_hdmi,
 	}
 }
 
-static inline void meson_dw_hdmi_phy_reset(struct meson_dw_hdmi *dw_hdmi)
+static inline void dw_hdmi_phy_reset(struct meson_dw_hdmi *dw_hdmi)
 {
 	struct meson_drm *priv = dw_hdmi->priv;
 
@@ -408,9 +407,9 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 	msleep(100);
 
 	/* Reset PHY 3 times in a row */
-	meson_dw_hdmi_phy_reset(dw_hdmi);
-	meson_dw_hdmi_phy_reset(dw_hdmi);
-	meson_dw_hdmi_phy_reset(dw_hdmi);
+	dw_hdmi_phy_reset(dw_hdmi);
+	dw_hdmi_phy_reset(dw_hdmi);
+	dw_hdmi_phy_reset(dw_hdmi);
 
 	/* Temporary Disable VENC video stream */
 	if (priv->venc.hdmi_use_enci)
@@ -527,7 +526,7 @@ static irqreturn_t dw_hdmi_top_thread_irq(int irq, void *dev_id)
 		if (stat & HDMITX_TOP_INTR_HPD_RISE)
 			hpd_connected = true;
 
-		dw_hdmi_setup_rx_sense(dw_hdmi->hdmi, hpd_connected,
+		dw_hdmi_setup_rx_sense(dw_hdmi->dev, hpd_connected,
 				       hpd_connected);
 
 		drm_helper_hpd_irq_event(dw_hdmi->encoder.dev);
@@ -698,6 +697,7 @@ static const struct regmap_config meson_dw_hdmi_regmap_config = {
 	.reg_read = meson_dw_hdmi_reg_read,
 	.reg_write = meson_dw_hdmi_reg_write,
 	.max_register = 0x10000,
+	.fast_io = true,
 };
 
 static bool meson_hdmi_connector_is_available(struct device *dev)
@@ -866,12 +866,9 @@ static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 	dw_plat_data->input_bus_format = MEDIA_BUS_FMT_YUV8_1X24;
 	dw_plat_data->input_bus_encoding = V4L2_YCBCR_ENC_709;
 
-	platform_set_drvdata(pdev, meson_dw_hdmi);
-
-	meson_dw_hdmi->hdmi = dw_hdmi_bind(pdev, encoder,
-					   &meson_dw_hdmi->dw_plat_data);
-	if (IS_ERR(meson_dw_hdmi->hdmi))
-		return PTR_ERR(meson_dw_hdmi->hdmi);
+	ret = dw_hdmi_bind(pdev, encoder, &meson_dw_hdmi->dw_plat_data);
+	if (ret)
+		return ret;
 
 	DRM_DEBUG_DRIVER("HDMI controller initialized\n");
 
@@ -881,9 +878,7 @@ static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 static void meson_dw_hdmi_unbind(struct device *dev, struct device *master,
 				   void *data)
 {
-	struct meson_dw_hdmi *meson_dw_hdmi = dev_get_drvdata(dev);
-
-	dw_hdmi_unbind(meson_dw_hdmi->hdmi);
+	dw_hdmi_unbind(dev);
 }
 
 static const struct component_ops meson_dw_hdmi_ops = {

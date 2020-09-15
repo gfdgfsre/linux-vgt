@@ -1,7 +1,7 @@
 /*
  * rcar_du_plane.c  --  R-Car Display Unit Planes
  *
- * Copyright (C) 2013-2018 Renesas Electronics Corporation
+ * Copyright (C) 2013-2015 Renesas Electronics Corporation
  *
  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
  *
@@ -318,6 +318,9 @@ int rcar_du_atomic_check_planes(struct drm_device *dev,
  * Plane Setup
  */
 
+#define RCAR_DU_COLORKEY_NONE		(0 << 24)
+#define RCAR_DU_COLORKEY_SOURCE		(1 << 24)
+#define RCAR_DU_COLORKEY_MASK		(1 << 24)
 
 static void rcar_du_plane_write(struct rcar_du_group *rgrp,
 				unsigned int index, u32 reg, u32 data)
@@ -329,8 +332,8 @@ static void rcar_du_plane_write(struct rcar_du_group *rgrp,
 static void rcar_du_plane_setup_scanout(struct rcar_du_group *rgrp,
 					const struct rcar_du_plane_state *state)
 {
-	unsigned int src_x = state->state.src.x1 >> 16;
-	unsigned int src_y = state->state.src.y1 >> 16;
+	unsigned int src_x = state->state.src_x >> 16;
+	unsigned int src_y = state->state.src_y >> 16;
 	unsigned int index = state->hwindex;
 	unsigned int pitch;
 	bool interlaced;
@@ -354,7 +357,7 @@ static void rcar_du_plane_setup_scanout(struct rcar_du_group *rgrp,
 			dma[i] = gem->paddr + fb->offsets[i];
 		}
 	} else {
-		pitch = drm_rect_width(&state->state.src) >> 16;
+		pitch = state->state.src_w >> 16;
 		dma[0] = 0;
 		dma[1] = 0;
 	}
@@ -506,21 +509,8 @@ static void rcar_du_plane_setup_format_gen3(struct rcar_du_group *rgrp,
 					    unsigned int index,
 					    const struct rcar_du_plane_state *state)
 {
-	struct rcar_du_device *rcdu = rgrp->dev;
-
-	if (rcar_du_has(rcdu, RCAR_DU_FEATURE_R8A7795_REGS)) {
-		rcar_du_plane_write(rgrp, index, PnMR,
-				    PnMR_SPIM_TP_OFF | state->format->pnmr);
-	} else {
-		if (rgrp->index == 0)
-			rcar_du_plane_write(rgrp, index, PnMR,
-					    PnMR_SPIM_TP_OFF |
-					    state->format->pnmr);
-		else
-			rcar_du_plane_write(rgrp, index, PnMR,
-					    PnMR_SPIM_TP_OFF |
-					    PnMR_DDDF_16BPP);
-	}
+	rcar_du_plane_write(rgrp, index, PnMR,
+			    PnMR_SPIM_TP_OFF | state->format->pnmr);
 
 	rcar_du_plane_write(rgrp, index, PnDDCR4,
 			    state->format->edf | PnDDCR4_CODE);
@@ -531,7 +521,6 @@ static void rcar_du_plane_setup_format(struct rcar_du_group *rgrp,
 				       const struct rcar_du_plane_state *state)
 {
 	struct rcar_du_device *rcdu = rgrp->dev;
-	const struct drm_rect *dst = &state->state.dst;
 
 	if (rcdu->info->gen < 3)
 		rcar_du_plane_setup_format_gen2(rgrp, index, state);
@@ -539,10 +528,10 @@ static void rcar_du_plane_setup_format(struct rcar_du_group *rgrp,
 		rcar_du_plane_setup_format_gen3(rgrp, index, state);
 
 	/* Destination position and size */
-	rcar_du_plane_write(rgrp, index, PnDSXR, drm_rect_width(dst));
-	rcar_du_plane_write(rgrp, index, PnDSYR, drm_rect_height(dst));
-	rcar_du_plane_write(rgrp, index, PnDPXR, dst->x1);
-	rcar_du_plane_write(rgrp, index, PnDPYR, dst->y1);
+	rcar_du_plane_write(rgrp, index, PnDSXR, state->state.crtc_w);
+	rcar_du_plane_write(rgrp, index, PnDSYR, state->state.crtc_h);
+	rcar_du_plane_write(rgrp, index, PnDPXR, state->state.crtc_x);
+	rcar_du_plane_write(rgrp, index, PnDPYR, state->state.crtc_y);
 
 	if (rcdu->info->gen < 3) {
 		/* Wrap-around and blinking, disabled */
@@ -576,78 +565,32 @@ void __rcar_du_plane_setup(struct rcar_du_group *rgrp,
 	}
 }
 
-int __rcar_du_plane_atomic_check(struct drm_plane *plane,
-				 struct drm_plane_state *state,
-				 const struct rcar_du_format_info **format)
+static int rcar_du_plane_atomic_check(struct drm_plane *plane,
+				      struct drm_plane_state *state)
 {
-	struct drm_device *dev = plane->dev;
-	struct drm_crtc_state *crtc_state;
-	struct drm_rect clip = {};
-	int ret;
-	struct rcar_du_vsp_plane *rplane = to_rcar_vsp_plane(plane);
-	struct rcar_du_device *rcdu = rplane->vsp->dev;
-	int hdis, vdis;
+	struct rcar_du_plane_state *rstate = to_rcar_plane_state(state);
+	struct rcar_du_plane *rplane = to_rcar_plane(plane);
+	struct rcar_du_device *rcdu = rplane->group->dev;
 
-	if (!state->crtc) {
-		/*
-		 * The visible field is not reset by the DRM core but only
-		 * updated by drm_plane_helper_check_state(), set it manually.
-		 */
-		state->visible = false;
-		*format = NULL;
+	if (!state->fb || !state->crtc) {
+		rstate->format = NULL;
 		return 0;
 	}
 
-	hdis = state->crtc->mode.hdisplay;
-	vdis = state->crtc->mode.vdisplay;
-
-	if ((hdis > 0 && vdis > 0) &&
-	    state->plane->type == DRM_PLANE_TYPE_OVERLAY &&
-	    (((state->crtc_w + state->crtc_x) > hdis) ||
-	    ((state->crtc_h + state->crtc_y) > vdis))) {
-		dev_err(rcdu->dev,
-			"%s: specify (%dx%d) + (%d, %d) < (%dx%d).\n",
-			__func__, state->crtc_w, state->crtc_h, state->crtc_x,
-			state->crtc_y, hdis, vdis);
+	if (state->src_w >> 16 != state->crtc_w ||
+	    state->src_h >> 16 != state->crtc_h) {
+		dev_dbg(rcdu->dev, "%s: scaling not supported\n", __func__);
 		return -EINVAL;
 	}
 
-	crtc_state = drm_atomic_get_crtc_state(state->state, state->crtc);
-	if (IS_ERR(crtc_state))
-		return PTR_ERR(crtc_state);
-
-	if (crtc_state->enable)
-		drm_mode_get_hv_timing(&crtc_state->mode,
-				       &clip.x2, &clip.y2);
-
-	ret = drm_atomic_helper_check_plane_state(state, crtc_state, &clip,
-						  DRM_PLANE_HELPER_NO_SCALING,
-						  DRM_PLANE_HELPER_NO_SCALING,
-						  true, true);
-	if (ret < 0)
-		return ret;
-
-	if (!state->visible) {
-		*format = NULL;
-		return 0;
-	}
-
-	*format = rcar_du_format_info(state->fb->format->format);
-	if (*format == NULL) {
-		dev_dbg(dev->dev, "%s: unsupported format %08x\n", __func__,
+	rstate->format = rcar_du_format_info(state->fb->format->format);
+	if (rstate->format == NULL) {
+		dev_dbg(rcdu->dev, "%s: unsupported format %08x\n", __func__,
 			state->fb->format->format);
 		return -EINVAL;
 	}
 
 	return 0;
-}
-
-static int rcar_du_plane_atomic_check(struct drm_plane *plane,
-				      struct drm_plane_state *state)
-{
-	struct rcar_du_plane_state *rstate = to_rcar_plane_state(state);
-
-	return __rcar_du_plane_atomic_check(plane, state, &rstate->format);
 }
 
 static void rcar_du_plane_atomic_update(struct drm_plane *plane,
@@ -657,7 +600,7 @@ static void rcar_du_plane_atomic_update(struct drm_plane *plane,
 	struct rcar_du_plane_state *old_rstate;
 	struct rcar_du_plane_state *new_rstate;
 
-	if (!plane->state->visible)
+	if (!plane->state->crtc)
 		return;
 
 	rcar_du_plane_setup(rplane);

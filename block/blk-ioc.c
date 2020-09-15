@@ -9,6 +9,7 @@
 #include <linux/blkdev.h>
 #include <linux/slab.h>
 #include <linux/sched/task.h>
+#include <linux/delay.h>
 
 #include "blk.h"
 
@@ -87,6 +88,7 @@ static void ioc_destroy_icq(struct io_cq *icq)
 	 * making it impossible to determine icq_cache.  Record it in @icq.
 	 */
 	icq->__rcu_icq_cache = et->icq_cache;
+	icq->flags |= ICQ_DESTROYED;
 	call_rcu(&icq->__rcu_head, icq_free_icq_rcu);
 }
 
@@ -118,7 +120,7 @@ static void ioc_release_fn(struct work_struct *work)
 			spin_unlock(q->queue_lock);
 		} else {
 			spin_unlock_irqrestore(&ioc->lock, flags);
-			cpu_relax();
+			cpu_chill();
 			spin_lock_irqsave_nested(&ioc->lock, flags, 1);
 		}
 	}
@@ -202,7 +204,7 @@ retry:
 				spin_unlock(icq->q->queue_lock);
 			} else {
 				spin_unlock_irqrestore(&ioc->lock, flags);
-				cpu_relax();
+				cpu_chill();
 				goto retry;
 			}
 		}
@@ -230,15 +232,21 @@ static void __ioc_clear_queue(struct list_head *icq_list)
 {
 	unsigned long flags;
 
+	rcu_read_lock();
 	while (!list_empty(icq_list)) {
 		struct io_cq *icq = list_entry(icq_list->next,
 					       struct io_cq, q_node);
 		struct io_context *ioc = icq->ioc;
 
 		spin_lock_irqsave(&ioc->lock, flags);
+		if (icq->flags & ICQ_DESTROYED) {
+			spin_unlock_irqrestore(&ioc->lock, flags);
+			continue;
+		}
 		ioc_destroy_icq(icq);
 		spin_unlock_irqrestore(&ioc->lock, flags);
 	}
+	rcu_read_unlock();
 }
 
 /**

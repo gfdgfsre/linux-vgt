@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-1.0+
 /*
  * Open Host Controller Interface (OHCI) driver for USB.
  *
@@ -418,19 +417,13 @@ static void ohci_usb_reset (struct ohci_hcd *ohci)
  * other cases where the next software may expect clean state from the
  * "firmware".  this is bus-neutral, unlike shutdown() methods.
  */
-static void
-ohci_shutdown (struct usb_hcd *hcd)
+static void _ohci_shutdown(struct usb_hcd *hcd)
 {
 	struct ohci_hcd *ohci;
 
 	ohci = hcd_to_ohci (hcd);
+	ohci_writel(ohci, (u32) ~0, &ohci->regs->intrdisable);
 
-	/* Locking is not necessary if HC dies */
-	if (!test_bit(HCD_FLAG_DEAD, &hcd->flags))
-		spin_lock_irq(&ohci->lock);
-
-	/* Disable HC interrupts */
-	ohci_writel(ohci, (u32)~0, &ohci->regs->intrdisable);
 	/* Software reset, after which the controller goes into SUSPEND */
 	ohci_writel(ohci, OHCI_HCR, &ohci->regs->cmdstatus);
 	ohci_readl(ohci, &ohci->regs->cmdstatus);	/* flush the writes */
@@ -438,10 +431,16 @@ ohci_shutdown (struct usb_hcd *hcd)
 
 	ohci_writel(ohci, ohci->fminterval, &ohci->regs->fminterval);
 	ohci->rh_state = OHCI_RH_HALTED;
+}
 
-	if (!test_bit(HCD_FLAG_DEAD, &hcd->flags))
-		spin_unlock_irq(&ohci->lock);
+static void ohci_shutdown(struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci(hcd);
+	unsigned long flags;
 
+	spin_lock_irqsave(&ohci->lock, flags);
+	_ohci_shutdown(hcd);
+	spin_unlock_irqrestore(&ohci->lock, flags);
 }
 
 /*-------------------------------------------------------------------------*
@@ -762,7 +761,7 @@ static void io_watchdog_func(unsigned long _ohci)
  died:
 			usb_hc_died(ohci_to_hcd(ohci));
 			ohci_dump(ohci);
-			ohci_shutdown(ohci_to_hcd(ohci));
+			_ohci_shutdown(ohci_to_hcd(ohci));
 			goto done;
 		} else {
 			/* No write back because the done queue was empty */

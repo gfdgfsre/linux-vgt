@@ -480,7 +480,7 @@ static void read_fiforeg(struct sh_flctl *flctl, int rlen, int offset)
 
 	/* initiate DMA transfer */
 	if (flctl->chan_fifo0_rx && rlen >= 32 &&
-		flctl_dma_fifo0_transfer(flctl, buf, rlen, DMA_DEV_TO_MEM) > 0)
+		flctl_dma_fifo0_transfer(flctl, buf, rlen, DMA_FROM_DEVICE) > 0)
 			goto convert;	/* DMA success */
 
 	/* do polling transfer */
@@ -539,7 +539,7 @@ static void write_ec_fiforeg(struct sh_flctl *flctl, int rlen,
 
 	/* initiate DMA transfer */
 	if (flctl->chan_fifo0_tx && rlen >= 32 &&
-		flctl_dma_fifo0_transfer(flctl, buf, rlen, DMA_MEM_TO_DEV) > 0)
+		flctl_dma_fifo0_transfer(flctl, buf, rlen, DMA_TO_DEVICE) > 0)
 			return;	/* DMA success */
 
 	/* do polling transfer */
@@ -1094,11 +1094,14 @@ MODULE_DEVICE_TABLE(of, of_flctl_match);
 
 static struct sh_flctl_platform_data *flctl_parse_dt(struct device *dev)
 {
-	const struct flctl_soc_config *config;
+	const struct of_device_id *match;
+	struct flctl_soc_config *config;
 	struct sh_flctl_platform_data *pdata;
 
-	config = of_device_get_match_data(dev);
-	if (!config) {
+	match = of_match_device(of_flctl_match, dev);
+	if (match)
+		config = (struct flctl_soc_config *)match->data;
+	else {
 		dev_err(dev, "%s: no OF configuration attached\n", __func__);
 		return NULL;
 	}
@@ -1228,7 +1231,7 @@ static int flctl_remove(struct platform_device *pdev)
 	struct sh_flctl *flctl = platform_get_drvdata(pdev);
 
 	flctl_release_dma(flctl);
-	nand_release(nand_to_mtd(&flctl->chip));
+	nand_release(&flctl->chip);
 	pm_runtime_disable(&pdev->dev);
 
 	return 0;

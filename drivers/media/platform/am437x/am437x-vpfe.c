@@ -1848,6 +1848,10 @@ static int vpfe_s_std(struct file *file, void *priv, v4l2_std_id std_id)
 	if (!(sdinfo->inputs[0].capabilities & V4L2_IN_CAP_STD))
 		return -ENODATA;
 
+	/* if trying to set the same std then nothing to do */
+	if (vpfe_standards[vpfe->std_index].std_id == std_id)
+		return 0;
+
 	/* If streaming is started, return error */
 	if (vb2_is_busy(&vpfe->buffer_queue)) {
 		vpfe_err(vpfe, "%s device busy\n", __func__);
@@ -2417,11 +2421,6 @@ static int vpfe_async_complete(struct v4l2_async_notifier *notifier)
 	return vpfe_probe_complete(vpfe);
 }
 
-static const struct v4l2_async_notifier_operations vpfe_async_ops = {
-	.bound = vpfe_async_bound,
-	.complete = vpfe_async_complete,
-};
-
 static struct vpfe_config *
 vpfe_get_pdata(struct platform_device *pdev)
 {
@@ -2595,7 +2594,8 @@ static int vpfe_probe(struct platform_device *pdev)
 
 	vpfe->notifier.subdevs = vpfe->cfg->asd;
 	vpfe->notifier.num_subdevs = ARRAY_SIZE(vpfe->cfg->asd);
-	vpfe->notifier.ops = &vpfe_async_ops;
+	vpfe->notifier.bound = vpfe_async_bound;
+	vpfe->notifier.complete = vpfe_async_complete;
 	ret = v4l2_async_notifier_register(&vpfe->v4l2_dev,
 						&vpfe->notifier);
 	if (ret) {

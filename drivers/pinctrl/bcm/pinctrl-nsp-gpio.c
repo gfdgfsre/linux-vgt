@@ -282,14 +282,14 @@ static int nsp_gpio_request(struct gpio_chip *gc, unsigned offset)
 {
 	unsigned gpio = gc->base + offset;
 
-	return pinctrl_gpio_request(gpio);
+	return pinctrl_request_gpio(gpio);
 }
 
 static void nsp_gpio_free(struct gpio_chip *gc, unsigned offset)
 {
 	unsigned gpio = gc->base + offset;
 
-	pinctrl_gpio_free(gpio);
+	pinctrl_free_gpio(gpio);
 }
 
 static int nsp_gpio_direction_input(struct gpio_chip *gc, unsigned gpio)

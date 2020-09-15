@@ -429,6 +429,7 @@ config MMC_SDHCI_MSM
 	tristate "Qualcomm SDHCI Controller Support"
 	depends on ARCH_QCOM || (ARM && COMPILE_TEST)
 	depends on MMC_SDHCI_PLTFM
+	select MMC_SDHCI_IO_ACCESSORS
 	help
 	  This selects the Secure Digital Host Controller Interface (SDHCI)
 	  support present in Qualcomm SOCs. The controller supports
@@ -606,16 +607,6 @@ config MMC_SDHI_INTERNAL_DMAC
 	  This provides DMA support for SDHI SD/SDIO controllers
 	  using on-chip bus mastering. This supports the controllers
 	  found in arm64 based SoCs.
-
-config MMC_SDHI_PIO
-	bool "Renesas SDHI PIO transfer mode setting"
-	depends on MMC_SDHI
-	help
-	  This setting switches the transfer mode of the PIO and DMA.
-
-	  Select Yes or No according to the following.
-	  When switching the transfer mode from DMA to PIO, say Y here.
-	  When switching the transfer mode from PIO to DMA, say N here.
 
 config MMC_CB710
 	tristate "ENE CB710 MMC/SD Interface support"

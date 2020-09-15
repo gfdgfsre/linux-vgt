@@ -23,3 +23,4 @@ dtb-$(CONFIG_ARCH_MESON) += meson-gxm-rbox-pro.dtb
 
 always		:= $(dtb-y)
 subdir-y	:= $(dts-dirs)
+clean-files	:= *.dtb

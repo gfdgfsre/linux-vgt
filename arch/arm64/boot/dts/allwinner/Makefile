@@ -10,5 +10,9 @@ dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h5-orangepi-prime.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h5-orangepi-zero-plus2.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h5-nanopi-neo2.dtb
 
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a64-tulip-m64.dtb
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a64-tulip-m64-hyp.dtb
+
 always		:= $(dtb-y)
 subdir-y	:= $(dts-dirs)
+clean-files	:= *.dtb

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /* Siemens ID Mouse driver v0.6
 
   This program is free software; you can redistribute it and/or
@@ -342,7 +341,7 @@ static int idmouse_probe(struct usb_interface *interface,
 	int result;
 
 	/* check if we have gotten the data or the hid interface */
-	iface_desc = &interface->altsetting[0];
+	iface_desc = interface->cur_altsetting;
 	if (iface_desc->desc.bInterfaceClass != 0x0A)
 		return -ENODEV;
 

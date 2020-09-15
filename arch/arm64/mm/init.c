@@ -53,10 +53,6 @@
 #include <asm/tlb.h>
 #include <asm/alternative.h>
 
-#if defined(CONFIG_XT_CMA_HELPER)
-#include <xen/xt_cma_helper.h>
-#endif
-
 /*
  * We need to be able to catch inadvertent references to memstart_addr
  * that occur (potentially in generic code) before arm64_memblock_init()
@@ -451,7 +447,7 @@ void __init arm64_memblock_init(void)
 		 * memory spans, randomize the linear region as well.
 		 */
 		if (memstart_offset_seed > 0 && range >= ARM64_MEMSTART_ALIGN) {
-			range = range / ARM64_MEMSTART_ALIGN + 1;
+			range /= ARM64_MEMSTART_ALIGN;
 			memstart_addr -= ARM64_MEMSTART_ALIGN *
 					 ((range * memstart_offset_seed) >> 16);
 		}
@@ -485,10 +481,6 @@ void __init arm64_memblock_init(void)
 	reserve_elfcorehdr();
 
 	high_memory = __va(memblock_end_of_DRAM() - 1) + 1;
-
-#if defined(CONFIG_XT_CMA_HELPER)
-	xt_cma_helper_init();
-#endif
 
 	dma_contiguous_reserve(arm64_dma_phys_limit);
 

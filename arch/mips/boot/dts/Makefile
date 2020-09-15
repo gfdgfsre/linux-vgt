@@ -19,3 +19,4 @@ dtb-$(CONFIG_OF_ALL_DTBS) := $(patsubst $(dtstree)/%.dts,%.dtb, $(foreach d,$(dt
 
 always		:= $(dtb-y)
 subdir-y	:= $(dts-dirs)
+clean-files	:= *.dtb *.dtb.S

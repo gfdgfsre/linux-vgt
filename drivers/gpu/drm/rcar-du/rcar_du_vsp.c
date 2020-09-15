@@ -1,7 +1,7 @@
 /*
- * rcar_du_vsp.c  --  R-Car Display Unit VSP-Based Compositor
+ * rcar_du_vsp.h  --  R-Car Display Unit VSP-Based Compositor
  *
- * Copyright (C) 2015-2019 Renesas Electronics Corporation
+ * Copyright (C) 2015 Renesas Electronics Corporation
  *
  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
  *
@@ -17,9 +17,7 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_cma_helper.h>
 #include <drm/drm_gem_cma_helper.h>
-#include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_plane_helper.h>
-#include <drm/rcar_du_drm.h>
 
 #include <linux/bitops.h>
 #include <linux/dma-mapping.h>
@@ -33,7 +31,7 @@
 #include "rcar_du_kms.h"
 #include "rcar_du_vsp.h"
 
-static void rcar_du_vsp_complete(void *private, bool completed, u32 crc)
+static void rcar_du_vsp_complete(void *private, bool completed)
 {
 	struct rcar_du_crtc *crtc = private;
 
@@ -42,8 +40,6 @@ static void rcar_du_vsp_complete(void *private, bool completed, u32 crc)
 
 	if (completed)
 		rcar_du_crtc_finish_page_flip(crtc);
-
-	drm_crtc_add_crc_entry(&crtc->crtc, false, 0, &crc);
 }
 
 void rcar_du_vsp_enable(struct rcar_du_crtc *crtc)
@@ -59,14 +55,14 @@ void rcar_du_vsp_enable(struct rcar_du_crtc *crtc)
 	struct rcar_du_plane_state state = {
 		.state = {
 			.crtc = &crtc->crtc,
-			.dst.x1 = 0,
-			.dst.y1 = 0,
-			.dst.x2 = mode->hdisplay,
-			.dst.y2 = mode->vdisplay,
-			.src.x1 = 0,
-			.src.y1 = 0,
-			.src.x2 = mode->hdisplay << 16,
-			.src.y2 = mode->vdisplay << 16,
+			.crtc_x = 0,
+			.crtc_y = 0,
+			.crtc_w = mode->hdisplay,
+			.crtc_h = mode->vdisplay,
+			.src_x = 0,
+			.src_y = 0,
+			.src_w = mode->hdisplay << 16,
+			.src_h = mode->vdisplay << 16,
 			.zpos = 0,
 		},
 		.format = rcar_du_format_info(DRM_FORMAT_ARGB8888),
@@ -106,13 +102,7 @@ void rcar_du_vsp_atomic_begin(struct rcar_du_crtc *crtc)
 
 void rcar_du_vsp_atomic_flush(struct rcar_du_crtc *crtc)
 {
-	struct vsp1_du_atomic_pipe_config cfg = { { 0, } };
-	struct rcar_du_crtc_state *state;
-
-	state = to_rcar_crtc_state(crtc->crtc.state);
-	cfg.crc = state->crc;
-
-	vsp1_du_atomic_flush(crtc->vsp->vsp, crtc->vsp_pipe, &cfg);
+	vsp1_du_atomic_flush(crtc->vsp->vsp, crtc->vsp_pipe);
 }
 
 /* Keep the two tables in sync. */
@@ -130,6 +120,7 @@ static const u32 formats_kms[] = {
 	DRM_FORMAT_ARGB8888,
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_UYVY,
+	DRM_FORMAT_VYUY,
 	DRM_FORMAT_YUYV,
 	DRM_FORMAT_YVYU,
 	DRM_FORMAT_NV12,
@@ -158,6 +149,7 @@ static const u32 formats_v4l2[] = {
 	V4L2_PIX_FMT_ABGR32,
 	V4L2_PIX_FMT_XBGR32,
 	V4L2_PIX_FMT_UYVY,
+	V4L2_PIX_FMT_VYUY,
 	V4L2_PIX_FMT_YUYV,
 	V4L2_PIX_FMT_YVYU,
 	V4L2_PIX_FMT_NV12M,
@@ -183,28 +175,18 @@ static void rcar_du_vsp_plane_setup(struct rcar_du_vsp_plane *plane)
 		.pitch = fb->pitches[0],
 		.alpha = state->alpha,
 		.zpos = state->state.zpos,
-		.colorkey = state->colorkey & RCAR_DU_COLORKEY_COLOR_MASK,
-		.colorkey_en =
-			((state->colorkey & RCAR_DU_COLORKEY_EN_MASK) != 0),
-		.colorkey_alpha =
-			(state->colorkey_alpha & RCAR_DU_COLORKEY_ALPHA_MASK),
 	};
 	unsigned int i;
 
-	if (plane->plane.state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE)
-		cfg.interlaced = true;
-	else
-		cfg.interlaced = false;
+	cfg.src.left = state->state.src_x >> 16;
+	cfg.src.top = state->state.src_y >> 16;
+	cfg.src.width = state->state.src_w >> 16;
+	cfg.src.height = state->state.src_h >> 16;
 
-	cfg.src.left = state->state.src.x1 >> 16;
-	cfg.src.top = state->state.src.y1 >> 16;
-	cfg.src.width = drm_rect_width(&state->state.src) >> 16;
-	cfg.src.height = drm_rect_height(&state->state.src) >> 16;
-
-	cfg.dst.left = state->state.dst.x1;
-	cfg.dst.top = state->state.dst.y1;
-	cfg.dst.width = drm_rect_width(&state->state.dst);
-	cfg.dst.height = drm_rect_height(&state->state.dst);
+	cfg.dst.left = state->state.crtc_x;
+	cfg.dst.top = state->state.crtc_y;
+	cfg.dst.width = state->state.crtc_w;
+	cfg.dst.height = state->state.crtc_h;
 
 	for (i = 0; i < state->format->planes; ++i)
 		cfg.mem[i] = sg_dma_address(state->sg_tables[i].sgl)
@@ -227,14 +209,10 @@ static int rcar_du_vsp_plane_prepare_fb(struct drm_plane *plane,
 	struct rcar_du_vsp_plane_state *rstate = to_rcar_vsp_plane_state(state);
 	struct rcar_du_vsp *vsp = to_rcar_vsp_plane(plane)->vsp;
 	struct rcar_du_device *rcdu = vsp->dev;
-	unsigned int i, j;
+	unsigned int i;
 	int ret;
 
-	/*
-	 * There's no need to prepare (and unprepare) the framebuffer when the
-	 * plane is not visible, as it will not be displayed.
-	 */
-	if (!state->visible)
+	if (!state->fb)
 		return 0;
 
 	for (i = 0; i < rstate->format->planes; ++i) {
@@ -242,36 +220,10 @@ static int rcar_du_vsp_plane_prepare_fb(struct drm_plane *plane,
 			drm_fb_cma_get_gem_obj(state->fb, i);
 		struct sg_table *sgt = &rstate->sg_tables[i];
 
-		if (gem->sgt) {
-			struct scatterlist *src;
-			struct scatterlist *dst;
-
-			/*
-			 * If the GEM buffer has a scatter gather table, it has
-			 * been imported from a dma-buf and has no physical
-			 * address as it might not be physically contiguous.
-			 * Copy the original scatter gather table to map it to
-			 * the VSP.
-			 */
-			ret = sg_alloc_table(sgt, gem->sgt->orig_nents,
-					     GFP_KERNEL);
-			if (ret)
-				goto fail;
-
-			src = gem->sgt->sgl;
-			dst = sgt->sgl;
-			for (j = 0; j < gem->sgt->orig_nents; ++j) {
-				sg_set_page(dst, sg_page(src), src->length,
-					    src->offset);
-				src = sg_next(src);
-				dst = sg_next(dst);
-			}
-		} else {
-			ret = dma_get_sgtable(rcdu->dev, sgt, gem->vaddr,
-					      gem->paddr, gem->base.size);
-			if (ret)
-				goto fail;
-		}
+		ret = dma_get_sgtable(rcdu->dev, sgt, gem->vaddr, gem->paddr,
+				      gem->base.size);
+		if (ret)
+			goto fail;
 
 		ret = vsp1_du_map_sg(vsp->vsp, sgt);
 		if (!ret) {
@@ -280,10 +232,6 @@ static int rcar_du_vsp_plane_prepare_fb(struct drm_plane *plane,
 			goto fail;
 		}
 	}
-
-	ret = drm_gem_fb_prepare_fb(plane, state);
-	if (ret)
-		goto fail;
 
 	return 0;
 
@@ -305,7 +253,7 @@ static void rcar_du_vsp_plane_cleanup_fb(struct drm_plane *plane,
 	struct rcar_du_vsp *vsp = to_rcar_vsp_plane(plane)->vsp;
 	unsigned int i;
 
-	if (!state->visible)
+	if (!state->fb)
 		return;
 
 	for (i = 0; i < rstate->format->planes; ++i) {
@@ -320,8 +268,28 @@ static int rcar_du_vsp_plane_atomic_check(struct drm_plane *plane,
 					  struct drm_plane_state *state)
 {
 	struct rcar_du_vsp_plane_state *rstate = to_rcar_vsp_plane_state(state);
+	struct rcar_du_vsp_plane *rplane = to_rcar_vsp_plane(plane);
+	struct rcar_du_device *rcdu = rplane->vsp->dev;
 
-	return __rcar_du_plane_atomic_check(plane, state, &rstate->format);
+	if (!state->fb || !state->crtc) {
+		rstate->format = NULL;
+		return 0;
+	}
+
+	if (state->src_w >> 16 != state->crtc_w ||
+	    state->src_h >> 16 != state->crtc_h) {
+		dev_dbg(rcdu->dev, "%s: scaling not supported\n", __func__);
+		return -EINVAL;
+	}
+
+	rstate->format = rcar_du_format_info(state->fb->format->format);
+	if (rstate->format == NULL) {
+		dev_dbg(rcdu->dev, "%s: unsupported format %08x\n", __func__,
+			state->fb->format->format);
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static void rcar_du_vsp_plane_atomic_update(struct drm_plane *plane,
@@ -330,7 +298,7 @@ static void rcar_du_vsp_plane_atomic_update(struct drm_plane *plane,
 	struct rcar_du_vsp_plane *rplane = to_rcar_vsp_plane(plane);
 	struct rcar_du_crtc *crtc = to_rcar_crtc(old_state->crtc);
 
-	if (plane->state->visible)
+	if (plane->state->crtc)
 		rcar_du_vsp_plane_setup(rplane);
 	else
 		vsp1_du_atomic_update(rplane->vsp->vsp, crtc->vsp_pipe,
@@ -347,22 +315,18 @@ static const struct drm_plane_helper_funcs rcar_du_vsp_plane_helper_funcs = {
 static struct drm_plane_state *
 rcar_du_vsp_plane_atomic_duplicate_state(struct drm_plane *plane)
 {
+	struct rcar_du_vsp_plane_state *state;
 	struct rcar_du_vsp_plane_state *copy;
 
 	if (WARN_ON(!plane->state))
 		return NULL;
 
-	copy = kzalloc(sizeof(*copy), GFP_KERNEL);
+	state = to_rcar_vsp_plane_state(plane->state);
+	copy = kmemdup(state, sizeof(*state), GFP_KERNEL);
 	if (copy == NULL)
 		return NULL;
 
-	memset(to_rcar_vsp_plane_state(plane->state)->sg_tables, 0,
-		sizeof(to_rcar_vsp_plane_state(plane->state)->sg_tables));
-
 	__drm_atomic_helper_plane_duplicate_state(plane, &copy->state);
-	copy->alpha = to_rcar_vsp_plane_state(plane->state)->alpha;
-	copy->colorkey = to_rcar_vsp_plane_state(plane->state)->colorkey;
-	copy->colorkey_alpha = to_rcar_vsp_plane_state(plane->state)->colorkey_alpha;
 
 	return &copy->state;
 }
@@ -388,124 +352,10 @@ static void rcar_du_vsp_plane_reset(struct drm_plane *plane)
 		return;
 
 	state->alpha = 255;
-	state->colorkey = RCAR_DU_COLORKEY_NONE;
-	state->colorkey_alpha = 0;
 	state->state.zpos = plane->type == DRM_PLANE_TYPE_PRIMARY ? 0 : 1;
 
 	plane->state = &state->state;
 	plane->state->plane = plane;
-}
-
-int rcar_du_vsp_write_back(struct drm_device *dev, void *data,
-			   struct drm_file *file_priv)
-{
-	int ret;
-	struct rcar_du_screen_shot *sh = (struct rcar_du_screen_shot *)data;
-	struct drm_mode_object *obj;
-	struct drm_crtc *crtc;
-	struct rcar_du_crtc *rcrtc;
-	struct rcar_du_device *rcdu;
-	const struct drm_display_mode *mode;
-	u32 pixelformat, bpp;
-	unsigned int pitch;
-	dma_addr_t mem[3];
-
-	obj = drm_mode_object_find(dev, sh->crtc_id, DRM_MODE_OBJECT_CRTC);
-	if (!obj)
-		return -EINVAL;
-
-	crtc = obj_to_crtc(obj);
-	rcrtc = to_rcar_crtc(crtc);
-	rcdu = rcrtc->group->dev;
-	mode = &rcrtc->crtc.state->adjusted_mode;
-
-	switch (sh->fmt) {
-	case DRM_FORMAT_RGB565:
-		bpp = 16;
-		pixelformat = V4L2_PIX_FMT_RGB565;
-		break;
-	case DRM_FORMAT_ARGB1555:
-		bpp = 16;
-		pixelformat = V4L2_PIX_FMT_ARGB555;
-		break;
-	case DRM_FORMAT_ARGB8888:
-		bpp = 32;
-		pixelformat = V4L2_PIX_FMT_ABGR32;
-		break;
-	default:
-		dev_err(rcdu->dev, "specified format is not supported.\n");
-		return -EINVAL;
-	}
-
-	pitch = mode->hdisplay * bpp / 8;
-
-	mem[0] = sh->buff;
-	mem[1] = 0;
-	mem[2] = 0;
-
-	if (sh->width != mode->hdisplay ||
-	    sh->height != mode->vdisplay)
-		return -EINVAL;
-
-	if ((pitch * mode->vdisplay) > sh->buff_len)
-		return -EINVAL;
-
-	ret = vsp1_du_setup_wb(rcrtc->vsp->vsp, pixelformat, pitch, mem,
-			       rcrtc->vsp_pipe);
-	if (ret != 0)
-		return ret;
-
-	ret = vsp1_du_wait_wb(rcrtc->vsp->vsp, WB_STAT_CATP_SET,
-			      rcrtc->vsp_pipe);
-	if (ret != 0)
-		return ret;
-
-	ret = rcar_du_async_commit(dev, crtc);
-	if (ret != 0)
-		return ret;
-
-	ret = vsp1_du_wait_wb(rcrtc->vsp->vsp, WB_STAT_CATP_START,
-			      rcrtc->vsp_pipe);
-	if (ret != 0)
-		return ret;
-
-	ret = rcar_du_async_commit(dev, crtc);
-	if (ret != 0)
-		return ret;
-
-	ret = vsp1_du_wait_wb(rcrtc->vsp->vsp, WB_STAT_CATP_DONE,
-			      rcrtc->vsp_pipe);
-	if (ret != 0)
-		return ret;
-
-	return ret;
-}
-
-int rcar_du_set_vmute(struct drm_device *dev, void *data,
-		      struct drm_file *file_priv)
-{
-	struct rcar_du_vmute *vmute =
-		(struct rcar_du_vmute *)data;
-	struct drm_mode_object *obj;
-	struct drm_crtc *crtc;
-	struct rcar_du_crtc *rcrtc;
-	int ret = 0;
-
-	dev_dbg(dev->dev, "CRTC[%d], display:%s\n",
-		vmute->crtc_id, vmute->on ? "off" : "on");
-
-	obj = drm_mode_object_find(dev, vmute->crtc_id, DRM_MODE_OBJECT_CRTC);
-	if (!obj)
-		return -EINVAL;
-
-	crtc = obj_to_crtc(obj);
-	rcrtc = to_rcar_crtc(crtc);
-
-	vsp1_du_if_set_mute(rcrtc->vsp->vsp, vmute->on, rcrtc->vsp_pipe);
-
-	ret = rcar_du_async_commit(dev, crtc);
-
-	return ret;
 }
 
 static int rcar_du_vsp_plane_atomic_set_property(struct drm_plane *plane,
@@ -517,10 +367,6 @@ static int rcar_du_vsp_plane_atomic_set_property(struct drm_plane *plane,
 
 	if (property == rcdu->props.alpha)
 		rstate->alpha = val;
-	else if (property == rcdu->props.colorkey)
-		rstate->colorkey = val;
-	else if (property == rcdu->props.colorkey_alpha)
-		rstate->colorkey_alpha = val;
 	else
 		return -EINVAL;
 
@@ -537,10 +383,6 @@ static int rcar_du_vsp_plane_atomic_get_property(struct drm_plane *plane,
 
 	if (property == rcdu->props.alpha)
 		*val = rstate->alpha;
-	else if (property == rcdu->props.colorkey)
-		*val = rstate->colorkey;
-	else if (property == rcdu->props.colorkey_alpha)
-		*val = rstate->colorkey_alpha;
 	else
 		return -EINVAL;
 
@@ -598,33 +440,6 @@ int rcar_du_vsp_init(struct rcar_du_vsp *vsp, struct device_node *np,
 		plane->vsp = vsp;
 		plane->index = i;
 
-		/* Fix possible crtcs for plane when using VSPDL */
-		if (rcdu->vspdl_fix && vsp->index == VSPDL_CH) {
-			u32 pair_ch;
-			enum rcar_du_output pair_con = RCAR_DU_OUTPUT_DPAD0;
-
-			pair_ch = rcdu->info->routes[pair_con].possible_crtcs;
-
-			if (rcdu->brs_num == 0) {
-				crtcs = BIT(0);
-				if (i > 0)
-					type = DRM_PLANE_TYPE_OVERLAY;
-			} else if (rcdu->brs_num == 1) {
-				if (type == DRM_PLANE_TYPE_PRIMARY)
-					i == 1 ? (crtcs = pair_ch) :
-						 (crtcs = BIT(0));
-				else
-					crtcs = BIT(0);
-			} else {
-				if (type == DRM_PLANE_TYPE_PRIMARY)
-					i == 1 ? (crtcs = pair_ch) :
-						 (crtcs = BIT(0));
-				else
-					i == 4 ? (crtcs = pair_ch) :
-						 (crtcs = BIT(0));
-			}
-		}
-
 		ret = drm_universal_plane_init(rcdu->ddev, &plane->plane, crtcs,
 					       &rcar_du_vsp_plane_funcs,
 					       formats_kms,
@@ -641,13 +456,6 @@ int rcar_du_vsp_init(struct rcar_du_vsp *vsp, struct device_node *np,
 
 		drm_object_attach_property(&plane->plane.base,
 					   rcdu->props.alpha, 255);
-		drm_object_attach_property(&plane->plane.base,
-					   rcdu->props.colorkey,
-					   RCAR_DU_COLORKEY_NONE);
-		if (rcdu->props.colorkey_alpha)
-			drm_object_attach_property(&plane->plane.base,
-						   rcdu->props.colorkey_alpha,
-						   0);
 		drm_plane_create_zpos_property(&plane->plane, 1, 1,
 					       vsp->num_planes - 1);
 	}

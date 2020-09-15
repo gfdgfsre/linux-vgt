@@ -267,7 +267,8 @@ ds1685_rtc_get_ssn(struct ds1685_priv *rtc, u8 *ssn)
 static int
 ds1685_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
-	struct ds1685_priv *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct ds1685_priv *rtc = platform_get_drvdata(pdev);
 	u8 ctrlb, century;
 	u8 seconds, minutes, hours, wday, mday, month, years;
 
@@ -316,7 +317,8 @@ ds1685_rtc_read_time(struct device *dev, struct rtc_time *tm)
 static int
 ds1685_rtc_set_time(struct device *dev, struct rtc_time *tm)
 {
-	struct ds1685_priv *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct ds1685_priv *rtc = platform_get_drvdata(pdev);
 	u8 ctrlb, seconds, minutes, hours, wday, mday, month, years, century;
 
 	/* Fetch the time info from rtc_time. */
@@ -392,7 +394,8 @@ ds1685_rtc_set_time(struct device *dev, struct rtc_time *tm)
 static int
 ds1685_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
-	struct ds1685_priv *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct ds1685_priv *rtc = platform_get_drvdata(pdev);
 	u8 seconds, minutes, hours, mday, ctrlb, ctrlc;
 	int ret;
 
@@ -450,7 +453,8 @@ ds1685_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 static int
 ds1685_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
-	struct ds1685_priv *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct ds1685_priv *rtc = platform_get_drvdata(pdev);
 	u8 ctrlb, seconds, minutes, hours, mday;
 	int ret;
 
@@ -1115,7 +1119,8 @@ static ssize_t
 ds1685_rtc_sysfs_battery_show(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
-	struct ds1685_priv *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct ds1685_priv *rtc = platform_get_drvdata(pdev);
 	u8 ctrld;
 
 	ctrld = rtc->read(rtc, RTC_CTRL_D);
@@ -1135,7 +1140,8 @@ static ssize_t
 ds1685_rtc_sysfs_auxbatt_show(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
-	struct ds1685_priv *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct ds1685_priv *rtc = platform_get_drvdata(pdev);
 	u8 ctrl4a;
 
 	ds1685_rtc_switch_to_bank1(rtc);
@@ -1157,7 +1163,8 @@ static ssize_t
 ds1685_rtc_sysfs_serial_show(struct device *dev,
 			     struct device_attribute *attr, char *buf)
 {
-	struct ds1685_priv *rtc = dev_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct ds1685_priv *rtc = platform_get_drvdata(pdev);
 	u8 ssn[8];
 
 	ds1685_rtc_switch_to_bank1(rtc);

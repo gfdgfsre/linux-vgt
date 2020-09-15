@@ -1,9 +1,13 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Synopsys DesignWare 8250 driver.
  *
  * Copyright 2011 Picochip, Jamie Iles.
  * Copyright 2013 Intel Corporation
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * The Synopsys DesignWare 8250 has an extra feature whereby it detects if the
  * LCR is written whilst busy.  If it is, then a busy detect interrupt is
@@ -311,7 +315,7 @@ static bool dw8250_fallback_dma_filter(struct dma_chan *chan, void *param)
 
 static bool dw8250_idma_filter(struct dma_chan *chan, void *param)
 {
-	return param == chan->device->dev->parent;
+	return param == chan->device->dev;
 }
 
 static void dw8250_quirks(struct uart_port *p, struct dw8250_data *data)
@@ -352,7 +356,7 @@ static void dw8250_quirks(struct uart_port *p, struct dw8250_data *data)
 		}
 	}
 
-	/* Platforms with iDMA */
+	/* Platforms with iDMA 64-bit */
 	if (platform_get_resource_byname(to_platform_device(p->dev),
 					 IORESOURCE_MEM, "lpss_priv")) {
 		data->dma.rx_param = p->dev->parent;
